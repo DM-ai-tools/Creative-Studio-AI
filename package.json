@@ -1,0 +1,20 @@
+{
+  "name": "creativestudio-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "setup": "powershell -ExecutionPolicy Bypass -File ./scripts/setup.ps1",
+    "db:setup": "powershell -ExecutionPolicy Bypass -File ./scripts/setup-database.ps1",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
+    "install:all": "npm run setup",
+    "start:backend": "powershell -ExecutionPolicy Bypass -File ./scripts/run-backend.ps1",
+    "start:frontend": "npm run dev --prefix frontend",
+    "dev:backend": "npm run start:backend",
+    "dev:frontend": "npm run start:frontend",
+    "dev:all": "concurrently -k -n backend,frontend -c blue,green \"npm run start:backend\" \"npm run start:frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
