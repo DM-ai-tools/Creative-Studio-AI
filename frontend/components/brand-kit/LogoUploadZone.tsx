@@ -12,6 +12,7 @@ interface LogoUploadZoneProps {
   uploadLabel: string
   isUploading: boolean
   disabled?: boolean
+  disabledHint?: string
   onChange(event: React.ChangeEvent<HTMLInputElement>): void
 }
 
@@ -24,6 +25,7 @@ export default function LogoUploadZone({
   uploadLabel,
   isUploading,
   disabled,
+  disabledHint,
   onChange,
 }: LogoUploadZoneProps) {
   const isDark = variant === 'dark'
@@ -72,7 +74,7 @@ export default function LogoUploadZone({
             isDark ? 'text-white/90 group-hover:text-accent' : 'text-charcoal group-hover:text-accent'
           )}
         >
-          {isUploading ? 'Uploading…' : previewUrl ? uploadLabel : emptyLabel}
+          {isUploading ? 'Uploading…' : disabled && disabledHint ? disabledHint : previewUrl ? uploadLabel : emptyLabel}
         </span>
       </div>
     </label>

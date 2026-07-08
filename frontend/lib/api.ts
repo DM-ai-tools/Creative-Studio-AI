@@ -73,11 +73,11 @@ export const authApi = {
 
 // ── Brands ────────────────────────────────────────────────────────────────────
 export const brandsApi = {
-  list: () => api.get<Brand[]>('/brands').then((r) => r.data),
+  list: () => api.get<Brand[]>('/brands/').then((r) => r.data),
 
   get: (id: string) => api.get<Brand>(`/brands/${id}`).then((r) => r.data),
 
-  create: (data: Partial<Brand>) => api.post<Brand>('/brands', data).then((r) => r.data),
+  create: (data: Partial<Brand>) => api.post<Brand>('/brands/', data).then((r) => r.data),
 
   update: (id: string, data: Partial<Brand>) =>
     api.put<Brand>(`/brands/${id}`, data).then((r) => r.data),
@@ -96,32 +96,24 @@ export const brandsApi = {
   uploadLogo: (brandId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return api
-      .post<Brand>(`/brands/${brandId}/logo`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      .then((r) => r.data)
+    return api.post<Brand>(`/brands/${brandId}/logo`, form).then((r) => r.data)
   },
 
   uploadLogoOnLight: (brandId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return api
-      .post<BrandKit>(`/brands/${brandId}/logo/on-light`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-      .then((r) => r.data)
+    return api.post<BrandKit>(`/brands/${brandId}/logo/on-light`, form).then((r) => r.data)
   },
 }
 
 // ── Briefs ────────────────────────────────────────────────────────────────────
 export const briefsApi = {
   list: (params?: { status?: string; limit?: number; offset?: number }) =>
-    api.get<Brief[]>('/briefs', { params }).then((r) => r.data),
+    api.get<Brief[]>('/briefs/', { params }).then((r) => r.data),
 
   get: (id: string) => api.get<Brief>(`/briefs/${id}`).then((r) => r.data),
 
-  create: (data: Partial<Brief>) => api.post<Brief>('/briefs', data).then((r) => r.data),
+  create: (data: Partial<Brief>) => api.post<Brief>('/briefs/', data).then((r) => r.data),
 
   update: (id: string, data: Partial<Brief>) =>
     api.put<Brief>(`/briefs/${id}`, data).then((r) => r.data),
@@ -159,7 +151,7 @@ export const briefsApi = {
       .post<{ character_count: number; preview: string; filename: string }>(
         `/briefs/${id}/script-pdf`,
         form,
-        { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 }
+        { timeout: 120_000 }
       )
       .then((r) => r.data)
   },
@@ -170,7 +162,7 @@ export const briefsApi = {
 // ── Variants ──────────────────────────────────────────────────────────────────
 export const variantsApi = {
   list: (params?: { brief_id?: string; status?: string; compliance_status?: string }) =>
-    api.get<Variant[]>('/variants', { params, timeout: 60_000 }).then((r) => r.data),
+    api.get<Variant[]>('/variants/', { params, timeout: 60_000 }).then((r) => r.data),
 
   get: (id: string) => api.get<Variant>(`/variants/${id}`).then((r) => r.data),
 
@@ -196,13 +188,11 @@ export const assetsApi = {
     form.append('file', file)
     if (variantId) form.append('variant_id', variantId)
     form.append('asset_type', assetType)
-    return api
-      .post<Asset>('/assets/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } })
-      .then((r) => r.data)
+    return api.post<Asset>('/assets/upload', form).then((r) => r.data)
   },
 
   list: (params?: { variant_id?: string; asset_type?: string }) =>
-    api.get<Asset[]>('/assets', { params }).then((r) => r.data),
+    api.get<Asset[]>('/assets/', { params }).then((r) => r.data),
 
   delete: (id: string) => api.delete(`/assets/${id}`),
 }

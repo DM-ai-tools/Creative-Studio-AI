@@ -9,9 +9,10 @@ from app.schemas.brand import BrandCreate, BrandKitCreate, BrandKitResponse, Bra
 from app.services.brand_service import BrandService
 from app.services.file_service import file_service
 
-router = APIRouter(prefix="/brands", tags=["brands"])
+router = APIRouter(prefix="/brands", tags=["brands"], redirect_slashes=False)
 
 
+@router.post("", response_model=BrandResponse, status_code=201, include_in_schema=False)
 @router.post("/", response_model=BrandResponse, status_code=201)
 async def create_brand(
     data: BrandCreate,
@@ -21,6 +22,7 @@ async def create_brand(
     return await BrandService.create_brand(db, current_user.tenant_id, data)
 
 
+@router.get("", response_model=list[BrandResponse], include_in_schema=False)
 @router.get("/", response_model=list[BrandResponse])
 async def list_brands(current_user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await BrandService.list_brands(db, current_user.tenant_id)

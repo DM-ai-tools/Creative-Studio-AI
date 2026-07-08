@@ -13,7 +13,7 @@ from app.services.brand_service import BrandService
 from app.services.brief_service import BriefService
 from app.services.variant_service import VariantService
 
-router = APIRouter(prefix="/variants", tags=["variants"])
+router = APIRouter(prefix="/variants", tags=["variants"], redirect_slashes=False)
 
 
 @router.get("/fatigue-alerts")
@@ -21,6 +21,7 @@ async def fatigue_alerts(current_user=Depends(get_current_user), db: AsyncSessio
     return await VariantService.get_fatigue_alerts(db, current_user.tenant_id)
 
 
+@router.get("", response_model=list[VariantResponse], include_in_schema=False)
 @router.get("/", response_model=list[VariantResponse])
 async def list_variants(
     brief_id: Optional[UUID] = Query(None),

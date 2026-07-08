@@ -216,7 +216,12 @@ export default function BrandKitPage() {
 
   const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (!file || !brand) return
+    if (!file) return
+    if (!brand) {
+      toast.error('Save your brand kit first (top-right), then upload a logo')
+      event.target.value = ''
+      return
+    }
     if (!file.type.startsWith('image/')) {
       toast.error('Please upload a PNG or JPG logo')
       return
@@ -240,7 +245,12 @@ export default function BrandKitPage() {
 
   const handleLogoOnLightUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (!file || !brand) return
+    if (!file) return
+    if (!brand) {
+      toast.error('Save your brand kit first (top-right), then upload a logo')
+      event.target.value = ''
+      return
+    }
     if (!file.type.startsWith('image/')) {
       toast.error('Please upload a PNG or JPG logo')
       return
@@ -326,6 +336,7 @@ export default function BrandKitPage() {
                   uploadLabel="Replace logo"
                   isUploading={isUploadingLogo}
                   disabled={!brand}
+                  disabledHint={!brand ? 'Click “Save changes” above first' : undefined}
                   onChange={handleLogoUpload}
                 />
                 <LogoUploadZone
@@ -337,6 +348,7 @@ export default function BrandKitPage() {
                   uploadLabel="Replace light logo"
                   isUploading={isUploadingLogoLight}
                   disabled={!brand}
+                  disabledHint={!brand ? 'Click “Save changes” above first' : undefined}
                   onChange={handleLogoOnLightUpload}
                 />
               </div>

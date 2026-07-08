@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -24,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Railway terminates TLS at the edge; without this, trailing-slash redirects use http://
+# and browsers block them from the HTTPS frontend (brand list/save fails silently).
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 upload_dir = Path(settings.UPLOAD_DIR).resolve()
 

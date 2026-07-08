@@ -23,7 +23,7 @@ from app.services.video_duration import (
 )
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/briefs", tags=["briefs"])
+router = APIRouter(prefix="/briefs", tags=["briefs"], redirect_slashes=False)
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +33,7 @@ class ScriptPdfUploadResponse(BaseModel):
     filename: str
 
 
+@router.post("", response_model=BriefResponse, status_code=201, include_in_schema=False)
 @router.post("/", response_model=BriefResponse, status_code=201)
 async def create_brief(
     data: BriefCreate,
@@ -42,6 +43,7 @@ async def create_brief(
     return await BriefService.create_brief(db, current_user.tenant_id, current_user.id, data)
 
 
+@router.get("", response_model=list[BriefResponse], include_in_schema=False)
 @router.get("/", response_model=list[BriefResponse])
 async def list_briefs(
     status: Optional[str] = Query(None),

@@ -11,7 +11,7 @@ from app.models.asset import Asset
 from app.schemas.performance import AssetResponse
 from app.services.file_service import file_service
 
-router = APIRouter(prefix="/assets", tags=["assets"])
+router = APIRouter(prefix="/assets", tags=["assets"], redirect_slashes=False)
 
 
 @router.post("/upload", response_model=AssetResponse, status_code=201)
@@ -38,6 +38,7 @@ async def upload_asset(
     return asset
 
 
+@router.get("", response_model=list[AssetResponse], include_in_schema=False)
 @router.get("/", response_model=list[AssetResponse])
 async def list_assets(
     variant_id: Optional[UUID] = Query(None),
