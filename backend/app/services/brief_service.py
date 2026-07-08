@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.brief import Brief
 from app.schemas.brief import BriefCreate, BriefUpdate
 
-# Generation is synchronous in the HTTP request — if the server restarts, any RUNNING
-# job with zero saved variants is orphaned immediately.
-_STALE_RUNNING_ZERO_VARIANTS_MINUTES = 2
-_STALE_RUNNING_PARTIAL_MINUTES = 45
+# Generation now runs as a background job (HeyGen can take 15–60+ min).
+# Only treat RUNNING as abandoned when it is truly stale — not mid-render.
+_STALE_RUNNING_ZERO_VARIANTS_MINUTES = 90
+_STALE_RUNNING_PARTIAL_MINUTES = 120
 
 
 class BriefService:

@@ -265,7 +265,11 @@ export default function BriefDetailPage() {
             }
           : {}),
       })
-      toast.success(`${result.variants_created} variants generated!`)
+      toast.success(
+        result.status === 'RUNNING' || result.variants_created === 0
+          ? 'Generation started — HeyGen can take 10–35 min. Stay on this page; variants appear when ready.'
+          : `${result.variants_created} variants generated!`
+      )
       setShowRegenerateModal(false)
       refetchBrief()
       refetchVariants()
@@ -274,15 +278,17 @@ export default function BriefDetailPage() {
       const timedOut =
         (err as { code?: string })?.code === 'ECONNABORTED' ||
         /timeout/i.test(msg ?? '')
+      const networkErr =
+        /network error/i.test(msg ?? '') ||
+        (err as { message?: string })?.message?.toLowerCase() === 'network error'
       toast.error(
-        timedOut
-          ? 'Request timed out — generation may still be running. This page will refresh automatically.'
+        timedOut || networkErr
+          ? 'Connection interrupted — generation may still be running on the server. This page will keep checking.'
           : msg
       )
-      if (timedOut) {
-        void refetchBrief()
-        void refetchVariants()
-      }
+      // Always refresh: generate is fire-and-forget; a network blip does not mean the job died.
+      void refetchBrief()
+      void refetchVariants()
     } finally {
       setIsGenerating(false)
     }

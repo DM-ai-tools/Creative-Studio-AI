@@ -75,3 +75,5 @@ class GenerationRequest(BaseModel):
     higgsfield_voice_preset: Optional[str] = None
     avatar_script: Optional[str] = None
     heygen_settings: Optional[Dict[str, Any]] = None
+    stats_image_url: Optional[str] = None
+    stats_image_urls: Optional[List[str]] = None

@@ -167,6 +167,15 @@ export default function VariantTile({
         </div>
       )}
 
+      {videoUrl === null && missingMotionMedia === false && variant.status === 'READY' && !previewUrl && (
+        <div className="px-3 py-1.5 border-t border-amber-200 bg-amber-50">
+          <p className="text-[9px] text-amber-900 leading-snug">
+            Video metadata exists but the file is missing (often wiped after Railway redeploy).
+            Re-upload Brand Kit logo, attach a Railway volume at /app/uploads, then regenerate.
+          </p>
+        </div>
+      )}
+
       {/* ── Bottom bar ── */}
       <div className="px-3 py-2 flex items-center justify-between gap-2">
         <Badge variant={cb.variant} size="sm">{cb.label}</Badge>

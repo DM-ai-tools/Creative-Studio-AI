@@ -139,9 +139,12 @@ export const briefsApi = {
     }
   ) =>
     api
-      .post<{ message: string; variants_created: number }>(`/briefs/${id}/generate`, data, {
-        timeout: 3_900_000,
-      })
+      .post<{ message: string; variants_created: number; status?: string }>(
+        `/briefs/${id}/generate`,
+        data,
+        // Generation is background now; short timeout is fine — job continues on server.
+        { timeout: 60_000 }
+      )
       .then((r) => r.data),
 
   uploadScriptPdf: (id: string, file: File) => {
