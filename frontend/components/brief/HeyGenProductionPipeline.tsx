@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import AvatarScriptPanel, { type AvatarScriptContext } from '@/components/brief/AvatarScriptPanel'
 import Button from '@/components/ui/Button'
@@ -14,6 +14,8 @@ import { generateSceneBrollDirections } from '@/lib/heygenScriptGeneration'
 import type { HeyGenVideoSettings } from '@/lib/heygenOptions'
 import type { HeyGenCampaignContext } from '@/lib/heygenScriptGeneration'
 import type { CatalogOption, GenerationCatalog, PerformanceStatsContext } from '@/types'
+
+const EMPTY_STATS: PerformanceStatsContext[] = []
 
 type ExportSnapshot = {
   icpText: string | null
@@ -90,6 +92,38 @@ export default function HeyGenProductionPipeline({
     edit: () => void
   } | null>(null)
   const scriptPanelRef = useRef<HTMLDivElement>(null)
+  const onExportSnapshotChangeRef = useRef(onExportSnapshotChange)
+  useEffect(() => {
+    onExportSnapshotChangeRef.current = onExportSnapshotChange
+  }, [onExportSnapshotChange])
+
+  const handleExportSnapshot = useCallback((snap: ExportSnapshot) => {
+    setExportSnap((prev) => {
+      try {
+        if (prev && JSON.stringify(prev) === JSON.stringify(snap)) return prev
+      } catch {
+        /* ignore */
+      }
+      return snap
+    })
+    onExportSnapshotChangeRef.current?.(snap)
+  }, [])
+
+  const handleApproveStateChange = useCallback(
+    (state: { canApprove: boolean; approve: () => void; edit: () => void }) => {
+      setApproveState(state)
+    },
+    []
+  )
+
+  const handleMasterWarnings = useCallback((warnings: string[]) => {
+    setMasterWarnings((prev) => {
+      if (prev.length === warnings.length && prev.every((w, i) => w === warnings[i])) {
+        return prev
+      }
+      return warnings
+    })
+  }, [])
 
   const scriptApproved = Boolean(approvedScript?.trim())
   const brollReady = Boolean(settings.sceneBrollDirections?.trim())
@@ -207,11 +241,8 @@ export default function HeyGenProductionPipeline({
             onApprovedScript={onApprovedScript}
             preloadedStatsImageUrls={preloadedStatsImageUrls}
             showApproveButton={false}
-            onApproveStateChange={setApproveState}
-            onExportSnapshotChange={(snap) => {
-              setExportSnap(snap)
-              onExportSnapshotChange?.(snap)
-            }}
+            onApproveStateChange={handleApproveStateChange}
+            onExportSnapshotChange={handleExportSnapshot}
             onScriptApproved={(script) => {
               void handleScriptApproved(script)
             }}
@@ -224,10 +255,14 @@ export default function HeyGenProductionPipeline({
           avatarScript={scriptForPreview}
           sceneBrollDirections={settings.sceneBrollDirections}
           targetSeconds={durationSeconds}
-          performanceStatsPerImage={exportSnap?.performanceStatsPerImage ?? []}
+          performanceStatsPerImage={
+            exportSnap?.performanceStatsPerImage?.length
+              ? exportSnap.performanceStatsPerImage
+              : EMPTY_STATS
+          }
           scriptApproved={scriptApproved}
           brollReady={brollReady}
-          onWarningsChange={setMasterWarnings}
+          onWarningsChange={handleMasterWarnings}
           onScriptChange={handleMasterScriptEdit}
           exportFileName={exportFileName}
         />

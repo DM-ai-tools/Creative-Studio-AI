@@ -26,3 +26,10 @@ export const API_CACHE_TTL = {
   stats: 60 * 1000,
   variants: 60 * 1000,
 } as const
+
+/** Clear all brief list cache entries (status filters). */
+export function clearBriefListCaches(): void {
+  for (const key of Array.from(store.keys())) {
+    if (key === 'briefs' || key.startsWith('briefs/list/')) store.delete(key)
+  }
+}

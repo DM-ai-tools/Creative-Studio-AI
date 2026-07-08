@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import toast from 'react-hot-toast'
 import Topbar from '@/components/layout/Topbar'
 import Button from '@/components/ui/Button'
@@ -82,6 +82,7 @@ function PipelineNode({ label, state }: { label: string; state: 'done' | 'run' |
 
 export default function BriefDetailPage() {
   const { id } = useParams<{ id: string }>()
+  const router = useRouter()
   const [isGenerating, setIsGenerating] = useState(false)
   const [showRegenerateModal, setShowRegenerateModal] = useState(false)
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null)
@@ -94,6 +95,8 @@ export default function BriefDetailPage() {
   const [ocrStatsPerImage, setOcrStatsPerImage] = useState<PerformanceStatsContext[]>([])
   const hydratedBriefIdRef = useRef<string | null>(null)
   const runningStatusSyncRef = useRef(false)
+  const generateButtonRef = useRef<HTMLDivElement | null>(null)
+  const focusedFromCreateRef = useRef(false)
 
   const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
     cacheKey: 'generation/catalog-v4',
@@ -136,6 +139,26 @@ export default function BriefDetailPage() {
       setOcrStatsPerImage(perImg as PerformanceStatsContext[])
     }
   }, [brief, catalog])
+
+  // From Create Brief (?autogenerate=1): open this brief and highlight Generate.
+  // Do NOT auto-fire the long HeyGen request — that blocked UI/navigation and felt stuck.
+  useEffect(() => {
+    if (focusedFromCreateRef.current) return
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('autogenerate') !== '1') return
+    if (!brief || briefLoading || !genSettings) return
+
+    focusedFromCreateRef.current = true
+    router.replace(`/briefs/${id}`)
+    document.body.style.overflow = ''
+
+    const t = window.setTimeout(() => {
+      generateButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      toast.success('Brief ready — click Generate video to start', { duration: 5000 })
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [brief, briefLoading, genSettings, router, id])
 
   // Poll quietly while a generation job is active — stop once variants are ready.
   useEffect(() => {
@@ -394,7 +417,7 @@ export default function BriefDetailPage() {
         title={brief.title}
         subtitle={`Created ${timeAgo(brief.created_at)}`}
         actions={
-          <div className="flex gap-2">
+          <div ref={generateButtonRef} className="flex gap-2">
             {hasVariants && (
               <Button
                 variant="outline"
@@ -559,11 +582,30 @@ export default function BriefDetailPage() {
               onApprovedScript={setApprovedAvatarScript}
               preloadedStatsImageUrls={statsImageUrls}
               onExportSnapshotChange={(snap) => {
+                // Only sync when data actually changes — identical snapshots used to
+                // re-render the pipeline in a tight loop and freeze sidebar navigation.
                 if (snap.statsImageUrls.length > 0) {
-                  setStatsImageUrls(snap.statsImageUrls)
+                  setStatsImageUrls((prev) => {
+                    const next = snap.statsImageUrls
+                    if (
+                      prev.length === next.length &&
+                      prev.every((u, i) => u === next[i])
+                    ) {
+                      return prev
+                    }
+                    return next
+                  })
                 }
                 if (snap.performanceStatsPerImage?.length) {
-                  setOcrStatsPerImage(snap.performanceStatsPerImage)
+                  setOcrStatsPerImage((prev) => {
+                    const next = snap.performanceStatsPerImage
+                    try {
+                      if (JSON.stringify(prev) === JSON.stringify(next)) return prev
+                    } catch {
+                      /* fall through */
+                    }
+                    return next
+                  })
                 }
               }}
               onPersistScript={async (script) => {

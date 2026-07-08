@@ -1,11 +1,19 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import Button from '@/components/ui/Button'
 import { generationApi } from '@/lib/api'
 import { downloadMasterScriptExcel } from '@/lib/exportMasterScriptExcel'
 import type { PerformanceStatsContext } from '@/types'
+
+function statsFingerprint(stats: PerformanceStatsContext[]): string {
+  try {
+    return JSON.stringify(stats)
+  } catch {
+    return String(stats.length)
+  }
+}
 
 export type MasterBeat = {
   start: string
@@ -44,14 +52,24 @@ export default function MasterScriptPreview({
   const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<string[]>([])
+  const onWarningsChangeRef = useRef(onWarningsChange)
+  onWarningsChangeRef.current = onWarningsChange
+  const statsKey = statsFingerprint(performanceStatsPerImage)
+  const lastFetchKeyRef = useRef('')
 
   useEffect(() => {
     const script = (avatarScript || '').trim()
     if (!script) {
+      lastFetchKeyRef.current = ''
       setBeats([])
       setWarnings([])
+      onWarningsChangeRef.current?.([])
       return
     }
+    const fetchKey = `${script}\0${sceneBrollDirections || ''}\0${targetSeconds}\0${statsKey}`
+    if (fetchKey === lastFetchKeyRef.current) return
+    lastFetchKeyRef.current = fetchKey
+
     let cancelled = false
     setLoading(true)
     generationApi
@@ -65,13 +83,13 @@ export default function MasterScriptPreview({
         if (cancelled) return
         setBeats(res.beats)
         setWarnings(res.warnings)
-        onWarningsChange?.(res.warnings)
+        onWarningsChangeRef.current?.(res.warnings)
       })
       .catch(() => {
         if (!cancelled) {
           const err = ['Could not load master script preview']
           setWarnings(err)
-          onWarningsChange?.(err)
+          onWarningsChangeRef.current?.(err)
         }
       })
       .finally(() => {
@@ -80,12 +98,9 @@ export default function MasterScriptPreview({
     return () => {
       cancelled = true
     }
-  }, [
-    avatarScript,
-    sceneBrollDirections,
-    targetSeconds,
-    performanceStatsPerImage,
-  ])
+    // performanceStatsPerImage content is tracked via statsKey — avoid re-fetch loops from new [] refs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [avatarScript, sceneBrollDirections, targetSeconds, statsKey])
 
   useEffect(() => {
     if (!editing) setDraft(beats.map((b) => b.spoken))

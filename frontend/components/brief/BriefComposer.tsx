@@ -21,7 +21,7 @@ import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
 import { VIDEO_DURATION_OPTIONS, type BriefGenerationSettings } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
-import { API_CACHE_TTL } from '@/lib/apiCache'
+import { API_CACHE_TTL, clearBriefListCaches } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import {
@@ -241,8 +241,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   )
 
   const submitLabel = useMemo(() => {
-    if (wantsVideo && wantsImageOnly) return 'Create brief →'
-    if (wantsVideo) return 'Create brief →'
+    if (wantsVideo && wantsImageOnly) return 'Create & Generate Video'
+    if (wantsVideo) return 'Create & Generate Video'
     if (wantsImageOnly) return 'Create brief →'
     return 'Create brief →'
   }, [wantsVideo, wantsImageOnly])
@@ -697,13 +697,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         toast.success('PDF script imported')
       }
 
+      // Bust list cache so Briefs page shows the new draft immediately if user navigates back.
+      clearBriefListCaches()
+
       toast.success(
         wantsVidOnSubmit
-          ? 'Brief saved — review the pipeline on the next page, then click Generate video'
-          : 'Brief saved — click Generate on the brief page when ready'
+          ? 'Brief created — opening it so you can Generate video'
+          : 'Brief created — opening it now…'
       )
 
-      router.push(`/briefs/${brief.id}`)
+      // Land on the new brief (Generate video is on that page). No list search / refresh needed.
+      router.push(`/briefs/${brief.id}?autogenerate=1`)
     } catch (err: unknown) {
       toast.error(extractApiError(err) || 'Failed to create brief')
     }
