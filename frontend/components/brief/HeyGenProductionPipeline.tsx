@@ -50,6 +50,7 @@ export default function HeyGenProductionPipeline({
   preloadedStatsImageUrls,
   onPersistScript,
   onAfterScriptApproved,
+  exportFileName,
 }: {
   pdfScriptOnly?: boolean
   durationSeconds: number
@@ -76,6 +77,8 @@ export default function HeyGenProductionPipeline({
   /** Save approved script to brief (detail page) */
   onPersistScript?: (script: string) => Promise<void>
   onAfterScriptApproved?: (script: string) => void
+  /** Brief/campaign name for master script Excel export filename. */
+  exportFileName?: string
 }) {
   const brollRef = useRef<HTMLDivElement>(null)
   const [exportSnap, setExportSnap] = useState<ExportSnapshot | null>(null)
@@ -226,6 +229,7 @@ export default function HeyGenProductionPipeline({
           brollReady={brollReady}
           onWarningsChange={setMasterWarnings}
           onScriptChange={handleMasterScriptEdit}
+          exportFileName={exportFileName}
         />
       )}
 

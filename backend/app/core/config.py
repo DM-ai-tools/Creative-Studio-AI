@@ -1,4 +1,6 @@
 from typing import List
+
+import json
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -83,7 +85,37 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE: int = 52_428_800  # 50 MB
 
+    # Railway often supplies env vars as a single string.
+    # Accept either JSON array (e.g. '["https://x.com"]') or comma-separated list
+    # (e.g. 'https://x.com,https://y.com').
     CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+
+    @staticmethod
+    def _parse_list_env(v: object) -> List[str]:
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            try:
+                if s.startswith("[") and s.endswith("]"):
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                # fall back to comma split
+                pass
+            return [p.strip() for p in s.split(",") if p.strip()]
+        return ["http://localhost:3000"]
+
+    @classmethod
+    def model_validate(cls, obj: object, *args, **kwargs):  # type: ignore[override]
+        # pydantic-settings handles env -> field mapping, but we want to be lenient
+        # for CORS_ORIGINS because Railway frequently provides it as a single string.
+        if isinstance(obj, dict) and "CORS_ORIGINS" in obj:
+            obj = {**obj, "CORS_ORIGINS": cls._parse_list_env(obj["CORS_ORIGINS"])}
+        return super().model_validate(obj, *args, **kwargs)
 
     ADMIN_EMAIL: str = "admin@example.com"
     ADMIN_PASSWORD: str = "admin123"

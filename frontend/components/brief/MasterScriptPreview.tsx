@@ -1,8 +1,10 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import toast from 'react-hot-toast'
 import Button from '@/components/ui/Button'
 import { generationApi } from '@/lib/api'
+import { downloadMasterScriptExcel } from '@/lib/exportMasterScriptExcel'
 import type { PerformanceStatsContext } from '@/types'
 
 export type MasterBeat = {
@@ -24,6 +26,7 @@ export default function MasterScriptPreview({
   brollReady,
   onWarningsChange,
   onScriptChange,
+  exportFileName,
 }: {
   avatarScript: string | null
   sceneBrollDirections: string
@@ -33,6 +36,8 @@ export default function MasterScriptPreview({
   brollReady: boolean
   onWarningsChange?: (warnings: string[]) => void
   onScriptChange?: (newScript: string) => void
+  /** Used for the downloaded .xlsx filename (e.g. brief title). */
+  exportFileName?: string
 }) {
   const [beats, setBeats] = useState<MasterBeat[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
@@ -99,6 +104,17 @@ export default function MasterScriptPreview({
     setEditing(false)
   }
 
+  const handleDownloadExcel = () => {
+    if (!beats.length) return
+    downloadMasterScriptExcel(beats, {
+      fileName: exportFileName || 'master-script',
+      warnings,
+      targetSeconds,
+      spokenOverrides: editing ? draft : undefined,
+    })
+    toast.success('Master script downloaded (.xlsx)')
+  }
+
   if (!(avatarScript || '').trim()) {
     return null
   }
@@ -117,21 +133,28 @@ export default function MasterScriptPreview({
             <strong>[INSERT STAT IMAGE]</strong> in B-roll is a timing cue only.
           </p>
         </div>
-        {onScriptChange && beats.length > 0 && (
-          <div className="flex shrink-0 gap-2">
-            {editing ? (
+        {beats.length > 0 && (
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={handleDownloadExcel}>
+              ↓ Download Excel
+            </Button>
+            {onScriptChange && (
               <>
-                <Button size="sm" variant="ghost" onClick={cancelEdits}>
-                  Cancel
-                </Button>
-                <Button size="sm" onClick={saveEdits}>
-                  Save changes
-                </Button>
+                {editing ? (
+                  <>
+                    <Button size="sm" variant="ghost" onClick={cancelEdits}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={saveEdits}>
+                      Save changes
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
+                    ✎ Edit master script
+                  </Button>
+                )}
               </>
-            ) : (
-              <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
-                ✎ Edit master script
-              </Button>
             )}
           </div>
         )}

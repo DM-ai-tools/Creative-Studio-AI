@@ -577,6 +577,7 @@ export default function BriefDetailPage() {
                 }
                 await briefsApi.update(id, { key_benefits: kb })
               }}
+              exportFileName={brief.title}
             />
           </div>
         )}

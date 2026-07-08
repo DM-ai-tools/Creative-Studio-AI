@@ -1202,6 +1202,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   })
                 })
               }}
+              exportFileName={formValues.title}
             />
           )}
 
