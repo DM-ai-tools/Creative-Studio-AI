@@ -367,6 +367,8 @@ export const generationApi = {
     forbidden_words?: string[]
     variation?: 'default' | 'different_hook'
     performance_stats?: PerformanceStatsContext
+    performance_stats_per_image?: PerformanceStatsContext[]
+    stats_image_count?: number
   }) =>
     api
       .post<WebsiteScriptResult>('/generation/website-script', data, { timeout: 120_000 })
@@ -395,6 +397,8 @@ export const generationApi = {
     forbidden_words?: string[]
     variation?: 'default' | 'different_hook'
     performance_stats?: PerformanceStatsContext
+    performance_stats_per_image?: PerformanceStatsContext[]
+    stats_image_count?: number
     source_script?: string
   }) =>
     api

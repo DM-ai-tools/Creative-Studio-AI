@@ -29,7 +29,7 @@ export function buildModelSelectGroups(
       groups: undefined,
     }
   }
-  const groups: SelectOptionGroup[] = [...byProvider.entries()].map(([provider, options]) => ({
+  const groups: SelectOptionGroup[] = Array.from(byProvider.entries()).map(([provider, options]) => ({
     label: PROVIDER_LABELS[provider] ?? provider,
     options,
   }))

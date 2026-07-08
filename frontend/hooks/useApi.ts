@@ -13,7 +13,12 @@ export function useApi<T>(
   fetcher: () => Promise<T>,
   deps: unknown[] = [],
   options?: UseApiOptions
-): { data: T | null; isLoading: boolean; error: string | null; refetch: () => void } {
+): {
+  data: T | null
+  isLoading: boolean
+  error: string | null
+  refetch: (opts?: { background?: boolean }) => Promise<void> | void
+} {
   const cacheKey = options?.cacheKey
   const ttlMs = options?.ttlMs ?? 60_000
 

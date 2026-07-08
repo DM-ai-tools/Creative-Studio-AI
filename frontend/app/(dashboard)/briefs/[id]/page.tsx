@@ -26,15 +26,14 @@ import { getVariantPreviewUrls, isMotionVariantFormat } from '@/lib/variantMedia
 import { videoPreviewAspectClass, videoModalObjectFit } from '@/lib/creativeFormats'
 import { getPipelineNodeStates } from '@/lib/briefPipeline'
 import { cn, formatDate, timeAgo } from '@/lib/utils'
-import type { Brief, BriefStatus, PerformanceStatsContext, Variant } from '@/types'
+import type { Brief, BriefStatus, GenerationCatalog, PerformanceStatsContext, Variant } from '@/types'
 
 function defaultSettingsFromBrief(
   brief: Brief,
-  catalog?: {
-    heygen_avatar_options?: { id: string; label?: string }[]
-    heygen_avatar_featured?: { id: string; label?: string }[]
-    heygen_voice_options?: { id: string }[]
-  }
+  catalog?: Pick<
+    GenerationCatalog,
+    'heygen_avatar_options' | 'heygen_avatar_featured' | 'heygen_voice_options' | 'video_models'
+  >
 ): BriefGenerationSettings {
   const kb = brief.key_benefits ?? {}
   const avatarOpts = catalog?.heygen_avatar_options ?? []
@@ -54,8 +53,8 @@ function defaultSettingsFromBrief(
     imageModel: (kb.image_model as string) || 'nano-banana-2',
     videoModel:
       (kb.video_model as string) ||
-      catalog?.video_models.find((m) => m.id === 'heygen-video-agent')?.id ||
-      catalog?.video_models[0]?.id ||
+      catalog?.video_models?.find((m) => m.id === 'heygen-video-agent')?.id ||
+      catalog?.video_models?.[0]?.id ||
       'heygen-video-agent',
     videoDurationSeconds: Number(kb.video_duration_seconds) || 8,
     heygenAvatarId: defaultAvatar,

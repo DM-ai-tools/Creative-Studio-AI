@@ -136,6 +136,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     statsImageUrl: string | null
     statsImageUrls: string[]
     performanceStats: PerformanceStatsContext | null
+    performanceStatsPerImage: PerformanceStatsContext[]
   }>({
     icpText: null,
     generatedFullScript: null,
@@ -143,6 +144,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     statsImageUrl: null,
     statsImageUrls: [],
     performanceStats: null,
+    performanceStatsPerImage: [],
   })
 
   const {
@@ -1223,7 +1225,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               image and video models — or choose manually from the dropdowns.
             </p>
             <ModelSelectorBlock
-              catalog={catalog}
+              catalog={catalog ?? undefined}
               wantsVideo={wantsVideo}
               genSettings={genSettings}
               setGenSettings={setGenSettings}

@@ -48,7 +48,7 @@ export default function VariantTile({
       : null
 
   const isLandscape = variant.format === 'video'
-  const isPortrait = variant.format === 'reel' || variant.format === 'stories'
+  const isPortrait = variant.format === 'reel'
   // Inline aspect classes so Tailwind scanner always includes them
   const aspectClass = isLandscape
     ? 'aspect-video'

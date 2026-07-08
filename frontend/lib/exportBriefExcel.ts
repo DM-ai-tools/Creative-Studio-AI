@@ -134,7 +134,10 @@ function buildIcpSheet(icpText: string, icpFields: Record<string, string>): Arra
 function kvRows(
   rows: Array<{ step: string; field: string; value: string }>
 ): Array<[string, string, string]> {
-  return [['Step', 'Field', 'Value'], ...rows.map((r) => [r.step, r.field, r.value])]
+  return [
+    ['Step', 'Field', 'Value'],
+    ...rows.map((r): [string, string, string] => [r.step, r.field, r.value]),
+  ]
 }
 
 function buildBriefOverviewSheet(payload: BriefExportPayload): Array<[string, string, string]> {

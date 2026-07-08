@@ -895,7 +895,7 @@ export default function AvatarScriptPanel({
             filename={
               statsItems.length > 1
                 ? `${statsItems.length} dashboards`
-                : statsItems[0]?.file.name
+                : statsItems[0]?.file?.name
             }
             onClear={clearAllStatsItems}
           />

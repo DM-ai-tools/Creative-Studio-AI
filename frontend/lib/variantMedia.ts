@@ -76,10 +76,7 @@ export function getVariantPreviewUrls(variant: Variant) {
     video,
     imageUrl: previewImageUrl,
     videoUrl: previewVideoUrl,
-    imageFailed:
-      image?.status === 'failed' &&
-      !(motionFormat && videoReady) &&
-      image?.status !== 'skipped',
+    imageFailed: image?.status === 'failed' && !(motionFormat && videoReady),
     imageError: image?.error,
     imageSkipped: image?.status === 'skipped',
     videoFailed,
