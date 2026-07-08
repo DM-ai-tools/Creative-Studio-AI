@@ -326,7 +326,9 @@ export interface PerformanceRollup {
 export interface DashboardStats {
   active_variants: number
   avg_roas_7d: number
-  brand_safety_pass_rate: number
+  /** Null when no compliance checks have been recorded yet. */
+  brand_safety_pass_rate: number | null
+  brand_safety_checks?: number
   fatigued_count: number
 }
 

@@ -51,7 +51,16 @@ export default function PerformancePage() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <MetricCard label="Active Variants" value={stats?.active_variants ?? '—'} isLoading={statsLoading} />
           <MetricCard label="Avg ROAS (7d)" value={stats ? formatROAS(stats.avg_roas_7d) : '—'} isLoading={statsLoading} />
-          <MetricCard label="Brand Safety Pass" value={stats ? `${(stats.brand_safety_pass_rate * 100).toFixed(1)}%` : '—'} isLoading={statsLoading} />
+          <MetricCard
+            label="Brand Safety Pass"
+            value={
+              stats?.brand_safety_pass_rate == null
+                ? '—'
+                : `${(stats.brand_safety_pass_rate * 100).toFixed(1)}%`
+            }
+            change={stats?.brand_safety_pass_rate == null ? 'No checks yet' : undefined}
+            isLoading={statsLoading}
+          />
           <MetricCard label="Fatigued" value={stats?.fatigued_count ?? '—'} isLoading={statsLoading} valueColor={stats?.fatigued_count ? 'text-red-500' : undefined} />
         </div>
 

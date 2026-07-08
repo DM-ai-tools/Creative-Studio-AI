@@ -43,7 +43,9 @@ class RollupResponse(BaseModel):
 class DashboardStats(BaseModel):
     active_variants: int
     avg_roas_7d: float
-    brand_safety_pass_rate: float
+    # Null when no compliance checks have been recorded yet (do not fake 100%).
+    brand_safety_pass_rate: Optional[float] = None
+    brand_safety_checks: int = 0
     fatigued_count: int
 
 

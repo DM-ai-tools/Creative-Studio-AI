@@ -85,9 +85,17 @@ export default function DashboardPage() {
           />
           <MetricCard
             label="Brand-Safety Pass"
-            value={stats ? `${(stats.brand_safety_pass_rate * 100).toFixed(1)}%` : '—'}
-            change="pass rate"
-            changeDirection="up"
+            value={
+              statsLoading
+                ? '—'
+                : stats?.brand_safety_pass_rate == null
+                  ? '—'
+                  : `${(stats.brand_safety_pass_rate * 100).toFixed(1)}%`
+            }
+            change={
+              stats?.brand_safety_pass_rate == null ? 'No checks yet' : 'pass rate'
+            }
+            changeDirection={stats?.brand_safety_pass_rate == null ? 'neutral' : 'up'}
             isLoading={statsLoading}
           />
           <MetricCard

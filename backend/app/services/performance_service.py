@@ -34,7 +34,8 @@ class PerformanceService:
         )
         row = safety_result.first()
         passed, checked = (row[0] or 0), (row[1] or 0)
-        pass_rate = (passed / checked) if checked > 0 else 1.0
+        # Empty state: no checks yet — return null (UI shows "No checks yet"), not fake 100%.
+        pass_rate = round(passed / checked, 4) if checked > 0 else None
 
         fatigued_result = await db.execute(
             select(func.count()).where(
@@ -47,7 +48,8 @@ class PerformanceService:
         return DashboardStats(
             active_variants=active_variants,
             avg_roas_7d=round(avg_roas, 2),
-            brand_safety_pass_rate=round(pass_rate, 4),
+            brand_safety_pass_rate=pass_rate,
+            brand_safety_checks=int(checked),
             fatigued_count=fatigued_count,
         )
 

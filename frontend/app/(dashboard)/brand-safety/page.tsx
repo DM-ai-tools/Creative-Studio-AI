@@ -39,7 +39,8 @@ export default function BrandSafetyPage() {
     () => variantsApi.list({ compliance_status: 'WARNING' }), []
   )
 
-  const passRate = stats?.brand_safety_pass_rate ?? 1
+  const passRate = stats?.brand_safety_pass_rate ?? null
+  const hasChecks = passRate != null
 
   return (
     <div>
@@ -50,8 +51,12 @@ export default function BrandSafetyPage() {
         <div className="grid grid-cols-3 gap-3">
           <Card className="col-span-1">
             <div className="text-center">
-              <div className="text-4xl font-black text-navy mb-1">{(passRate * 100).toFixed(1)}%</div>
-              <div className="text-xs font-bold text-lt uppercase tracking-wide">Pass Rate</div>
+              <div className="text-4xl font-black text-navy mb-1">
+                {hasChecks ? `${(passRate * 100).toFixed(1)}%` : '—'}
+              </div>
+              <div className="text-xs font-bold text-lt uppercase tracking-wide">
+                {hasChecks ? 'Pass Rate' : 'No checks yet'}
+              </div>
             </div>
           </Card>
           <Card className="col-span-1">
