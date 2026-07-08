@@ -117,6 +117,69 @@ def _has_source_script(req: AvatarScriptRequest) -> bool:
     return bool((req.source_script or "").strip())
 
 
+def _script_models_to_try(req: AvatarScriptRequest) -> list[str]:
+    """Primary script model plus fallbacks (retired IDs, low credits)."""
+    candidates = [
+        settings.OPENROUTER_MODEL_CLAUDE_SCRIPT,
+        "anthropic/claude-sonnet-4.6",
+        "anthropic/claude-sonnet-4.5",
+        settings.OPENROUTER_MODEL_CLAUDE,
+        "anthropic/claude-haiku-4.5",
+    ]
+    if _has_source_script(req):
+        candidates.append(settings.OPENROUTER_MODEL_CLAUDE)
+    seen: set[str] = set()
+    out: list[str] = []
+    for model in candidates:
+        m = (model or "").strip()
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def _openrouter_script_error_message(err: str, *, has_source: bool) -> str:
+    low = err.lower()
+    if "402" in err or "credit" in low or "afford" in low:
+        return (
+            "OpenRouter credits are too low for a full-length script. "
+            "Add credits at https://openrouter.ai/settings/credits, then try again."
+        )
+    if "401" in err or "unauthorized" in low or "invalid api key" in low or "user not found" in low:
+        return (
+            "OpenRouter API key rejected. On Railway backend, set OPENROUTER_API_KEY "
+            "(no quotes) and redeploy."
+        )
+    if "not a valid model" in low or ("model" in low and "not found" in low):
+        return (
+            "OpenRouter model unavailable. Set OPENROUTER_MODEL_CLAUDE_SCRIPT="
+            "anthropic/claude-sonnet-4.6 on Railway and redeploy the backend."
+        )
+    snippet = err.strip()[:240] or "unknown error"
+    if has_source:
+        return f"Could not convert your pasted script — {snippet}"
+    return f"Script generation failed: {snippet}"
+
+
+def _should_retry_script_model(err: str, *, has_more_models: bool) -> bool:
+    if not has_more_models:
+        return False
+    low = err.lower()
+    return any(
+        token in low or token in err
+        for token in (
+            "402",
+            "credits",
+            "afford",
+            "not a valid model",
+            "not found",
+            "404",
+            "no endpoints found",
+            "model not found",
+        )
+    )
+
+
 def _mock_from_source_script(req: AvatarScriptRequest) -> AvatarScriptResponse | None:
     raw = (req.source_script or "").strip()
     if not raw:
@@ -726,15 +789,14 @@ Rules:
     if req.purpose == "scene_broll":
         max_tokens = max(max_tokens, 2400)
 
-    models_to_try = [settings.OPENROUTER_MODEL_CLAUDE_SCRIPT]
-    if _has_source_script(req) and settings.OPENROUTER_MODEL_CLAUDE not in models_to_try:
-        models_to_try.append(settings.OPENROUTER_MODEL_CLAUDE)
+    models_to_try = _script_models_to_try(req)
 
     try:
         client = ai_service._get_client()
         raw = ""
         last_exc: Exception | None = None
-        for model in models_to_try:
+        used_model = models_to_try[0]
+        for idx, model in enumerate(models_to_try):
             try:
                 raw_response = client.chat.completions.create(
                     model=model,
@@ -745,18 +807,13 @@ Rules:
                     max_tokens=max_tokens,
                 )
                 raw = (raw_response.choices[0].message.content or "").strip()
+                used_model = model
                 break
             except Exception as exc:
                 last_exc = exc
-                err = str(exc).lower()
-                if (
-                    model != models_to_try[-1]
-                    and ("402" in err or "credits" in err or "afford" in err)
-                ):
-                    logger.warning(
-                        "Script model %s failed (credits) — trying fallback",
-                        model,
-                    )
+                err = str(exc)
+                if _should_retry_script_model(err, has_more_models=idx < len(models_to_try) - 1):
+                    logger.warning("Script model %s failed — trying fallback: %s", model, err[:200])
                     continue
                 raise
         if not raw and last_exc:
@@ -784,7 +841,7 @@ Rules:
                 full_script=full_script,
                 word_count=word_count,
                 estimated_seconds=round(word_count / WPS, 1),
-                model_id=settings.OPENROUTER_MODEL_CLAUDE_SCRIPT,
+                model_id=used_model,
                 model_label=MODEL_LABEL,
                 validations=_build_validations(
                     spoken,
@@ -814,7 +871,7 @@ Rules:
             full_script=full_script,
             word_count=word_count,
             estimated_seconds=round(estimated, 1),
-            model_id=settings.OPENROUTER_MODEL_CLAUDE_SCRIPT,
+            model_id=used_model,
             model_label=MODEL_LABEL,
             validations=_build_validations(
                 spoken,
@@ -829,17 +886,7 @@ Rules:
         logger.exception("Avatar script generation failed")
         err = str(exc)
         if settings.OPENROUTER_API_KEY:
-            if "402" in err or "credits" in err.lower() or "afford" in err.lower():
-                raise ValueError(
-                    "OpenRouter credits are too low for a full-length script. "
-                    "Add credits at https://openrouter.ai/settings/credits, then try again."
-                ) from exc
-            if _has_source_script(req):
-                raise ValueError(
-                    "Could not convert your pasted script — AI service error. "
-                    "Check OpenRouter credits and restart the backend."
-                ) from exc
-            raise ValueError(f"Script generation failed: {err[:240]}") from exc
+            raise ValueError(_openrouter_script_error_message(err, has_source=_has_source_script(req))) from exc
         mock_from_source = _mock_from_source_script(req)
         if mock_from_source:
             return mock_from_source

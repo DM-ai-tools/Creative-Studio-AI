@@ -17,8 +17,9 @@ class AIService:
             import openai
 
             headers = {"X-Title": settings.APP_NAME}
-            if settings.OPENROUTER_HTTP_REFERER:
-                headers["HTTP-Referer"] = settings.OPENROUTER_HTTP_REFERER
+            referer = settings.openrouter_http_referer
+            if referer:
+                headers["HTTP-Referer"] = referer
 
             self._client = openai.OpenAI(
                 api_key=settings.OPENROUTER_API_KEY,

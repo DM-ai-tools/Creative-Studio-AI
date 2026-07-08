@@ -1,6 +1,7 @@
 from typing import List
 
 import json
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,7 +24,7 @@ class Settings(BaseSettings):
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_HTTP_REFERER: str = "http://localhost:3000"
     OPENROUTER_MODEL_CLAUDE: str = "anthropic/claude-haiku-4.5"
-    OPENROUTER_MODEL_CLAUDE_SCRIPT: str = "anthropic/claude-sonnet-4"
+    OPENROUTER_MODEL_CLAUDE_SCRIPT: str = "anthropic/claude-sonnet-4.6"
     OPENROUTER_MODEL_VISION: str = "google/gemini-2.5-flash"
     OPENROUTER_MODEL_OPENAI: str = "openai/gpt-4o-mini"
     OPENROUTER_MODEL_IMAGE: str = "google/gemini-3.1-flash-image-preview"
@@ -119,6 +120,28 @@ class Settings(BaseSettings):
 
     ADMIN_EMAIL: str = "admin@example.com"
     ADMIN_PASSWORD: str = "admin123"
+
+    @field_validator(
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL_CLAUDE",
+        "OPENROUTER_MODEL_CLAUDE_SCRIPT",
+        "OPENROUTER_MODEL_VISION",
+        mode="before",
+    )
+    @classmethod
+    def _strip_env_string(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.strip().strip('"').strip("'")
+        return v
+
+    @property
+    def openrouter_http_referer(self) -> str:
+        ref = (self.OPENROUTER_HTTP_REFERER or "").strip()
+        if ref and ref != "http://localhost:3000":
+            return ref
+        if self.CORS_ORIGINS:
+            return self.CORS_ORIGINS[0]
+        return ref or "http://localhost:3000"
 
     @property
     def is_production(self) -> bool:
