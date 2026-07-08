@@ -9,6 +9,7 @@ from app.schemas.generation import (
     GenerationModelOption,
 )
 from app.services.heygen_catalog import (
+    clear_heygen_avatar_catalog_cache,
     get_heygen_avatar_featured,
     get_heygen_avatar_options,
     get_heygen_voice_options,
@@ -29,8 +30,17 @@ _CATALOG_LOCK = Lock()
 _CATALOG_TTL_SEC = 300
 
 
-def get_generation_catalog() -> GenerationCatalogResponse:
+def clear_generation_catalog_cache() -> None:
     global _CATALOG_CACHE
+    with _CATALOG_LOCK:
+        _CATALOG_CACHE = None
+    clear_heygen_avatar_catalog_cache()
+
+
+def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogResponse:
+    global _CATALOG_CACHE
+    if refresh:
+        clear_generation_catalog_cache()
     now = time.time()
     with _CATALOG_LOCK:
         if _CATALOG_CACHE and now - _CATALOG_CACHE[0] < _CATALOG_TTL_SEC:

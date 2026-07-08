@@ -86,7 +86,7 @@ interface SidebarProps {
 
 export default function Sidebar({ user, brandName, brandSubtitle, onLogout }: SidebarProps) {
   return (
-    <aside className="hidden md:flex w-[260px] flex-shrink-0 flex-col h-screen sticky top-0 bg-sidebar shadow-sidebar border-r border-white/[0.06]">
+    <aside className="hidden md:flex w-[260px] flex-shrink-0 flex-col h-screen sticky top-0 z-30 bg-sidebar shadow-sidebar border-r border-white/[0.06]">
       {/* Logo */}
       <div className="px-5 py-5 border-b border-white/[0.08]">
         <div className="flex items-center gap-2.5">

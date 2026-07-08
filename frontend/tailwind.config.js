@@ -4,6 +4,7 @@ module.exports = {
     './pages/**/*.{js,ts,jsx,tsx,mdx}',
     './components/**/*.{js,ts,jsx,tsx,mdx}',
     './app/**/*.{js,ts,jsx,tsx,mdx}',
+    './lib/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
     extend: {
@@ -77,5 +78,22 @@ module.exports = {
       },
     },
   },
+  safelist: [
+    'aspect-video',
+    'aspect-square',
+    'aspect-[9/16]',
+    'aspect-[16/9]',
+    'object-cover',
+    'object-contain',
+    'grid-cols-1',
+    'grid-cols-2',
+    'grid-cols-3',
+    'grid-cols-4',
+    'sm:grid-cols-2',
+    'sm:grid-cols-3',
+    'md:grid-cols-3',
+    'md:grid-cols-4',
+    'lg:grid-cols-4',
+  ],
   plugins: [],
 }

@@ -59,10 +59,13 @@ export function useApi<T>(
     [...deps, cacheKey, ttlMs]
   )
 
-  const refetch = useCallback(() => {
-    if (cacheKey) clearApiCache(cacheKey)
-    return load()
-  }, [cacheKey, load])
+  const refetch = useCallback(
+    (opts?: { background?: boolean }) => {
+      if (cacheKey && !opts?.background) clearApiCache(cacheKey)
+      return load({ background: opts?.background })
+    },
+    [cacheKey, load]
+  )
 
   useEffect(() => {
     mountedRef.current = true

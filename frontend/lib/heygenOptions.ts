@@ -19,18 +19,19 @@ export interface HeyGenVideoSettings {
   burnInCaptions: boolean
   brandStyledOverlay: boolean
   visualCues: string
+  sceneBrollDirections: string
 }
 
 export const DEFAULT_HEYGEN_SETTINGS: HeyGenVideoSettings = {
   aspectRatio: '9:16',
   aspectRatioCustom: '',
-  scene: 'neutral_studio',
+  scene: 'office',
   sceneCustom: '',
   cameraFraming: 'medium_close',
   cameraFramingCustom: '',
   deliveryStyle: 'conversational',
   deliveryStyleCustom: '',
-  brollInsert: 'auto',
+  brollInsert: 'directed',
   brollInsertCustom: '',
   music: 'upbeat_acoustic',
   musicCustom: '',
@@ -38,6 +39,7 @@ export const DEFAULT_HEYGEN_SETTINGS: HeyGenVideoSettings = {
   burnInCaptions: true,
   brandStyledOverlay: true,
   visualCues: '',
+  sceneBrollDirections: '',
 }
 
 export const HEYGEN_ASPECT_OPTIONS: CatalogOption[] = [
@@ -47,9 +49,9 @@ export const HEYGEN_ASPECT_OPTIONS: CatalogOption[] = [
 ]
 
 export const HEYGEN_SCENE_OPTIONS: CatalogOption[] = [
-  { id: 'neutral_studio', label: 'Neutral studio' },
+  { id: 'office', label: 'Professional agency / IT office (recommended)' },
+  { id: 'neutral_studio', label: 'Neutral studio (tech-agency backdrop)' },
   { id: 'coffee_shop', label: 'Coffee shop interior (warm)' },
-  { id: 'office', label: 'Modern office' },
   { id: 'outdoor', label: 'Outdoor natural light' },
 ]
 
@@ -66,7 +68,8 @@ export const HEYGEN_DELIVERY_OPTIONS: CatalogOption[] = [
 ]
 
 export const HEYGEN_BROLL_OPTIONS: CatalogOption[] = [
-  { id: 'auto', label: 'Auto-suggest (recommended)' },
+  { id: 'directed', label: 'Use my scene directions (recommended)' },
+  { id: 'auto', label: 'Auto-suggest (HeyGen picks B-roll)' },
   { id: 'product', label: 'Product inserts' },
   { id: 'none', label: 'Avatar only' },
 ]
@@ -150,6 +153,7 @@ export function heygenSettingsForApi(settings: HeyGenVideoSettings) {
     burn_in_captions: settings.burnInCaptions,
     brand_styled_overlay: settings.brandStyledOverlay,
     visual_cues: settings.visualCues,
+    scene_broll_directions: settings.sceneBrollDirections,
   }
 }
 
@@ -210,6 +214,7 @@ export function heygenSettingsFromApi(raw: Record<string, unknown> | undefined):
     burnInCaptions: raw.burn_in_captions !== false,
     brandStyledOverlay: raw.brand_styled_overlay !== false,
     visualCues: String(raw.visual_cues ?? ''),
+    sceneBrollDirections: String(raw.scene_broll_directions ?? ''),
   }
 }
 

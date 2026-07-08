@@ -1,5 +1,14 @@
 import type { CatalogOption, GenerationCatalog } from '@/types'
 
+/** Public HeyGen look id — Annie Office Standing Front. */
+export const HEYGEN_ANNIE_OFFICE_AVATAR_ID = 'Annie_Office_Standing_Front_public'
+
+export const HEYGEN_ANNIE_OFFICE_AVATAR: CatalogOption = {
+  id: HEYGEN_ANNIE_OFFICE_AVATAR_ID,
+  label: 'Annie Office Standing Front (Female)',
+  gender: 'female',
+}
+
 /** Public HeyGen look id — Vespri (from app.heygen.com avatars/looks/public). */
 export const HEYGEN_VESPRI_AVATAR_ID = '25777ee579284b9d9081bc95c49c5f00'
 
@@ -14,6 +23,14 @@ export function splitHeyGenAvatarOptions(options: CatalogOption[]) {
   const featured = options.filter((o) => !o.label.includes(' — '))
   const poses = options.filter((o) => o.label.includes(' — '))
   return { featured, poses }
+}
+
+export function isAnnieLabel(label: string): boolean {
+  return label.toLowerCase().includes('annie')
+}
+
+export function isAnnieOption(option: CatalogOption): boolean {
+  return option.id === HEYGEN_ANNIE_OFFICE_AVATAR_ID || isAnnieLabel(option.label)
 }
 
 export function isVespriLabel(label: string): boolean {
@@ -46,7 +63,13 @@ export function normalizeVespriInList(options: CatalogOption[]): CatalogOption[]
   return [HEYGEN_VESPRI_AVATAR, ...withoutDupes]
 }
 
-/** Featured looks first (Vespri guaranteed), then pose library for dropdowns. */
+/** Always surface Annie in the picker (even if API cache is stale). */
+export function ensureAnnieInFeatured(featured: CatalogOption[]): CatalogOption[] {
+  const without = featured.filter((o) => o.id !== HEYGEN_ANNIE_OFFICE_AVATAR_ID)
+  return [HEYGEN_ANNIE_OFFICE_AVATAR, ...without]
+}
+
+/** Featured looks first (Annie + Vespri guaranteed), then pose library for dropdowns. */
 export function resolveHeyGenAvatarCatalog(catalog?: Pick<
   GenerationCatalog,
   'heygen_avatar_options' | 'heygen_avatar_featured'
@@ -66,10 +89,14 @@ export function resolveHeyGenAvatarCatalog(catalog?: Pick<
       (o) => !isVespriLabel(o.label) && o.id !== HEYGEN_VESPRI_AVATAR_ID
     )
   }
+  featured = ensureAnnieInFeatured(featured)
   const mergedAll = [
     ...featured,
     ...poses.filter((p) => !featured.some((f) => f.id === p.id)),
   ]
+  if (!mergedAll.some((o) => o.id === HEYGEN_ANNIE_OFFICE_AVATAR_ID)) {
+    mergedAll.unshift(HEYGEN_ANNIE_OFFICE_AVATAR)
+  }
   return { featured, poses, all: mergedAll }
 }
 
@@ -78,14 +105,33 @@ export type HeyGenAvatarSelectGroup = {
   options: { value: string; label: string }[]
 }
 
-/** One dropdown: public looks, then Sofia / Florin pose libraries. */
+/** One dropdown: Annie, Vespri positions, public looks, Sofia / Florin poses. */
 export function buildHeyGenAvatarSelectGroups(
   catalog?: Pick<GenerationCatalog, 'heygen_avatar_options' | 'heygen_avatar_featured'> | null
 ): HeyGenAvatarSelectGroup[] {
   const { featured, poses } = resolveHeyGenAvatarCatalog(catalog)
+  const annieFeatured = featured.filter(isAnnieOption)
+  const otherFeatured = featured.filter((o) => !isAnnieOption(o))
   const vespriPoses = poses.filter(isVespriPoseOption)
-  const libraryPoses = poses.filter((p) => !isVespriPoseOption(p))
+  const anniePoses = poses.filter(
+    (p) => isAnnieOption(p) || (isAnnieLabel(p.label.split(' — ')[0] || p.label) && !isVespriPoseOption(p))
+  )
+  const libraryPoses = poses.filter((p) => !isVespriPoseOption(p) && !anniePoses.includes(p))
   const groups: HeyGenAvatarSelectGroup[] = []
+
+  if (annieFeatured.length > 0) {
+    groups.push({
+      label: 'Annie — office presenter',
+      options: annieFeatured.map((o) => ({ value: o.id, label: o.label })),
+    })
+  }
+
+  if (anniePoses.length > 0) {
+    groups.push({
+      label: 'Annie — other poses',
+      options: anniePoses.map((o) => ({ value: o.id, label: o.label })),
+    })
+  }
 
   if (vespriPoses.length > 0) {
     groups.push({
@@ -94,10 +140,10 @@ export function buildHeyGenAvatarSelectGroups(
     })
   }
 
-  if (featured.length > 0) {
+  if (otherFeatured.length > 0) {
     groups.push({
       label: 'Public looks & presenters',
-      options: featured.map((o) => ({ value: o.id, label: o.label })),
+      options: otherFeatured.map((o) => ({ value: o.id, label: o.label })),
     })
   }
 

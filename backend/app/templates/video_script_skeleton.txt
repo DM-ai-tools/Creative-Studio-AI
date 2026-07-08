@@ -5,11 +5,14 @@ PLATFORM: {{PLACEMENTS}}
 FORMAT: {{CREATIVE_FORMATS}}
 DURATION: {{DURATION}}
 LANGUAGE: {{LANGUAGES}}
-TONE: {{TONE}}
+VOICE DELIVERY (spoken style only — never display as on-screen text): {{TONE}}
+ON-SCREEN BRAND TEXT (exact spelling only, no adjectives): {{BRAND}}
 
 [0–3 seconds] — HOOK
 Scene Direction:
 Open on an Australian avatar — aged between 30 to 50 — dressed appropriately for the {{CLIENT_INDUSTRY}} industry. The background is a real-looking {{CLIENT_INDUSTRY}} environment — professional, clean and relevant to the service. Avatar looks directly into the camera. Lighting is warm and cinematic. Delivers the hook line naturally in a warm Australian accent.
+Avatar Expression:
+Curious or serious — match the hook words. Do NOT smile unless the hook line is explicitly positive.
 Avatar Attire:
 Wear clothing appropriate for a {{CLIENT_INDUSTRY}} professional in {{GEOGRAPHY}}.
 Background:
@@ -28,6 +31,8 @@ Scene 1 — Successful business owner stressed at desk looking at poor analytics
 Scene 2 — CEO frustrated on phone, modern office, losing a client
 Scene 3 — Competitor brand winning online (animated graph or scrolling feed — full frame motion)
 Scene 4 — Avatar frustrated, arms crossed, premium environment
+Avatar Expression (when on camera):
+Frustrated or empathetic — mirror the pain in the VO. Serious face, NO smile.
 On-Screen Text:
 {{PROBLEM_ONSCREEN}}
 VO:
@@ -35,7 +40,9 @@ VO:
 
 [10–20 seconds] — SOLUTION
 Scene Direction:
-Scene shifts completely. Warm {{BRAND}} brand colours. Alternate: (A) full-frame avatar talking head in thriving {{CLIENT_INDUSTRY}} environment, (B) optional separate full-frame product/service shot or full-screen phone calendar moment — each clip edge-to-edge, never split panels. Avatar smiling, relaxed, confident.
+Scene shifts completely. Warm {{BRAND}} brand colours. Alternate: (A) full-frame avatar talking head in thriving {{CLIENT_INDUSTRY}} environment, (B) optional separate full-frame product/service shot or full-screen phone calendar moment — each clip edge-to-edge, never split panels.
+Avatar Expression:
+Relieved then confident — expression follows each solution line. Smile only when stating a clear benefit; stay earnest on explanatory lines.
 On-Screen Text:
 {{SOLUTION_ONSCREEN}}
 Avatar Speaks:
@@ -44,6 +51,8 @@ Avatar Speaks:
 [20–27 seconds] — SOCIAL PROOF
 Scene Direction:
 Two separate FULL-FRAME beats (never side-by-side): (1) successful entrepreneur or CEO thriving — premium office, team celebrating, handshake close-up — then (2) avatar endorsement talking head OR one full-screen bold stat line on clean dark background (NO split-screen, NO half photo half graph). B-roll people: confident, well-dressed, high-end setting only.
+Avatar Expression (endorsement beat):
+Assured and credible — steady, confident; subtle smile at most when citing proof.
 On-Screen Text:
 {{PROOF_ONSCREEN}}
 VO:
@@ -52,6 +61,8 @@ VO:
 [27–30 seconds] — CTA
 Scene Direction:
 Hard cut to clean {{BRAND}} branded end frame. Dark navy background. Logo centred. Orange pulse animation once. Bold white CTA text. Avatar delivers final line to camera — warm, personal, urgent.
+Avatar Expression:
+Warm inviting close — gentle smile on the CTA phrase only; urgent but friendly eye contact.
 On-Screen Text:
 {{CTA_ONSCREEN}}
 Avatar Speaks:
@@ -59,11 +70,11 @@ Avatar Speaks:
 
 AVATAR AUTO-SPECIFICATION
 Nationality: Australian
-Accent: Australian — warm, natural, conversational
+Accent: Australian — warm, natural, conversational (not American, not British)
 Age: 30–50 for {{CLIENT_INDUSTRY}} audience in {{GEOGRAPHY}}
 Attire: Professional for {{CLIENT_INDUSTRY}}
-Expression Arc: Concerned → Frustrated → Confident → Warm and smiling
-Voice Tone: {{TONE}}
+Expression Arc: Match script beat-by-beat — concerned/serious on pain → relieved on solution → assured on proof → warm smile on CTA only. FORBIDDEN: smiling throughout the entire video.
+Voice Tone: {{TONE}} — every spoken line in Australian English
 Background: Realistic {{CLIENT_INDUSTRY}} workplace
 
 VISUAL AUTO-SPECIFICATION
@@ -71,7 +82,7 @@ Aspect Ratio: {{ASPECT_RATIO}}
 Duration: {{DURATION}}
 B-Roll: Every cutaway is a MOVING video clip (people/action/camera motion) — full frame. Forbidden: static photos, still images, slideshows, split-screen, collage, half-chart layouts.
 Colour Grade: Natural photorealistic RGB throughout — neutral skin on every person; slightly cooler environment in problem beats only (never blue/teal skin). Warm natural light from 10 seconds onward.
-Text Style: Bold white sans-serif — large and readable on mobile. Headlines ONLY in lower third (bottom 25%) during talking-head. ABSOLUTELY FORBIDDEN: coloured or white banners placed across the top of the frame over the presenter's hair or face. To show a headline stat, cut to a DEDICATED full-screen text card with no avatar — then cut back to presenter.
+Text Style: Bold white sans-serif — large and readable on mobile. Headlines ONLY in lower third (bottom 25%) during talking-head. ABSOLUTELY FORBIDDEN: coloured or white banners placed across the top of the frame over the presenter's hair or face. FORBIDDEN: persistent corner brand badges (e.g. tone + brand like "Professional {{BRAND}}") — on-screen brand text must be exactly "{{BRAND}}" only when needed. To show a headline stat, cut to a DEDICATED full-screen text card with no avatar — then cut back to presenter.
 Logo Placement: Bottom left watermark throughout — full centre reveal on end frame
 Captions: Burn white bold subtitles into the video during render on every spoken word — bottom center only, never covering eyes or mouth
 Music: Tense subtle → confident build → calm on CTA

@@ -10,12 +10,35 @@ ALLOWED_VIDEO_DURATIONS: tuple[int, ...] = (5, 6, 8, 10, 12, 15)
 # UI value: selecting 30s enables master script (4 clips totalling 30s), not one 30s Runway call.
 MASTER_VIDEO_DURATION_SECONDS = 30
 
+# HeyGen / long-form UI durations (up to 4 minutes).
+EXTENDED_VIDEO_DURATIONS: tuple[int, ...] = (60, 90, 120, 180, 240)
+MAX_VIDEO_DURATION_SECONDS = 240
+
 
 def is_master_30_duration(seconds: int | str | None) -> bool:
     try:
         return int(seconds) == MASTER_VIDEO_DURATION_SECONDS
     except (TypeError, ValueError):
         return False
+
+
+def is_extended_duration(seconds: int | str | None) -> bool:
+    try:
+        return int(seconds) in EXTENDED_VIDEO_DURATIONS
+    except (TypeError, ValueError):
+        return False
+
+
+def is_allowed_ui_duration(seconds: int | str | None) -> bool:
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        return False
+    return (
+        value in ALLOWED_VIDEO_DURATIONS
+        or is_master_30_duration(value)
+        or is_extended_duration(value)
+    )
 
 
 def master_video_requested(brief: dict | None) -> bool:
@@ -34,6 +57,8 @@ def master_video_requested(brief: dict | None) -> bool:
 def clamp_video_duration(seconds: int | None, *, default: int | None = None) -> int:
     if is_master_30_duration(seconds):
         return 8
+    if is_extended_duration(seconds):
+        return 15
     fallback = default if default is not None else settings.RUNWAYML_VIDEO_DURATION
     try:
         value = int(seconds) if seconds is not None else fallback
@@ -70,11 +95,17 @@ def requested_video_duration_seconds(
 ) -> int:
     """User-facing duration (30 for master mode, not per-clip 8)."""
     if override is not None:
-        return int(override)
+        value = int(override)
+        if is_allowed_ui_duration(value):
+            return value
+        return clamp_video_duration(value)
     if isinstance(brief, dict):
         kb = brief.get("key_benefits")
         if isinstance(kb, dict) and kb.get("video_duration_seconds") is not None:
-            return int(kb["video_duration_seconds"])
+            value = int(kb["video_duration_seconds"])
+            if is_allowed_ui_duration(value):
+                return value
+            return clamp_video_duration(value)
     return settings.RUNWAYML_VIDEO_DURATION
 
 

@@ -202,7 +202,11 @@ def _srt_timestamp_to_seconds(ts: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
-def parse_srt_to_events(srt_text: str) -> list[tuple[float, float, str, bool]]:
+def parse_srt_to_events(
+    srt_text: str,
+    *,
+    max_events: int | None = 40,
+) -> list[tuple[float, float, str, bool]]:
     """Parse HeyGen / standard SRT into burn events."""
     events: list[tuple[float, float, str, bool]] = []
     for m in _SRT_BLOCK.finditer(srt_text or ""):
@@ -213,7 +217,9 @@ def parse_srt_to_events(srt_text: str) -> list[tuple[float, float, str, bool]]:
         if not text or t1 <= t0:
             continue
         events.append((t0, t1, text, False))
-    return events[:40]
+    if max_events is None:
+        return events
+    return events[:max_events]
 
 
 def _download_text_url(url: str) -> str | None:

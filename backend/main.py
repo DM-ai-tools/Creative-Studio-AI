@@ -49,6 +49,15 @@ async def on_startup():
     await create_tables()
     async with AsyncSessionLocal() as db:
         await ensure_default_admin(db)
+        from app.services.brief_service import BriefService
+
+        n = await BriefService.reconcile_orphaned_running_briefs(db)
+        if n:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "Reconciled %s orphaned RUNNING brief(s) after server startup", n
+            )
 
 
 @app.get("/files/{file_path:path}", include_in_schema=False)

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'next/navigation'
 import toast from 'react-hot-toast'
 import Topbar from '@/components/layout/Topbar'
@@ -13,8 +13,8 @@ import BriefGenerationPanel, {
   type BriefGenerationSettings,
   VIDEO_DURATION_OPTIONS,
 } from '@/components/brief/BriefGenerationPanel'
-import AvatarScriptPanel from '@/components/brief/AvatarScriptPanel'
-import HeyGenVideoSettingsCard, { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
+import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, heygenSettingsFromApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
 import { Spinner } from '@/components/ui/Loading'
@@ -23,9 +23,10 @@ import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, variantsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import { getVariantPreviewUrls, isMotionVariantFormat } from '@/lib/variantMedia'
+import { videoPreviewAspectClass, videoModalObjectFit } from '@/lib/creativeFormats'
 import { getPipelineNodeStates } from '@/lib/briefPipeline'
 import { cn, formatDate, timeAgo } from '@/lib/utils'
-import type { Brief, BriefStatus, Variant } from '@/types'
+import type { Brief, BriefStatus, PerformanceStatsContext, Variant } from '@/types'
 
 function defaultSettingsFromBrief(
   brief: Brief,
@@ -59,6 +60,7 @@ function defaultSettingsFromBrief(
     videoDurationSeconds: Number(kb.video_duration_seconds) || 8,
     heygenAvatarId: defaultAvatar,
     heygenVoiceId: defaultVoice,
+    higgsfieldVoicePreset: (kb.higgsfield_voice_preset as string) || 'serene_female',
   }
 }
 
@@ -89,18 +91,24 @@ export default function BriefDetailPage() {
   const [approvedAvatarScript, setApprovedAvatarScript] = useState<string | null>(null)
   const [replacePdfFile, setReplacePdfFile] = useState<File | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
+  const [statsImageUrls, setStatsImageUrls] = useState<string[]>([])
+  const [ocrStatsPerImage, setOcrStatsPerImage] = useState<PerformanceStatsContext[]>([])
+  const hydratedBriefIdRef = useRef<string | null>(null)
+  const runningStatusSyncRef = useRef(false)
 
-  const { data: catalog } = useApi(() => generationApi.getCatalog(), [], {
-    cacheKey: 'generation/catalog-v2',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
+    cacheKey: 'generation/catalog-v4',
     ttlMs: API_CACHE_TTL.catalog,
   })
   const { data: brief, isLoading: briefLoading, refetch: refetchBrief } = useApi(
     () => briefsApi.get(id),
-    [id]
+    [id],
+    { cacheKey: `brief/${id}`, ttlMs: API_CACHE_TTL.briefs }
   )
   const { data: variants, isLoading: variantsLoading, refetch: refetchVariants } = useApi(
     () => variantsApi.list({ brief_id: id }),
-    [id]
+    [id],
+    { cacheKey: `variants/brief/${id}`, ttlMs: API_CACHE_TTL.variants }
   )
 
   const { data: brand } = useApi(async () => {
@@ -109,27 +117,57 @@ export default function BriefDetailPage() {
   }, [brief?.brand_id])
 
   useEffect(() => {
-    if (brief && !genSettings) {
-      setGenSettings(defaultSettingsFromBrief(brief, catalog ?? undefined))
-    }
-    if (brief) {
-      const kb = brief.key_benefits ?? {}
-      setHeygenSettings(heygenSettingsFromApi(kb.heygen_settings as Record<string, unknown>))
-      setApprovedAvatarScript((kb.avatar_script as string) || null)
-    }
-  }, [brief, genSettings, catalog])
+    if (!brief || !catalog) return
+    // Only hydrate form state once per brief — polling must not reset the pipeline UI.
+    if (hydratedBriefIdRef.current === brief.id) return
+    hydratedBriefIdRef.current = brief.id
 
-  // If the browser times out the long generate request, the backend may still be working.
+    setGenSettings(defaultSettingsFromBrief(brief, catalog))
+    const kb = brief.key_benefits ?? {}
+    setHeygenSettings(heygenSettingsFromApi(kb.heygen_settings as Record<string, unknown>))
+    setApprovedAvatarScript((kb.avatar_script as string) || null)
+    const existing: string[] = []
+    const multi = kb.stats_image_urls
+    if (Array.isArray(multi)) existing.push(...(multi as string[]).filter(Boolean))
+    const single = kb.stats_image_url as string | undefined
+    if (single && !existing.includes(single)) existing.unshift(single)
+    if (existing.length) setStatsImageUrls(existing)
+    const perImg = kb.performance_stats_per_image
+    if (Array.isArray(perImg) && perImg.length > 0) {
+      setOcrStatsPerImage(perImg as PerformanceStatsContext[])
+    }
+  }, [brief, catalog])
+
+  // Poll quietly while a generation job is active — stop once variants are ready.
   useEffect(() => {
-    if (brief?.status !== 'RUNNING') return
+    if (brief?.status !== 'RUNNING') {
+      runningStatusSyncRef.current = false
+      return
+    }
+    const hasReadyVariant = (variants ?? []).some((v) => v.status === 'READY')
+    if ((variants?.length ?? 0) > 0 && hasReadyVariant) {
+      if (!runningStatusSyncRef.current) {
+        runningStatusSyncRef.current = true
+        void refetchBrief()
+      }
+      return
+    }
     const tick = () => {
-      void refetchBrief()
-      void refetchVariants()
+      if (document.visibilityState === 'hidden') return
+      void refetchBrief({ background: true })
+      void refetchVariants({ background: true })
     }
     tick()
-    const id = window.setInterval(tick, 12_000)
-    return () => window.clearInterval(id)
-  }, [brief?.status, refetchBrief, refetchVariants])
+    const timer = window.setInterval(tick, 20_000)
+    return () => window.clearInterval(timer)
+  }, [brief?.status, variants, refetchBrief, refetchVariants])
+
+  // Safety: never leave the app in a scroll-locked state after leaving this page.
+  useEffect(() => {
+    return () => {
+      document.body.style.overflow = ''
+    }
+  }, [])
 
   const pipelineSteps = catalog?.pipeline_steps ?? []
   const pipelineStates = useMemo(() => {
@@ -150,6 +188,19 @@ export default function BriefDetailPage() {
   const voiceLabel =
     catalog?.heygen_voice_options?.find((o) => o.id === genSettings?.heygenVoiceId)?.label ?? ''
 
+  const handleResetStuckGeneration = async () => {
+    if (!window.confirm('Stop waiting and reset this brief so you can click Generate again?')) return
+    try {
+      await briefsApi.update(id, { status: 'DRAFT' })
+      toast.success('Generation reset — click Generate video when you are ready')
+      hydratedBriefIdRef.current = null
+      void refetchBrief()
+      void refetchVariants()
+    } catch (err: unknown) {
+      toast.error(extractApiError(err))
+    }
+  }
+
   const runGenerate = async () => {
     if (!brief || !genSettings) return
     const wantsVideo = (brief.formats ?? []).some((f) => f === 'reel' || f === 'video')
@@ -158,6 +209,19 @@ export default function BriefDetailPage() {
 
     setIsGenerating(true)
     try {
+      if (ocrStatsPerImage.length > 0 || statsImageUrls.length > 0) {
+        await briefsApi.update(id, {
+          key_benefits: {
+            ...kb,
+            ...(statsImageUrls.length > 0
+              ? { stats_image_url: statsImageUrls[0], stats_image_urls: statsImageUrls }
+              : {}),
+            ...(ocrStatsPerImage.length > 0
+              ? { performance_stats_per_image: ocrStatsPerImage }
+              : {}),
+          },
+        })
+      }
       const result = await briefsApi.generate(id, {
         formats: brief.formats,
         ai_model: genSettings.copyModel,
@@ -170,6 +234,12 @@ export default function BriefDetailPage() {
               heygen_voice_id: genSettings.heygenVoiceId || undefined,
               avatar_script: pdfMode ? undefined : approvedAvatarScript ?? undefined,
               heygen_settings: pdfMode ? undefined : heygenSettingsForApi(heygenSettings),
+              ...(statsImageUrls.length > 0
+                ? {
+                    stats_image_url: statsImageUrls[0],
+                    stats_image_urls: statsImageUrls,
+                  }
+                : {}),
             }
           : {}),
       })
@@ -281,8 +351,19 @@ export default function BriefDetailPage() {
     )
   }
 
-  if (!brief || !genSettings) {
+  if (!brief) {
     return <div className="p-5 text-sm text-lt">Brief not found.</div>
+  }
+
+  if (!genSettings) {
+    return (
+      <div>
+        <Topbar title={brief.title} />
+        <div className="p-5 space-y-3">
+          <div className="skeleton h-16 rounded-xl" />
+        </div>
+      </div>
+    )
   }
 
   const statusBadgeVariant = (['READY', 'EXPORTED'].includes(brief.status)
@@ -294,6 +375,16 @@ export default function BriefDetailPage() {
         : 'amber') as 'green' | 'red' | 'mint' | 'amber'
 
   const hasVariants = (variants?.length ?? 0) > 0
+  const generateActionLabel =
+    brief.status === 'RUNNING'
+      ? 'Generating…'
+      : wantsVideoBrief && isHeyGen
+        ? hasVariants
+          ? '⚡ Regenerate video'
+          : '⚡ Generate video'
+        : hasVariants
+          ? '⚡ Generate more'
+          : '⚡ Generate variants'
 
   const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
   const scriptFromPdf = kb.script_source === 'pdf'
@@ -321,11 +412,7 @@ export default function BriefDetailPage() {
               onClick={handleGenerateClick}
               disabled={brief.status === 'RUNNING'}
             >
-              {brief.status === 'RUNNING'
-                ? 'Generating…'
-                : hasVariants
-                  ? '⚡ Generate more'
-                  : '⚡ Generate variants'}
+              {generateActionLabel}
             </Button>
           </div>
         }
@@ -343,10 +430,17 @@ export default function BriefDetailPage() {
         </div>
 
         {brief.status === 'RUNNING' && (
-          <p className="text-sm text-lt rounded-lg border border-mint/30 bg-mint/5 px-3 py-2">
-            Video generation is in progress (often 10–15 minutes for HeyGen). Variants appear below as
-            each one finishes — you can leave this page open; it refreshes every 12 seconds.
-          </p>
+          <div className="text-sm text-lt rounded-lg border border-mint/30 bg-mint/5 px-3 py-2 space-y-2">
+            <p>
+              Video generation is in progress (often 10–15 minutes for HeyGen). New variants appear
+              below when ready — this page checks every 20 seconds without reloading your script edits.
+            </p>
+            {brief.completed_variants === 0 && (
+              <Button type="button" variant="outline" size="sm" onClick={() => void handleResetStuckGeneration()}>
+                Reset stuck generation
+              </Button>
+            )}
+          </div>
         )}
 
         <BriefGenerationPanel
@@ -356,6 +450,7 @@ export default function BriefDetailPage() {
           onChange={setGenSettings}
           disabled={brief.status === 'RUNNING' || isGenerating}
           hideHeyGenPresenter={isHeyGen}
+          scrollable
         />
 
         {scriptFromPdf && isHeyGen && (
@@ -405,8 +500,18 @@ export default function BriefDetailPage() {
         )}
 
         {isHeyGen && genSettings && (
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900">
+            <strong>Video production pipeline:</strong> Step 1 voice script (with stats OCR) → Step 2
+            B-roll from that script → Step 3 avatar settings → approve → click{' '}
+            <strong>{hasVariants ? 'Regenerate video' : 'Generate video'}</strong> at the top right
+            {hasVariants ? ' → confirm in the modal → Generate with these settings' : ''}. This page
+            does not use &quot;Create &amp; Generate&quot; — that is only on the new brief form.
+          </div>
+        )}
+
+        {isHeyGen && genSettings && (
           <div className="space-y-4">
-            <HeyGenVideoSettingsCard
+            <HeyGenProductionPipeline
               pdfScriptOnly={scriptFromPdf}
               durationSeconds={genSettings.videoDurationSeconds}
               avatarLabel={avatarLabel}
@@ -423,7 +528,7 @@ export default function BriefDetailPage() {
                 setGenSettings({ ...genSettings, videoDurationSeconds })
               }
               settings={heygenSettings}
-              onChange={setHeygenSettings}
+              onSettingsChange={setHeygenSettings}
               durationOptions={VIDEO_DURATION_OPTIONS.map((opt) =>
                 opt.id === '30' && isHeyGen ? { ...opt, label: '30s (recommended)' } : opt
               )}
@@ -438,10 +543,7 @@ export default function BriefDetailPage() {
                 avatarScript: approvedAvatarScript ?? undefined,
                 forbiddenWords: brand?.forbidden_words,
               }}
-            />
-            {!scriptFromPdf && (
-            <AvatarScriptPanel
-              context={{
+              scriptContext={{
                 briefNotes: String(brief.key_benefits?.notes ?? ''),
                 productName: brief.product_name,
                 offer: String(brief.key_benefits?.offer ?? ''),
@@ -456,8 +558,26 @@ export default function BriefDetailPage() {
               }}
               approvedScript={approvedAvatarScript}
               onApprovedScript={setApprovedAvatarScript}
+              preloadedStatsImageUrls={statsImageUrls}
+              onExportSnapshotChange={(snap) => {
+                if (snap.statsImageUrls.length > 0) {
+                  setStatsImageUrls(snap.statsImageUrls)
+                }
+                if (snap.performanceStatsPerImage?.length) {
+                  setOcrStatsPerImage(snap.performanceStatsPerImage)
+                }
+              }}
+              onPersistScript={async (script) => {
+                const kb = {
+                  ...(brief.key_benefits ?? {}),
+                  avatar_script: script,
+                  ...(ocrStatsPerImage.length > 0
+                    ? { performance_stats_per_image: ocrStatsPerImage }
+                    : {}),
+                }
+                await briefsApi.update(id, { key_benefits: kb })
+              }}
             />
-            )}
           </div>
         )}
 
@@ -492,31 +612,38 @@ export default function BriefDetailPage() {
 
       <Modal
         isOpen={showRegenerateModal}
-        onClose={() => setShowRegenerateModal(false)}
-        title="Regenerate variants"
+        onClose={() => !isGenerating && setShowRegenerateModal(false)}
+        title="Regenerate video"
         size="lg"
-      >
-        <div className="p-6 space-y-4">
-          <p className="text-sm text-mid">
-            Choose models and settings below, then generate. This adds new variants (existing ones
-            stay). Delete old variants first if you only want fresh creatives.
-          </p>
-          <BriefGenerationPanel
-            catalog={catalog ?? undefined}
-            formats={brief.formats ?? []}
-            settings={genSettings}
-            onChange={setGenSettings}
-            disabled={isGenerating}
-          />
-          <div className="flex gap-2 justify-end pt-2">
-            <Button variant="outline" onClick={() => setShowRegenerateModal(false)}>
+        footer={
+          <div className="flex gap-2 justify-end">
+            <Button
+              variant="outline"
+              disabled={isGenerating}
+              onClick={() => setShowRegenerateModal(false)}
+            >
               Cancel
             </Button>
             <Button variant="primary" isLoading={isGenerating} onClick={() => void runGenerate()}>
-              Generate with these settings
+              {wantsVideoBrief && isHeyGen
+                ? 'Generate video with these settings'
+                : 'Generate with these settings'}
             </Button>
           </div>
-        </div>
+        }
+      >
+        <p className="text-sm text-mid mb-4">
+          Choose models and settings below, then generate. This adds new variants (existing ones stay).
+          Delete old variants first if you only want fresh creatives.
+        </p>
+        <BriefGenerationPanel
+          catalog={catalog ?? undefined}
+          formats={brief.formats ?? []}
+          settings={genSettings}
+          onChange={setGenSettings}
+          disabled={isGenerating}
+          scrollable
+        />
       </Modal>
 
       {selectedVariant && (
@@ -580,13 +707,17 @@ function VariantDetailBody({
       {videoSrc ? (
         <div
           className={cn(
-            'mx-auto w-full max-w-[360px] rounded-lg border border-border bg-black overflow-hidden',
-            (variant.format === 'reel' || variant.format === 'video') && 'aspect-[9/16]'
+            'mx-auto w-full rounded-lg border border-border bg-black overflow-hidden',
+            variant.format === 'video' ? 'max-w-3xl' : 'max-w-[360px]',
+            videoPreviewAspectClass(variant.format)
           )}
         >
           <video
             src={videoSrc}
-            className="h-full w-full object-cover"
+            className={cn(
+              'h-full w-full bg-black',
+              videoModalObjectFit(variant.format) === 'contain' ? 'object-contain' : 'object-cover'
+            )}
             controls
             playsInline
           />

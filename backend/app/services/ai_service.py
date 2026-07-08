@@ -201,20 +201,19 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             source_image_url=source_image_url,
             duration_seconds=duration_seconds,
         )
-        from app.services.video_portrait import is_vertical_format
+        from app.services.video_portrait import normalize_video_file, should_normalize_format
 
+        # ── Step 1: Normalize frame BEFORE logo/stats so they render on a full-frame canvas ──
         if result.get("status") == "done" and result.get("url") and tenant_id:
-            if is_vertical_format(format_type):
-                from app.services.video_portrait import normalize_portrait_video_file
-
-                fitted = normalize_portrait_video_file(
+            if should_normalize_format(format_type):
+                fitted = normalize_video_file(
                     str(result["url"]),
                     tenant_id=tenant_id,
                     format_type=format_type,
                 )
                 if fitted:
                     result["url"] = fitted
-                    result["portrait_normalized"] = True
+                    result["frame_normalized"] = True
 
         if result.get("status") == "done" and result.get("url") and tenant_id:
             from app.services.brand_logo import resolve_video_logo_urls
@@ -252,6 +251,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                     "subtitles_applied": False,
                     "finalize_error": str(exc),
                 }
+
         return result
 
     async def run_compliance_check(

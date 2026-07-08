@@ -2,8 +2,8 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import React, { useEffect, useMemo, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import React, { useEffect, useMemo, useState, useRef } from 'react'
+import { useForm, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import toast from 'react-hot-toast'
@@ -13,14 +13,16 @@ import Select from '@/components/ui/Select'
 import TextArea from '@/components/ui/TextArea'
 import { ChipToggle, ChipToggleGroup } from '@/components/ui/ChipToggle'
 import BriefSection from '@/components/brief/BriefSection'
-import AvatarScriptPanel from '@/components/brief/AvatarScriptPanel'
-import HeyGenVideoSettingsCard, { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
+import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
+import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
+import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
 import { VIDEO_DURATION_OPTIONS, type BriefGenerationSettings } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
-import { brandsApi, briefsApi, generationApi } from '@/lib/api'
+import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import {
   aspectHintFromFormats,
@@ -33,25 +35,26 @@ import {
   mapPlacementOptions,
 } from '@/lib/creativeFormats'
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
-import type { AdFormat, CatalogOption } from '@/types'
+import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
+import type { AdFormat, CatalogOption, PerformanceStatsContext, StrategyPreviewResult } from '@/types'
 
 const schema = z.object({
   brand_id: z.string().min(1, 'Select a brand'),
   title: z.string().min(3, 'Campaign name required'),
   objective_id: z.string().min(1, 'Select an objective'),
   target_variant_count: z.coerce.number().int().min(1).max(20),
-  offer: z.string().min(3, 'Offer or key message required'),
-  product_name: z.string().min(2, 'Product name required'),
+  offer: z.string().optional(),
+  product_name: z.string().optional(),
   cta: z.string().min(2, 'Enter a call to action'),
-  audience_type: z.string().min(2, 'Audience type required'),
-  geography: z.string().min(2, 'Geography required'),
-  age_range: z.string().min(2, 'Age range required'),
-  languages: z.string().min(2, 'Languages required'),
-  placements: z.array(z.string()).min(1, 'Select at least one placement'),
-  formats: z.array(z.string()).min(1, 'Select at least one format'),
-  hook_frameworks: z.array(z.string()),
+  audience_type: z.string().optional(),
+  geography: z.string().optional(),
+  age_range: z.string().optional(),
+  languages: z.string().optional(),
+  placements: z.array(z.string()).optional(),
+  formats: z.array(z.string()).min(1, 'Select at least one creative format'),
+  hook_frameworks: z.array(z.string()).optional(),
   notes: z.string().max(2000).optional(),
-  ad_copy_tone: z.string().min(2, 'Enter a tone for the copy'),
+  ad_copy_tone: z.string().optional(),
 })
 
 type FormData = z.infer<typeof schema>
@@ -62,6 +65,11 @@ interface BriefComposerProps {
 
 function optionLabel(options: CatalogOption[], id: string): string {
   return options.find((option) => option.id === id)?.label ?? id
+}
+
+function labelsForIds(options: CatalogOption[], ids: string[]): string {
+  if (!ids.length) return '—'
+  return ids.map((id) => optionLabel(options, id)).join(', ')
 }
 
 function PillRadio({
@@ -96,8 +104,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
   })
-  const { data: catalog } = useApi(() => generationApi.getCatalog(), [], {
-    cacheKey: 'generation/catalog-v2',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
+    cacheKey: 'generation/catalog-v4',
     ttlMs: API_CACHE_TTL.catalog,
   })
 
@@ -112,9 +120,30 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   })
   const [heygenSettings, setHeygenSettings] = useState<HeyGenVideoSettings>(defaultHeyGenSettings())
   const [approvedAvatarScript, setApprovedAvatarScript] = useState<string | null>(null)
+  const createVideoButtonRef = useRef<HTMLDivElement>(null)
   const [generatingNotes, setGeneratingNotes] = useState(false)
-  const [scriptBuildMode, setScriptBuildMode] = useState<'manual' | 'pdf'>('manual')
+  const [scriptBuildMode, setScriptBuildMode] = useState<'manual' | 'pdf' | 'custom' | 'website'>('manual')
   const [pdfFile, setPdfFile] = useState<File | null>(null)
+  const [customPrompt, setCustomPrompt] = useState('')
+  const [referenceImageFile, setReferenceImageFile] = useState<File | null>(null)
+  const [referenceImagePreview, setReferenceImagePreview] = useState<string | null>(null)
+  const [websiteUrl, setWebsiteUrl] = useState('')
+  const [strategyPreview, setStrategyPreview] = useState<StrategyPreviewResult | null>(null)
+  const [avatarExportSnapshot, setAvatarExportSnapshot] = useState<{
+    icpText: string | null
+    generatedFullScript: string | null
+    spokenScript: string | null
+    statsImageUrl: string | null
+    statsImageUrls: string[]
+    performanceStats: PerformanceStatsContext | null
+  }>({
+    icpText: null,
+    generatedFullScript: null,
+    spokenScript: null,
+    statsImageUrl: null,
+    statsImageUrls: [],
+    performanceStats: null,
+  })
 
   const {
     register,
@@ -186,7 +215,12 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const isHeyGen = wantsVideo && genSettings.videoModel.toLowerCase().startsWith('heygen')
   const isHiggsfieldVideo =
     wantsVideo && genSettings.videoModel.toLowerCase().startsWith('hf-')
-  const isPdfModeHeyGen = scriptBuildMode === 'pdf' && wantsVideo && isHeyGen
+  const isPdfScriptMode = scriptBuildMode === 'pdf' && wantsVideo
+  const isCustomScriptMode = scriptBuildMode === 'custom' && wantsVideo
+  const isWebsiteScriptMode = scriptBuildMode === 'website' && wantsVideo
+  const isAlternateScriptMode = isPdfScriptMode || isCustomScriptMode || isWebsiteScriptMode
+  /** PDF/custom hide campaign detail steps; website keeps audience, script, etc. */
+  const hideCampaignDetailSteps = isPdfScriptMode || isCustomScriptMode
 
   const imageModelSelect = useMemo(
     () =>
@@ -205,10 +239,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   )
 
   const submitLabel = useMemo(() => {
-    if (wantsVideo && wantsImageOnly) return 'Create & Generate →'
-    if (wantsVideo) return 'Create & Generate Video →'
-    if (wantsImageOnly) return 'Create & Generate Image →'
-    return 'Create & Generate →'
+    if (wantsVideo && wantsImageOnly) return 'Create brief →'
+    if (wantsVideo) return 'Create brief →'
+    if (wantsImageOnly) return 'Create brief →'
+    return 'Create brief →'
   }, [wantsVideo, wantsImageOnly])
 
   useEffect(() => {
@@ -280,28 +314,51 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         label: wantsVideo ? 'Landscape or Portrait chosen' : 'Creative format chosen',
         ok: (d.formats ?? []).length > 0,
       },
-      { label: 'Audience defined', ok: isPdfModeHeyGen || Boolean(d.audience_type && d.geography) },
-      { label: 'CTA & tone set', ok: isPdfModeHeyGen || Boolean(d.cta && d.ad_copy_tone) },
+      {
+        label: 'Audience defined',
+        ok: hideCampaignDetailSteps || Boolean(d.audience_type && d.geography),
+      },
+      {
+        label: 'CTA & tone set',
+        ok: hideCampaignDetailSteps || Boolean(d.cta && d.ad_copy_tone),
+      },
       {
         label: 'HeyGen avatar (if video)',
         ok: !wantsVideo || !isHeyGen || Boolean(genSettings.heygenAvatarId),
       },
       {
-        label: isPdfModeHeyGen ? 'PDF script file chosen' : 'Avatar script approved',
+        label: isPdfScriptMode
+          ? 'PDF script file chosen'
+          : isCustomScriptMode
+            ? 'Custom prompt & image ready'
+            : isWebsiteScriptMode
+              ? 'Website URL & script approved'
+              : 'Avatar script approved',
         ok:
           !wantsVideo ||
-          !isHeyGen ||
-          (isPdfModeHeyGen ? Boolean(pdfFile) : Boolean(approvedAvatarScript)),
+          (isCustomScriptMode
+            ? Boolean(customPrompt.trim() && referenceImageFile)
+            : isPdfScriptMode
+              ? Boolean(pdfFile)
+              : isWebsiteScriptMode
+                ? Boolean(websiteUrl.trim() && (!isHeyGen || approvedAvatarScript))
+                : !isHeyGen || Boolean(approvedAvatarScript)),
       },
     ]
   }, [
     formValues,
     wantsVideo,
     isHeyGen,
-    isPdfModeHeyGen,
+    isPdfScriptMode,
+    isCustomScriptMode,
+    hideCampaignDetailSteps,
+    isWebsiteScriptMode,
     genSettings.heygenAvatarId,
     approvedAvatarScript,
     pdfFile,
+    customPrompt,
+    referenceImageFile,
+    websiteUrl,
   ])
 
   const avatarLabel =
@@ -309,25 +366,95 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const voiceLabel =
     catalog?.heygen_voice_options?.find((o) => o.id === genSettings.heygenVoiceId)?.label ?? ''
 
+  const applyReferenceImageFile = (file: File | null) => {
+    if (referenceImagePreview) URL.revokeObjectURL(referenceImagePreview)
+    if (!file) {
+      setReferenceImageFile(null)
+      setReferenceImagePreview(null)
+      return
+    }
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please choose an image file (PNG, JPG, or WebP).')
+      return
+    }
+    setReferenceImageFile(file)
+    setReferenceImagePreview(URL.createObjectURL(file))
+  }
+
+  const handleReferenceImagePaste = (event: React.ClipboardEvent) => {
+    const item = Array.from(event.clipboardData.items).find((entry) => entry.type.startsWith('image/'))
+    const file = item?.getAsFile()
+    if (file) {
+      event.preventDefault()
+      applyReferenceImageFile(file)
+    }
+  }
+
+  const onInvalid = (formErrors: FieldErrors<FormData>) => {
+    const first = Object.values(formErrors).find((err) => err?.message)
+    toast.error(first?.message ? String(first.message) : 'Please complete the required fields above.')
+  }
+
+  const validateManualFields = (data: FormData): string | null => {
+    if (!data.audience_type?.trim() || data.audience_type.trim().length < 2) {
+      return 'Fill in Target Audience (step 3).'
+    }
+    if (!data.geography?.trim() || data.geography.trim().length < 2) {
+      return 'Fill in Geography (step 3).'
+    }
+    if (!data.age_range?.trim() || data.age_range.trim().length < 2) {
+      return 'Fill in Age Range (step 3).'
+    }
+    if (!data.languages?.trim() || data.languages.trim().length < 2) {
+      return 'Fill in Languages (step 3).'
+    }
+    if (!data.ad_copy_tone?.trim() || data.ad_copy_tone.trim().length < 2) {
+      return 'Fill in Tone of Voice (step 3).'
+    }
+    if (!data.placements?.length) {
+      return 'Select at least one platform / placement (step 4).'
+    }
+    return null
+  }
+
   const handleGenerateScriptNotes = async () => {
     const d = formValues
+    const targetAudience = [d.audience_type, d.geography, d.age_range].filter(Boolean).join(' · ')
     setGeneratingNotes(true)
     try {
-      const result = await generationApi.generateAvatarScript({
-        purpose: 'brief_notes',
-        script_prompt: d.notes || undefined,
-        product_name: d.product_name ?? '',
-        offer: d.offer ?? '',
-        brand_name: selectedBrand?.name ?? '',
-        target_audience: [d.audience_type, d.geography, d.age_range].filter(Boolean).join(' · '),
-        ad_copy_tone: d.ad_copy_tone ?? '',
-        cta: d.cta ?? '',
-        target_seconds: genSettings.videoDurationSeconds,
-        forbidden_words: selectedBrand?.forbidden_words,
-      })
-      const text = result.full_script.trim()
-      setValue('notes', text, { shouldValidate: true })
-      toast.success('Talking points saved — generate spoken script in step 8')
+      // Use ICP-driven generation when audience + offer are available
+      const useIcp = Boolean((targetAudience || d.audience_type) && (d.offer || d.product_name))
+      if (useIcp) {
+        const result = await generationApi.generateIcpScript({
+          target_audience: targetAudience,
+          offer: d.offer ?? '',
+          product_name: d.product_name ?? '',
+          brand_name: selectedBrand?.name ?? '',
+          ad_copy_tone: d.ad_copy_tone ?? '',
+          cta: d.cta ?? '',
+          target_seconds: genSettings.videoDurationSeconds,
+          forbidden_words: selectedBrand?.forbidden_words,
+        })
+        const text = result.script.full_script.trim()
+        setValue('notes', text, { shouldValidate: true })
+        toast.success('ICP-driven script notes saved — review in step 8')
+      } else {
+        const result = await generationApi.generateAvatarScript({
+          purpose: 'brief_notes',
+          script_prompt: d.notes || undefined,
+          product_name: d.product_name ?? '',
+          offer: d.offer ?? '',
+          brand_name: selectedBrand?.name ?? '',
+          target_audience: targetAudience,
+          ad_copy_tone: d.ad_copy_tone ?? '',
+          cta: d.cta ?? '',
+          target_seconds: genSettings.videoDurationSeconds,
+          forbidden_words: selectedBrand?.forbidden_words,
+        })
+        const text = result.full_script.trim()
+        setValue('notes', text, { shouldValidate: true })
+        toast.success('Talking points saved — generate spoken script in step 8')
+      }
     } catch {
       toast.error('Could not generate — add OPENROUTER_API_KEY and restart backend')
     } finally {
@@ -335,16 +462,108 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }
   }
 
-  const onSubmit = async (data: FormData) => {
-    if (!catalog) return
+  const handleDownloadBriefExcel = () => {
+    const payload = buildBriefExportPayload({
+      formValues,
+      catalog: catalog ?? undefined,
+      brandName: selectedBrand?.name ?? '',
+      aspectHint,
+      genSettings,
+      heygenSettings: wantsVideo && isHeyGen ? heygenSettings : undefined,
+      avatarLabel,
+      voiceLabel,
+      scriptBuildMode,
+      websiteUrl,
+      customPrompt,
+      pdfFileName: pdfFile?.name,
+      referenceImageName: referenceImageFile?.name,
+      approvedScript: approvedAvatarScript,
+      generatedFullScript: avatarExportSnapshot.generatedFullScript,
+      icpText: avatarExportSnapshot.icpText,
+      customScriptText: customPrompt,
+      strategyPreview,
+      labelForIds: (options, ids) => labelsForIds(options, ids),
+    })
 
-    if (isPdfModeHeyGen) {
+    const hasIcp = Boolean(
+      avatarExportSnapshot.icpText?.trim() || strategyPreview?.icp_text?.trim()
+    )
+    const hasScript = Boolean(
+      avatarExportSnapshot.generatedFullScript?.trim() ||
+        avatarExportSnapshot.spokenScript?.trim() ||
+        approvedAvatarScript?.trim()
+    )
+
+    if (!hasIcp && !hasScript) {
+      toast('Exporting Steps 1–9 — generate ICP + script in Step 8 first for full export.', {
+        icon: '⚠️',
+      })
+    } else {
+      toast.success('Brief exported to Excel (.xlsx)')
+    }
+
+    downloadBriefExcel(payload)
+  }
+
+  const onSubmit = async (data: FormData) => {
+    if (!catalog) {
+      toast.error('Still loading models — wait a moment and try again.')
+      return
+    }
+
+    const wantsVidOnSubmitEarly = (data.formats ?? []).some(isVideoFormat)
+    const heygenOnSubmitEarly =
+      wantsVidOnSubmitEarly && genSettings.videoModel.toLowerCase().startsWith('heygen')
+    const isPdfMode = scriptBuildMode === 'pdf' && wantsVidOnSubmitEarly
+    const isCustomMode = scriptBuildMode === 'custom' && wantsVidOnSubmitEarly
+    const isWebsiteMode = scriptBuildMode === 'website' && wantsVidOnSubmitEarly
+    const isAlternateMode = isPdfMode || isCustomMode
+
+    if (!isAlternateMode) {
+      const manualError = validateManualFields(data)
+      if (manualError) {
+        toast.error(manualError)
+        return
+      }
+      if (heygenOnSubmitEarly && !approvedAvatarScript) {
+        toast.error('Generate and approve your spoken script in step 8 before creating.')
+        return
+      }
+    }
+
+    if (isPdfMode) {
       if (!pdfFile) {
         toast.error('Choose a PDF that contains your full spoken script.')
         return
       }
-      if (!genSettings.heygenAvatarId || !genSettings.heygenVoiceId) {
+      if (heygenOnSubmitEarly && (!genSettings.heygenAvatarId || !genSettings.heygenVoiceId)) {
         toast.error('Select HeyGen avatar and voice.')
+        return
+      }
+    }
+
+    if (isCustomMode) {
+      if (!customPrompt.trim()) {
+        toast.error('Paste your video prompt or script.')
+        return
+      }
+      if (!referenceImageFile) {
+        toast.error('Add a reference image (upload or paste).')
+        return
+      }
+      if (isHeyGen && (!genSettings.heygenAvatarId || !genSettings.heygenVoiceId)) {
+        toast.error('Select HeyGen avatar and voice.')
+        return
+      }
+    }
+
+    if (isWebsiteMode) {
+      if (!websiteUrl.trim()) {
+        toast.error('Paste your website page URL.')
+        return
+      }
+      if (heygenOnSubmitEarly && !approvedAvatarScript) {
+        toast.error('Generate and approve your website script in step 8 before creating.')
         return
       }
     }
@@ -354,18 +573,22 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       return t.length >= minLen ? t : placeholder
     }
 
-    const d: FormData = isPdfModeHeyGen
+    const d: FormData = isAlternateMode
       ? {
           ...data,
-          product_name: fill(data.product_name, 2, 'From PDF'),
-          offer: fill(data.offer, 3, 'See PDF script'),
+          product_name: fill(data.product_name, 2, isCustomMode ? 'Custom prompt' : 'From PDF'),
+          offer: fill(data.offer, 3, isCustomMode ? 'See custom prompt' : 'See PDF script'),
           audience_type: fill(data.audience_type, 2, 'General'),
           geography: fill(data.geography, 2, '—'),
           age_range: fill(data.age_range, 2, '—'),
           languages: fill(data.languages, 2, 'English'),
-          ad_copy_tone: fill(data.ad_copy_tone, 2, 'Match PDF'),
+          ad_copy_tone: fill(data.ad_copy_tone, 2, isCustomMode ? 'Match prompt' : 'Match PDF'),
           cta: fill(data.cta, 2, 'Learn more'),
-          notes: fill(data.notes, 0, 'Full script from uploaded PDF.'),
+          notes: fill(
+            data.notes,
+            0,
+            isCustomMode ? customPrompt.trim() : 'Full script from uploaded PDF.'
+          ),
           placements: data.placements?.length
             ? data.placements
             : (data.formats ?? []).some(isLandscapeVideoFormat)
@@ -386,25 +609,31 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       wantsVidOnSubmit && genSettings.videoModel.toLowerCase().startsWith('heygen')
 
     try {
+      let referenceImageUrl: string | undefined
+      if (isCustomScriptMode && referenceImageFile) {
+        const asset = await assetsApi.upload(referenceImageFile, undefined, 'reference_image')
+        referenceImageUrl = asset.file_url
+      }
+
       const brief = await briefsApi.create({
         brand_id: d.brand_id,
         title: d.title,
         objective: optionLabel(catalog.objectives, d.objective_id),
         target_audience: targetAudience,
         formats: d.formats as AdFormat[],
-        ad_copy_tone: d.ad_copy_tone.trim(),
+        ad_copy_tone: (d.ad_copy_tone ?? '').trim(),
         cta: d.cta.trim(),
-        product_name: d.product_name,
+        product_name: d.product_name ?? '',
         key_benefits: {
           target_variant_count: d.target_variant_count,
-          offer: d.offer,
-          placements: d.placements,
-          hook_frameworks: d.hook_frameworks,
+          offer: d.offer ?? '',
+          placements: d.placements ?? [],
+          hook_frameworks: d.hook_frameworks ?? [],
           notes: d.notes ?? '',
           audience,
           objective_id: d.objective_id,
           cta_text: d.cta.trim(),
-          tone_text: d.ad_copy_tone.trim(),
+          tone_text: (d.ad_copy_tone ?? '').trim(),
           copy_model: genSettings.copyModel,
           image_model: genSettings.imageModel,
           ...(wantsVidOnSubmit
@@ -415,54 +644,79 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 heygen_voice_id: genSettings.heygenVoiceId,
                 higgsfield_voice_preset: genSettings.higgsfieldVoicePreset,
                 heygen_settings:
-                  heygenOnSubmit && !isPdfModeHeyGen
-                    ? heygenSettingsForApi(heygenSettings)
-                    : undefined,
-                avatar_script: isPdfModeHeyGen ? undefined : approvedAvatarScript ?? undefined,
-                script_source: isPdfModeHeyGen ? 'pdf' : 'manual',
+                  heygenOnSubmit ? heygenSettingsForApi(heygenSettings) : undefined,
+                avatar_script: isPdfScriptMode
+                  ? undefined
+                  : isCustomScriptMode
+                    ? customPrompt.trim()
+                    : approvedAvatarScript ?? undefined,
+                script_source: isPdfScriptMode
+                  ? 'pdf'
+                  : isCustomScriptMode
+                    ? 'custom'
+                    : isWebsiteScriptMode
+                      ? 'website'
+                      : 'manual',
+                ...(isCustomScriptMode
+                  ? {
+                      custom_prompt: customPrompt.trim(),
+                      video_script_skeleton: customPrompt.trim(),
+                      video_script_skeleton_version: '6',
+                      reference_image_url: referenceImageUrl,
+                    }
+                  : {}),
+                ...(isWebsiteScriptMode ? { website_url: websiteUrl.trim() } : {}),
+                ...(avatarExportSnapshot.statsImageUrls.length > 0 ||
+                avatarExportSnapshot.statsImageUrl
+                  ? {
+                      stats_image_url:
+                        avatarExportSnapshot.statsImageUrls[0] ??
+                        avatarExportSnapshot.statsImageUrl ??
+                        undefined,
+                      stats_image_urls: avatarExportSnapshot.statsImageUrls.length
+                        ? avatarExportSnapshot.statsImageUrls
+                        : avatarExportSnapshot.statsImageUrl
+                          ? [avatarExportSnapshot.statsImageUrl]
+                          : undefined,
+                      performance_stats: avatarExportSnapshot.performanceStats ?? undefined,
+                      performance_stats_per_image:
+                        avatarExportSnapshot.performanceStatsPerImage?.length
+                          ? avatarExportSnapshot.performanceStatsPerImage
+                          : undefined,
+                    }
+                  : {}),
               }
             : {}),
         },
       })
 
-      if (isPdfModeHeyGen && pdfFile) {
+      if (isPdfScriptMode && pdfFile) {
         await briefsApi.uploadScriptPdf(brief.id, pdfFile)
         toast.success('PDF script imported')
       }
 
-      toast.success('Brief created — generating variants…')
-
-      try {
-        await briefsApi.generate(brief.id, {
-          formats: d.formats as AdFormat[],
-          count_per_format: 1,
-          ai_model: genSettings.copyModel,
-          image_model: genSettings.imageModel,
-          video_model: genSettings.videoModel,
-          higgsfield_voice_preset: genSettings.higgsfieldVoicePreset || undefined,
-          ...(wantsVidOnSubmit ? { video_duration_seconds: genSettings.videoDurationSeconds } : {}),
-          ...(wantsVidOnSubmit && heygenOnSubmit
-            ? {
-                heygen_avatar_id: genSettings.heygenAvatarId || undefined,
-                heygen_voice_id: genSettings.heygenVoiceId || undefined,
-                avatar_script: isPdfModeHeyGen ? undefined : approvedAvatarScript ?? undefined,
-                heygen_settings:
-                  isPdfModeHeyGen ? undefined : heygenSettingsForApi(heygenSettings),
-              }
-            : {}),
-        })
-        toast.success('Variants generated')
-      } catch (genErr: unknown) {
-        toast.error(
-          extractApiError(genErr) || 'Brief saved but generation failed — open the brief and try again'
-        )
-      }
+      toast.success(
+        wantsVidOnSubmit
+          ? 'Brief saved — review the pipeline on the next page, then click Generate video'
+          : 'Brief saved — click Generate on the brief page when ready'
+      )
 
       router.push(`/briefs/${brief.id}`)
-    } catch {
-      toast.error('Failed to create brief')
+    } catch (err: unknown) {
+      toast.error(extractApiError(err) || 'Failed to create brief')
     }
   }
+
+  const needsApprovedScript =
+    wantsVideo && isHeyGen && !hideCampaignDetailSteps && !approvedAvatarScript
+
+  const submitBlocked =
+    !hasBrands ||
+    !catalog ||
+    (isPdfScriptMode && !pdfFile) ||
+    (isCustomScriptMode && (!customPrompt.trim() || !referenceImageFile)) ||
+    (isWebsiteScriptMode && !websiteUrl.trim()) ||
+    needsApprovedScript
 
   const durationOptions = VIDEO_DURATION_OPTIONS
 
@@ -482,7 +736,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
       <form
         id="brief-form"
-        onSubmit={handleSubmit(onSubmit)}
+        onSubmit={handleSubmit(onSubmit, onInvalid)}
         className="max-w-[1440px] mx-auto p-6 md:p-8 grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-6"
       >
         <div className="space-y-4">
@@ -541,7 +795,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               {!wantsVideo && (selectedFormats ?? []).length > 0 && (
                 <p className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 mb-3">
                   <strong>Static</strong> / <strong>Carousel</strong> = image + copy only. Add{' '}
-                  <strong>Landscape</strong> or <strong>Portrait</strong> for video (up to 30s).
+                  <strong>Landscape</strong> or <strong>Portrait</strong> for video (up to 4 minutes).
                 </p>
               )}
               <ChipToggleGroup
@@ -575,45 +829,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 </div>
               )}
             </div>
-            <div
-              className={`grid grid-cols-1 gap-3 pt-2 border-t border-border ${
-                wantsVideo ? 'md:grid-cols-3' : 'md:grid-cols-2'
-              }`}
-            >
-              <Select
-                label="Copy model"
-                options={
-                  catalog?.copy_models.map((m) => ({ value: m.id, label: m.label })) ?? []
-                }
-                value={genSettings.copyModel}
-                onChange={(e) => setGenSettings({ ...genSettings, copyModel: e.target.value })}
-              />
-              <Select
-                label="Image model"
-                hint="Open list — groups: Runway, Higgsfield"
-                options={imageModelSelect.options}
-                groups={imageModelSelect.groups}
-                value={genSettings.imageModel}
-                onChange={(e) => setGenSettings({ ...genSettings, imageModel: e.target.value })}
-              />
-              {wantsVideo && (
-                <Select
-                  label="Video provider"
-                  hint="Open list — groups: HeyGen, Runway, Higgsfield"
-                  options={videoModelSelect.options}
-                  groups={videoModelSelect.groups}
-                  value={genSettings.videoModel}
-                  onChange={(e) =>
-                    setGenSettings({ ...genSettings, videoModel: e.target.value })
-                  }
-                />
-              )}
-            </div>
             {isHiggsfieldVideo && (
               <p className="text-xs text-mid bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
                 <strong>Higgsfield:</strong> Veo/DoP models are only <strong>5 seconds</strong> per
-                clip. For 10–30s ads choose <strong>Kling v3.0</strong> or{' '}
-                <strong>Marketing Studio Video</strong>. Text/captions are added after generation
+                clip. For longer ads choose <strong>Kling v3.0</strong>,{' '}
+                <strong>Marketing Studio Video</strong>, or <strong>HeyGen</strong> (up to 4 minutes). Text/captions are added after generation
                 (not inside the AI video) so they stay readable.
               </p>
             )}
@@ -636,17 +856,16 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               )}
               <p className="text-xs text-mid mb-3">
                 <strong>Manual</strong> — fill campaign fields and use AI for script.{' '}
-                <strong>PDF</strong> — upload a PDF; only avatar + voice are chosen here.
+                <strong>PDF</strong> — upload a PDF; only avatar + voice are chosen here.{' '}
+                <strong>Paste prompt &amp; image</strong> — supply your own script and reference image.{' '}
+                <strong>Website URL</strong> — paste your webpage and AI writes the script using the best framework for your chosen duration.
               </p>
               <div className="flex flex-wrap gap-2 mb-3">
                 <ChipToggle
                   label="Manual campaign & AI"
                   selected={scriptBuildMode === 'manual'}
                   disabled={!wantsVideo}
-                  onToggle={() => {
-                    setScriptBuildMode('manual')
-                    setPdfFile(null)
-                  }}
+                  onToggle={() => setScriptBuildMode('manual')}
                 />
                 <ChipToggle
                   label="Upload PDF script"
@@ -659,11 +878,23 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                     }
                   }}
                 />
+                <ChipToggle
+                  label="Paste prompt & image"
+                  selected={scriptBuildMode === 'custom'}
+                  disabled={!wantsVideo}
+                  onToggle={() => setScriptBuildMode('custom')}
+                />
+                <ChipToggle
+                  label="Website URL → AI script"
+                  selected={scriptBuildMode === 'website'}
+                  disabled={!wantsVideo}
+                  onToggle={() => setScriptBuildMode('website')}
+                />
               </div>
               {scriptBuildMode === 'pdf' && wantsVideo && !isHeyGen && (
                 <p className="text-[11px] text-mid mb-2">Switching provider to HeyGen for PDF mode…</p>
               )}
-              {isPdfModeHeyGen && (
+              {isPdfScriptMode && (
                 <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-2">
                   <label className="block text-xs font-bold text-navy uppercase tracking-wide">
                     Upload script PDF
@@ -687,10 +918,121 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   </p>
                 </div>
               )}
+              {isCustomScriptMode && (
+                <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-3">
+                  <div>
+                    <label
+                      htmlFor="custom-video-prompt"
+                      className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5"
+                    >
+                      Video prompt / script
+                    </label>
+                    <TextArea
+                      id="custom-video-prompt"
+                      rows={5}
+                      placeholder="Paste your full video script, scene directions, or creative prompt here…"
+                      value={customPrompt}
+                      onChange={(e) => setCustomPrompt(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5">
+                      Reference image
+                    </label>
+                    <div
+                      tabIndex={0}
+                      onPaste={handleReferenceImagePaste}
+                      className="rounded-xl border-2 border-dashed border-border bg-light p-4 focus:outline-none focus:border-accent/50"
+                    >
+                      {referenceImagePreview ? (
+                        <div className="space-y-2">
+                          <img
+                            src={referenceImagePreview}
+                            alt="Reference preview"
+                            className="max-h-40 rounded-lg object-contain mx-auto"
+                          />
+                          <p className="text-xs text-navy text-center">
+                            <strong>{referenceImageFile?.name}</strong>
+                          </p>
+                          <button
+                            type="button"
+                            className="text-xs text-mid hover:text-charcoal underline block mx-auto"
+                            onClick={() => applyReferenceImageFile(null)}
+                          >
+                            Remove image
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-center space-y-2">
+                          <p className="text-xs text-mid">
+                            Upload or <strong>paste</strong> an image (Ctrl+V) to use as the video seed.
+                          </p>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            className="text-sm w-full file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-teal file:text-white"
+                            onChange={(e) => applyReferenceImageFile(e.target.files?.[0] ?? null)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    {!referenceImageFile && (
+                      <p className="text-xs text-amber-700 mt-2">
+                        Add a reference image before Create &amp; Generate.
+                      </p>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-mid">
+                    Your prompt drives the spoken script and scene plan. The reference image is used
+                    as the seed still for video generation. Pick avatar, voice, and duration below.
+                  </p>
+                </div>
+              )}
+              {isWebsiteScriptMode && (
+                <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-3">
+                  <div>
+                    <label
+                      htmlFor="website-url-input"
+                      className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5"
+                    >
+                      Website page URL
+                    </label>
+                    <input
+                      id="website-url-input"
+                      type="url"
+                      className="w-full rounded-lg border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40"
+                      placeholder="https://yourwebsite.com/service-page"
+                      value={websiteUrl}
+                      onChange={(e) => setWebsiteUrl(e.target.value)}
+                    />
+                    {!websiteUrl.trim() && (
+                      <p className="text-xs text-amber-700 mt-1.5">
+                        Paste your page URL — AI will read it and write the script.
+                      </p>
+                    )}
+                  </div>
+                  <div className="rounded-lg bg-violet-50 border border-violet-200 px-3 py-2 space-y-1">
+                    <p className="text-[11px] font-semibold text-violet-800">Framework auto-selected by duration:</p>
+                    <p className="text-[11px] text-violet-700">
+                      {genSettings.videoDurationSeconds <= 20 && '⚡ Hook + CTA — punchy single-message ad'}
+                      {genSettings.videoDurationSeconds > 20 && genSettings.videoDurationSeconds <= 45 && '▶ Hook → Benefit → CTA'}
+                      {genSettings.videoDurationSeconds > 45 && genSettings.videoDurationSeconds <= 90 && '▶ Problem → Solution → CTA'}
+                      {genSettings.videoDurationSeconds > 90 && genSettings.videoDurationSeconds <= 150 && '▶ Problem → Agitate → Solution → CTA'}
+                      {genSettings.videoDurationSeconds > 150 && '▶ Story Arc — Before / Struggle / Discovery / Results / CTA'}
+                    </p>
+                    <p className="text-[10px] text-violet-600">Change duration above to switch framework.</p>
+                  </div>
+                  <p className="text-[11px] text-mid">
+                    The AI fetches your page, extracts key content, and writes a fully timed script.
+                    Pick avatar, voice, and duration above — the script is generated in Step 8.
+                  </p>
+                </div>
+              )}
             </div>
+
           </BriefSection>
 
-          {!isPdfModeHeyGen && (
+          {!hideCampaignDetailSteps && (
             <>
           <BriefSection title="Audience & Tone" step="3">
             <Input
@@ -735,15 +1077,25 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           </BriefSection>
 
           <BriefSection title="Script & Content" step="5">
-            <Input label="Hero Product" placeholder="e.g. General & Cosmetic Dentistry" error={errors.product_name?.message} {...register('product_name')} />
-            <Input label="Offer / Key Message" placeholder="e.g. Free consultation for new patients" error={errors.offer?.message} {...register('offer')} />
+            <Input
+              label="Hero Product (optional)"
+              placeholder="e.g. General & Cosmetic Dentistry"
+              error={errors.product_name?.message}
+              {...register('product_name')}
+            />
+            <Input
+              label="Offer / Key Message (optional)"
+              placeholder="e.g. Free consultation for new patients"
+              error={errors.offer?.message}
+              {...register('offer')}
+            />
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                 <label
                   htmlFor="script-brief-notes"
                   className="block text-xs font-bold text-navy uppercase tracking-wide"
                 >
-                  {wantsVideo && isHeyGen ? 'Creative brief (talking points)' : 'Script / Brief Notes'}
+                  {wantsVideo && isHeyGen ? 'Creative brief (optional talking points)' : 'Script / Brief Notes (optional)'}
                 </label>
                 <Button
                   type="button"
@@ -752,7 +1104,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   isLoading={generatingNotes}
                   onClick={() => void handleGenerateScriptNotes()}
                 >
-                  {wantsVideo && isHeyGen ? 'Generate talking points' : '✨ Generate with AI'}
+                  Generate script using ICP
                 </Button>
               </div>
               <TextArea
@@ -761,7 +1113,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 placeholder={
                   wantsVideo && isHeyGen
                     ? 'Writer directions: themes, tone, what to mention — not the words the avatar speaks aloud.'
-                    : 'What should the ad say? Paste script ideas or talking points — or click Generate with AI above.'
+                    : 'What should the ad say? Paste script ideas or talking points — or click Generate script using ICP above.'
                 }
                 error={errors.notes?.message}
                 {...register('notes')}
@@ -769,12 +1121,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               <p className="mt-1 text-[11px] text-mid">
                 {wantsVideo && isHeyGen ? (
                   <>
-                    Ideas for the ad only — saved on the brief, not sent to HeyGen as voiceover. In{' '}
-                    <strong>step 8</strong> below, click <strong>Generate spoken script</strong>, then{' '}
-                    <strong>Approve</strong>.
+                    Optional — skip if you paste your full script in <strong>step 8</strong>. Otherwise use{' '}
+                    <strong>Generate script using ICP</strong> here, then <strong>Approve</strong> in step 8.
                   </>
                 ) : (
-                  'Uses Claude Sonnet 4.6 from your campaign fields above (product, offer, audience, tone).'
+                  'Optional. Builds an ICP from audience + offer when those fields are filled.'
                 )}
               </p>
             </div>
@@ -784,70 +1135,74 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           )}
 
           {wantsVideo && isHeyGen && (
-            <>
-              <HeyGenVideoSettingsCard
-                pdfScriptOnly={isPdfModeHeyGen}
-                durationSeconds={genSettings.videoDurationSeconds}
-                avatarLabel={avatarLabel}
-                voiceLabel={voiceLabel}
-                avatarOptions={catalog?.heygen_avatar_options ?? []}
-                avatarFeatured={catalog?.heygen_avatar_featured}
-                heygenCatalog={catalog ?? undefined}
-                voiceOptions={catalog?.heygen_voice_options ?? []}
-                avatarId={genSettings.heygenAvatarId}
-                voiceId={genSettings.heygenVoiceId}
-                onAvatarChange={(id) => setGenSettings({ ...genSettings, heygenAvatarId: id })}
-                onVoiceChange={(id) => setGenSettings({ ...genSettings, heygenVoiceId: id })}
-                onDurationChange={(seconds) =>
-                  setGenSettings({ ...genSettings, videoDurationSeconds: seconds })
-                }
-                settings={heygenSettings}
-                onChange={setHeygenSettings}
-                durationOptions={durationOptions}
-                campaignContext={{
-                  productName: formValues.product_name ?? '',
-                  offer: formValues.offer ?? '',
-                  brandName: selectedBrand?.name ?? '',
-                  targetAudience: [
-                    formValues.audience_type,
-                    formValues.geography,
-                    formValues.age_range,
-                  ]
-                    .filter(Boolean)
-                    .join(' · '),
-                  adCopyTone: formValues.ad_copy_tone ?? '',
-                  cta: formValues.cta ?? '',
-                  notes: formValues.notes ?? '',
-                  avatarScript: approvedAvatarScript ?? undefined,
-                  forbiddenWords: selectedBrand?.forbidden_words,
-                }}
-              />
-              {!isPdfModeHeyGen && (
-              <AvatarScriptPanel
-                context={{
-                  briefNotes: formValues.notes ?? '',
-                  productName: formValues.product_name ?? '',
-                  offer: formValues.offer ?? '',
-                  brandName: selectedBrand?.name ?? '',
-                  targetAudience: [
-                    formValues.audience_type,
-                    formValues.geography,
-                    formValues.age_range,
-                  ]
-                    .filter(Boolean)
-                    .join(' · '),
-                  adCopyTone: formValues.ad_copy_tone ?? '',
-                  cta: formValues.cta ?? '',
-                  targetSeconds: genSettings.videoDurationSeconds,
-                  avatarLabel,
-                  voiceLabel,
-                  forbiddenWords: selectedBrand?.forbidden_words,
-                }}
-                approvedScript={approvedAvatarScript}
-                onApprovedScript={setApprovedAvatarScript}
-              />
-              )}
-            </>
+            <HeyGenProductionPipeline
+              pdfScriptOnly={isPdfScriptMode || isCustomScriptMode}
+              durationSeconds={genSettings.videoDurationSeconds}
+              avatarLabel={avatarLabel}
+              voiceLabel={voiceLabel}
+              avatarOptions={catalog?.heygen_avatar_options ?? []}
+              avatarFeatured={catalog?.heygen_avatar_featured}
+              heygenCatalog={catalog ?? undefined}
+              voiceOptions={catalog?.heygen_voice_options ?? []}
+              avatarId={genSettings.heygenAvatarId}
+              voiceId={genSettings.heygenVoiceId}
+              onAvatarChange={(id) => setGenSettings({ ...genSettings, heygenAvatarId: id })}
+              onVoiceChange={(id) => setGenSettings({ ...genSettings, heygenVoiceId: id })}
+              onDurationChange={(seconds) =>
+                setGenSettings({ ...genSettings, videoDurationSeconds: seconds })
+              }
+              settings={heygenSettings}
+              onSettingsChange={setHeygenSettings}
+              durationOptions={durationOptions}
+              campaignContext={{
+                productName: formValues.product_name ?? '',
+                offer: formValues.offer ?? '',
+                brandName: selectedBrand?.name ?? '',
+                targetAudience: [
+                  formValues.audience_type,
+                  formValues.geography,
+                  formValues.age_range,
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
+                adCopyTone: formValues.ad_copy_tone ?? '',
+                cta: formValues.cta ?? '',
+                notes: formValues.notes ?? '',
+                avatarScript: approvedAvatarScript ?? undefined,
+                forbiddenWords: selectedBrand?.forbidden_words,
+              }}
+              scriptContext={{
+                briefNotes: formValues.notes ?? '',
+                productName: formValues.product_name ?? '',
+                offer: formValues.offer ?? '',
+                brandName: selectedBrand?.name ?? '',
+                targetAudience: [
+                  formValues.audience_type,
+                  formValues.geography,
+                  formValues.age_range,
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
+                adCopyTone: formValues.ad_copy_tone ?? '',
+                cta: formValues.cta ?? '',
+                targetSeconds: genSettings.videoDurationSeconds,
+                avatarLabel,
+                voiceLabel,
+                forbiddenWords: selectedBrand?.forbidden_words,
+                websiteUrl: isWebsiteScriptMode ? websiteUrl : undefined,
+              }}
+              approvedScript={approvedAvatarScript}
+              onApprovedScript={setApprovedAvatarScript}
+              onExportSnapshotChange={setAvatarExportSnapshot}
+              onAfterScriptApproved={() => {
+                requestAnimationFrame(() => {
+                  createVideoButtonRef.current?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center',
+                  })
+                })
+              }}
+            />
           )}
 
           <BriefSection title="Call to Action" step="7">
@@ -856,6 +1211,38 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               placeholder="e.g. Book Appointment, Shop Now, Learn More"
               error={errors.cta?.message}
               {...register('cta')}
+            />
+          </BriefSection>
+
+          {/* ── Model Selector — bottom of form after all inputs ─────── */}
+          <BriefSection title="AI Models" step="9">
+            <p className="text-xs text-mid -mt-1 mb-1">
+              Once you&apos;ve filled your campaign details above, click{' '}
+              <strong>Analyse &amp; suggest models</strong> to let the AI pick the best
+              image and video models — or choose manually from the dropdowns.
+            </p>
+            <ModelSelectorBlock
+              catalog={catalog}
+              wantsVideo={wantsVideo}
+              genSettings={genSettings}
+              setGenSettings={setGenSettings}
+              imageModelSelect={imageModelSelect}
+              videoModelSelect={videoModelSelect}
+              getSuggestionInputs={() => ({
+                campaign_name: formValues.title ?? '',
+                objective: formValues.objective_id
+                  ? (catalog?.objectives.find(o => o.id === formValues.objective_id)?.label ?? formValues.objective_id)
+                  : '',
+                formats: selectedFormats ?? [],
+                target_audience: [formValues.audience_type, formValues.geography, formValues.age_range]
+                  .filter(Boolean).join(' · '),
+                offer: formValues.offer ?? '',
+                product_name: formValues.product_name ?? '',
+                ad_copy_tone: formValues.ad_copy_tone ?? '',
+                cta: formValues.cta ?? '',
+                duration_seconds: genSettings.videoDurationSeconds,
+                brand_name: selectedBrand?.name ?? '',
+              })}
             />
           </BriefSection>
         </div>
@@ -902,13 +1289,74 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             </ul>
           </div>
 
+          <StrategyPreviewPanel
+            canBuild={Boolean(catalog && hasBrands)}
+            onPreviewChange={setStrategyPreview}
+            getInputs={() => ({
+              campaign_name: formValues.title ?? '',
+              brand_name: selectedBrand?.name ?? '',
+              product_name: formValues.product_name ?? '',
+              offer: formValues.offer ?? '',
+              target_audience: [
+                formValues.audience_type,
+                formValues.geography,
+                formValues.age_range,
+              ]
+                .filter(Boolean)
+                .join(' · '),
+              ad_copy_tone: formValues.ad_copy_tone ?? '',
+              cta: formValues.cta ?? '',
+              target_seconds: genSettings.videoDurationSeconds,
+              hook_frameworks: selectedFrameworks ?? [],
+              objective: formValues.objective_id
+                ? (catalog?.objectives.find((o) => o.id === formValues.objective_id)?.label ??
+                  formValues.objective_id)
+                : '',
+              placements: selectedPlacements ?? [],
+              formats: selectedFormats ?? [],
+              website_url: isWebsiteScriptMode ? websiteUrl : undefined,
+            })}
+          />
+
           <div className="flex flex-col gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={handleDownloadBriefExcel}
+            >
+              Download brief Excel (Steps 1–9 + script)
+            </Button>
+            {needsApprovedScript && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Scroll to <strong>step 8</strong>, click <strong>Generate spoken script</strong>, then{' '}
+                <strong>Approve</strong> before creating the video.
+              </p>
+            )}
+            {wantsVideo && isHeyGen && approvedAvatarScript && !needsApprovedScript && (
+              <p className="text-xs text-teal-900 bg-teal-50 border border-teal-300 rounded-lg px-3 py-2 font-medium">
+                ✓ Script approved — click the button below to start HeyGen video generation.
+              </p>
+            )}
             <Button type="button" variant="outline" onClick={() => router.push('/briefs')}>
               Back
             </Button>
-            <Button type="submit" variant="primary" isLoading={isSubmitting} disabled={!hasBrands || !catalog || (isPdfModeHeyGen && !pdfFile)}>
-              {submitLabel}
-            </Button>
+            <div ref={createVideoButtonRef}>
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={isSubmitting}
+                disabled={submitBlocked}
+                className="w-full"
+                title={
+                  needsApprovedScript
+                    ? 'Generate and approve your spoken script in step 8 first'
+                    : undefined
+                }
+              >
+                {submitLabel}
+              </Button>
+            </div>
           </div>
         </aside>
       </form>

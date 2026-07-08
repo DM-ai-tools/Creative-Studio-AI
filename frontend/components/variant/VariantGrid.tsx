@@ -1,5 +1,6 @@
 import React from 'react'
 import VariantTile from './VariantTile'
+import { variantGridClass } from '@/lib/creativeFormats'
 import type { Variant } from '@/types'
 
 interface VariantGridProps {
@@ -52,7 +53,7 @@ export default function VariantGrid({
   }
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+    <div className={variantGridClass(variants)}>
       {variants.map((v) => (
         <VariantTile
           key={v.id}

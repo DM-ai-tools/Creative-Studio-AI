@@ -5,6 +5,7 @@ import HeyGenAvatarPicker from '@/components/brief/HeyGenAvatarPicker'
 import Card from '@/components/ui/Card'
 import Select from '@/components/ui/Select'
 import { ChipToggle } from '@/components/ui/ChipToggle'
+import { cn } from '@/lib/utils'
 import type { GenerationCatalog } from '@/types'
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 
@@ -16,6 +17,11 @@ export const VIDEO_DURATION_OPTIONS = [
   { id: '12', label: '12s' },
   { id: '15', label: '15s' },
   { id: '30', label: '30s' },
+  { id: '60', label: '1m' },
+  { id: '90', label: '1m 30s' },
+  { id: '120', label: '2m' },
+  { id: '180', label: '3m' },
+  { id: '240', label: '4m' },
 ]
 
 export interface BriefGenerationSettings {
@@ -36,6 +42,8 @@ interface BriefGenerationPanelProps {
   disabled?: boolean
   /** When HeyGenVideoSettingsCard is on the same page, hide duplicate avatar picker here. */
   hideHeyGenPresenter?: boolean
+  /** Scroll long model pickers inside the card instead of stretching the page. */
+  scrollable?: boolean
 }
 
 export default function BriefGenerationPanel({
@@ -45,6 +53,7 @@ export default function BriefGenerationPanel({
   onChange,
   disabled,
   hideHeyGenPresenter = false,
+  scrollable = false,
 }: BriefGenerationPanelProps) {
   const wantsVideo = formats.some((f) => f === 'reel' || f === 'video')
   const isHeyGen = settings.videoModel.toLowerCase().startsWith('heygen')
@@ -73,8 +82,8 @@ export default function BriefGenerationPanel({
 
   const durationOptions = VIDEO_DURATION_OPTIONS
 
-  return (
-    <Card title="Generation models" className="border-accent/20">
+  const panelBody = (
+    <>
       <p className="text-xs text-mid mb-4 -mt-1">
         {wantsVideo
           ? 'Choose copy, image, and video provider before generating or regenerating.'
@@ -87,7 +96,7 @@ export default function BriefGenerationPanel({
           Captions are burned from your ad copy / production script after render. Veo/DoP models are{' '}
           <strong>5s max</strong> and get a <strong>Runway voiceover</strong> (needs Runway API key).
           For native speech in the clip use <strong>Kling v3.0</strong> or{' '}
-          <strong>Marketing Studio Video</strong> (up to 10–30s).
+          <strong>Marketing Studio Video</strong> (up to 4 minutes with HeyGen).
         </p>
       )}
       {wantsVideo && !isHeyGen && settings.videoModel.startsWith('hf-') && higgsfieldVoiceOptions.length > 0 && (
@@ -183,6 +192,22 @@ export default function BriefGenerationPanel({
             />
           )}
         </div>
+      )}
+    </>
+  )
+
+  return (
+    <Card
+      title="Generation models"
+      className={cn('border-accent/20', scrollable && 'flex flex-col max-h-[min(56vh,560px)]')}
+      padding={!scrollable}
+    >
+      {scrollable ? (
+        <div className="overflow-y-auto overscroll-contain min-h-0 flex-1 px-5 pb-5 pt-0 max-h-[min(48vh,480px)]">
+          {panelBody}
+        </div>
+      ) : (
+        panelBody
       )}
     </Card>
   )

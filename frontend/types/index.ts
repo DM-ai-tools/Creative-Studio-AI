@@ -162,6 +162,100 @@ export interface AvatarScriptResult {
   validations: AvatarScriptValidation[]
 }
 
+export interface IcpScriptResult {
+  icp_text: string
+  script: AvatarScriptResult
+}
+
+export interface WebsiteScriptResult {
+  script: AvatarScriptResult
+  page_title: string
+  page_description: string
+  framework_name: string
+  framework_description: string
+  url: string
+}
+
+export interface PerformanceMetricItem {
+  label: string
+  value: string
+}
+
+/** ROAS / ROI / conversion stats extracted from a dashboard screenshot */
+export interface PerformanceStatsContext {
+  industry: string
+  campaign_type: string
+  headline_stat: string
+  roas: string
+  roi: string
+  conversions: string
+  clicks: string
+  purchases_sales: string
+  revenue: string
+  conversion_value: string
+  cost: string
+  cost_per_conversion: string
+  conv_value_per_cost: string
+  lead_forms: string
+  timeline: string
+  growth_story: string
+  metrics: PerformanceMetricItem[]
+  script_proof_lines: string[]
+  summary_for_script: string
+}
+
+export interface StatsImageExtractionResult {
+  stats: PerformanceStatsContext
+  filename: string
+}
+
+export interface BodyOutlineSection {
+  section: string
+  duration_hint: string
+  talking_points: string
+}
+
+export interface HaloStrategy {
+  hook: string
+  agitate: string
+  lift: string
+  offer: string
+}
+
+export interface StrategyPreviewResult {
+  campaign_name: string
+  brand_name: string
+  product_name: string
+  offer: string
+  target_audience: string
+  ad_copy_tone: string
+  cta: string
+  target_seconds: number
+  objective: string
+  hook_frameworks: string[]
+  competitors: string[]
+  website_url: string
+  framework_name: string
+  framework_description: string
+  framework_structure: string[]
+  icp_text: string
+  icp_fields: Record<string, string>
+  hook_options: string[]
+  body_outline: BodyOutlineSection[]
+  halo_strategy: HaloStrategy
+  competitor_positioning: string
+  differentiation_points: string[]
+}
+
+export interface ModelSuggestion {
+  image_model: string
+  image_reason: string
+  video_model: string
+  video_reason: string
+  copy_model: string
+  copy_reason: string
+}
+
 export interface Variant {
   id: string
   brief_id: string

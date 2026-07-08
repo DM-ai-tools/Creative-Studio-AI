@@ -23,6 +23,7 @@ from app.services.video_script_skeleton import (
     build_heygen_agent_prompt,
     ensure_production_skeleton,
     resolve_heygen_spoken_script,
+    resolve_stats_image_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,12 @@ def _use_v3_primary() -> bool:
 
 
 def _heygen_v3_orientation(format_type: str, brief: dict | None = None) -> str:
-    """HeyGen Video Agent orientation from format + brief HeyGen settings."""
+    """HeyGen Video Agent orientation — creative format overrides conflicting card settings."""
+    ft = (format_type or "").lower()
+    if ft in {"reel", "stories"}:
+        return "portrait"
+    if ft == "video":
+        return "landscape"
     brief = brief or {}
     heygen: dict = {}
     raw = brief.get("heygen_settings")
@@ -100,15 +106,18 @@ def _heygen_v3_orientation(format_type: str, brief: dict | None = None) -> str:
     ).lower()
     if "16:9" in ar or "16x9" in ar or "landscape" in ar:
         return "landscape"
-    if format_type == "video":
-        return "landscape"
-    if format_type in {"reel", "stories"}:
+    if "9:16" in ar or "9x16" in ar or "portrait" in ar or "vertical" in ar:
         return "portrait"
     return "landscape"
 
 
 def _video_dimensions(format_type: str, brief: dict | None = None) -> dict[str, int]:
-    """Portrait 1080x1920 for reels; respect HeyGen card aspect when set."""
+    """Output dimensions — creative format overrides HeyGen card aspect."""
+    ft = (format_type or "").lower()
+    if ft in {"reel", "stories"}:
+        return {"width": 1080, "height": 1920}
+    if ft == "video":
+        return {"width": 1920, "height": 1080}
     heygen = None
     if brief:
         heygen = brief.get("heygen_settings")
@@ -130,10 +139,6 @@ def _video_dimensions(format_type: str, brief: dict | None = None) -> dict[str, 
             return {"width": 1920, "height": 1080}
         if "1:1" in ar or "square" in ar:
             return {"width": 1080, "height": 1080}
-    if format_type in {"reel", "stories"}:
-        return {"width": 1080, "height": 1920}
-    if format_type == "video":
-        return {"width": 1920, "height": 1080}
     return {"width": 1080, "height": 1080}
 
 
@@ -153,8 +158,10 @@ class HeyGenVideoProvider(VideoGenerationProvider):
         if not heygen_configured():
             return _fail("HEYGEN_API_KEY is not configured")
 
+        from app.services.video_duration import MAX_VIDEO_DURATION_SECONDS
+
         target_duration = requested_video_duration_seconds(brief, override=duration_seconds)
-        target_duration = max(5, min(60, int(target_duration)))
+        target_duration = max(5, min(MAX_VIDEO_DURATION_SECONDS, int(target_duration)))
 
         avatar_raw = brief.get("heygen_avatar_id") or settings.HEYGEN_AVATAR_ID
         prefer_portrait = format_type in {"reel", "stories"}
@@ -179,18 +186,48 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             duration=target_duration,
             format_type=format_type,
         )
-        brief = {**brief, "video_script_skeleton": production_skeleton}
+        from app.services.stats_image_service import ensure_avatar_script_cites_ocr_stats
+
+        brief = ensure_avatar_script_cites_ocr_stats(
+            {**brief, "video_script_skeleton": production_skeleton},
+            duration=target_duration,
+        )
+        production_skeleton = str(brief.get("video_script_skeleton") or production_skeleton)
         script = resolve_heygen_spoken_script(
             brief,
             copy,
             production_skeleton=production_skeleton,
             target_seconds=target_duration,
         )
-        from app.services.video_script_skeleton import align_skeleton_to_spoken_script
+        from app.services.video_script_skeleton import (
+            align_skeleton_to_spoken_script,
+            merge_voice_and_broll_timeline,
+            script_has_timed_lines,
+            _heygen_scene_broll_raw,
+        )
+
+        kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
+        timed_voice = str(brief.get("avatar_script") or kb.get("avatar_script") or "").strip()
+        broll_raw = _heygen_scene_broll_raw(brief)
+        if timed_voice and script_has_timed_lines(timed_voice):
+            align_script = (
+                merge_voice_and_broll_timeline(timed_voice, broll_raw)
+                if broll_raw
+                else timed_voice
+            )
+        else:
+            align_script = script
+
+        logger.info(
+            "HEYGEN spoken script → %d words | approved_avatar=%s | preview: %s",
+            len(script.split()),
+            bool(timed_voice),
+            script[:180].replace("\n", " "),
+        )
 
         production_skeleton = align_skeleton_to_spoken_script(
             production_skeleton,
-            script,
+            align_script,
             duration=target_duration,
             brief=brief,
         )
@@ -270,27 +307,8 @@ class HeyGenVideoProvider(VideoGenerationProvider):
                     saved["url"] = trim_url
                     actual_duration = trim_dur or float(target_duration)
                     trimmed = True
+                # Frame normalize runs once after finalize in ai_service (not here)
                 fitted: str | None = None
-                if format_type in {"reel", "stories"}:
-                    from app.services.video_portrait import normalize_portrait_video_file
-
-                    fitted = await asyncio.to_thread(
-                        normalize_portrait_video_file,
-                        final_url,
-                        tenant_id=tenant_id,
-                        format_type=format_type,
-                    )
-                    if fitted:
-                        final_url = fitted
-                        saved["url"] = fitted
-                    else:
-                        logger.warning(
-                            "HeyGen portrait normalize returned None for %s — "
-                            "check ffmpeg is installed",
-                            final_url[:80],
-                        )
-
-                # Logo + subtitles are applied in finalize_video_with_brand_logo (ai_service)
                 kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
                 return {
                     "status": "done",
@@ -306,6 +324,7 @@ class HeyGenVideoProvider(VideoGenerationProvider):
                     "prompt": script,
                     "production_skeleton": production_skeleton,
                     "portrait_normalized": bool(fitted),
+                    "frame_normalized": bool(fitted),
                     "trimmed_to_requested_duration": trimmed,
                     "url": final_url,
                     "duration_seconds": actual_duration or target_duration,
@@ -437,6 +456,12 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             "voice_id": voice_id,
             "orientation": orientation,
         }
+        stats_urls = resolve_stats_image_urls(brief)
+        if stats_urls:
+            logger.info(
+                "HeyGen v3: %s stats image(s) — post-process ffmpeg overlay (not attached to agent)",
+                len(stats_urls),
+            )
         # NOTE: HeyGen v3 Video Agent (/v3/video-agents) does NOT accept a
         # `caption` field — only /v3/videos (direct video) does.
         # Adding it causes "Extra inputs are not permitted" and video failure.

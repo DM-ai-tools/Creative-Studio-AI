@@ -398,6 +398,42 @@ def finalize_video_with_brand_logo(
     script = sanitize_script_for_subtitles(raw_script, duration=dur)
     result["subtitles_applied"] = False
     result["logo_applied"] = False
+    result["stats_overlay_applied"] = False
+
+    # --- Step 0: Stats dashboard (proof beat) — burned before logo/subtitles ---
+    from app.services.video_script_skeleton import (
+        resolve_stats_image_urls,
+        resolve_timed_script_for_stats_overlay,
+    )
+    from app.services.video_stats_overlay import apply_stats_overlay_to_video_file
+
+    stats_urls = resolve_stats_image_urls(merged_brief)
+    if stats_urls:
+        stats_timed_script = resolve_timed_script_for_stats_overlay(merged_brief, result)
+        # HeyGen's SRT (real audio timing) lets us pin each dashboard to the
+        # exact moment its numbers are spoken.
+        stats_srt = None
+        srt_url = result.get("heygen_subtitle_url") or result.get("subtitle_url")
+        if srt_url:
+            from app.services.video_subtitles import _download_text_url
+
+            stats_srt = _download_text_url(str(srt_url))
+        stats_url_out, stats_ok, stats_meta = apply_stats_overlay_to_video_file(
+            current_url,
+            brief=merged_brief,
+            spoken_script=stats_timed_script or raw_script,
+            duration_seconds=dur,
+            tenant_id=tenant_id,
+            subtitle_srt=stats_srt,
+        )
+        if stats_url_out:
+            current_url = stats_url_out
+        result["stats_overlay_applied"] = stats_ok
+        result.update(stats_meta)
+        if not stats_ok and stats_meta.get("stats_overlay_warning"):
+            result["stats_overlay_warning"] = stats_meta["stats_overlay_warning"]
+
+    result["url"] = current_url
 
     # --- Step 1: Brand logo (HeyGen download has no Brand Kit logo) ---
     if not video_logo_overlay_enabled(merged_brief):

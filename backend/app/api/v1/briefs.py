@@ -338,7 +338,15 @@ async def generate_variants(
 
                 # HeyGen Video Agent builds the full video (avatar + B-roll) — no Runway still needed.
                 skip_image_for_heygen = uses_heygen_video and fmt in {"reel", "video"}
-                if skip_image_for_heygen:
+                reference_image_url = kb_models.get("reference_image_url")
+                user_image_url = reference_image_url
+                if user_image_url:
+                    pipeline["image"] = {
+                        "status": "done",
+                        "url": user_image_url,
+                        "source": "user_reference" if reference_image_url else "stats_dashboard",
+                    }
+                elif skip_image_for_heygen:
                     pipeline["image"] = {
                         "status": "skipped",
                         "model": image_model,

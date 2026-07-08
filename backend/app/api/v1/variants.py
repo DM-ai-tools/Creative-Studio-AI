@@ -87,11 +87,11 @@ async def fix_variant_portrait(
     """Re-process an existing reel/video to 1080x1920 (removes HeyGen letterboxing)."""
     import asyncio
 
-    from app.services.video_portrait import is_vertical_format, normalize_portrait_video_file
+    from app.services.video_portrait import normalize_video_file, should_normalize_format
 
     variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
-    if not is_vertical_format(variant.format):
-        raise HTTPException(status_code=400, detail="Only reel/video variants can be fixed")
+    if not should_normalize_format(variant.format):
+        raise HTTPException(status_code=400, detail="Only reel or landscape video variants can be fixed")
 
     pipeline = dict(variant.generation_params or {})
     video_step = dict((pipeline.get("pipeline") or {}).get("video") or {})
@@ -100,7 +100,7 @@ async def fix_variant_portrait(
         raise HTTPException(status_code=400, detail="Variant has no video file")
 
     fitted = await asyncio.to_thread(
-        normalize_portrait_video_file,
+        normalize_video_file,
         url,
         tenant_id=str(current_user.tenant_id),
         format_type=variant.format,
@@ -108,11 +108,11 @@ async def fix_variant_portrait(
     if not fitted:
         raise HTTPException(
             status_code=500,
-            detail="Portrait fix failed — install ffmpeg and ensure VIDEO_PORTRAIT_NORMALIZE=true",
+            detail="Frame normalize failed — install ffmpeg and ensure VIDEO_PORTRAIT_NORMALIZE=true",
         )
 
     inner = dict(pipeline.get("pipeline") or {})
-    inner["video"] = {**video_step, "url": fitted, "portrait_normalized": True}
+    inner["video"] = {**video_step, "url": fitted, "frame_normalized": True, "portrait_normalized": True}
     pipeline["pipeline"] = inner
     return await VariantService.update_variant(
         db,

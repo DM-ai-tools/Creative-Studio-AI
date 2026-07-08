@@ -21,6 +21,14 @@ VESPRI_GROUP_ID = "25777ee579284b9d9081bc95c49c5f00"
 VESPRI_AVATAR_ID = VESPRI_GROUP_ID  # alias for UI / .env
 VESPRI_CATALOG = CatalogOption(id=VESPRI_GROUP_ID, label="Vespri (Female)", gender="female")
 
+ANNIE_GROUP_ID = "e0e84faea390465896db75a83be45085"
+ANNIE_OFFICE_LOOK_ID = "Annie_Office_Standing_Front_public"
+ANNIE_CATALOG = CatalogOption(
+    id=ANNIE_OFFICE_LOOK_ID,
+    label="Annie Office Standing Front (Female)",
+    gender="female",
+)
+
 _HEX_ID = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
@@ -158,7 +166,10 @@ def _expand_avatar_option(option: CatalogOption) -> list[CatalogOption]:
                 for pose in poses
             ]
     if _HEX_ID.match(option.id) and (
-        option.id == VESPRI_GROUP_ID or "vespri" in option.label.lower()
+        option.id == VESPRI_GROUP_ID
+        or "vespri" in option.label.lower()
+        or option.id == ANNIE_GROUP_ID
+        or "annie" in option.label.lower()
     ):
         poses = _fetch_v3_group_poses(option)
         if poses:
@@ -168,7 +179,41 @@ def _expand_avatar_option(option: CatalogOption) -> list[CatalogOption]:
 
 _AVATAR_CATALOG_CACHE: tuple[float, list[CatalogOption], list[CatalogOption]] | None = None
 _AVATAR_CATALOG_LOCK = Lock()
-_AVATAR_CATALOG_TTL_SEC = 3600
+_AVATAR_CATALOG_TTL_SEC = 300
+
+
+def clear_heygen_avatar_catalog_cache() -> None:
+    """Bust in-memory avatar list (e.g. after .env change without full process restart)."""
+    global _AVATAR_CATALOG_CACHE
+    with _AVATAR_CATALOG_LOCK:
+        _AVATAR_CATALOG_CACHE = None
+
+
+def _annie_configured() -> bool:
+    for option in _parse_options(settings.HEYGEN_AVATAR_OPTIONS):
+        if option.id in {ANNIE_OFFICE_LOOK_ID, ANNIE_GROUP_ID}:
+            return True
+        if "annie" in option.label.lower():
+            return True
+    return False
+
+
+def _pin_featured_avatars(
+    featured: list[CatalogOption],
+    poses: list[CatalogOption],
+) -> tuple[list[CatalogOption], list[CatalogOption]]:
+    """Keep Vespri + Annie easy to find at the top of featured looks."""
+    featured = [o for o in featured if "vespri" not in o.label.lower()]
+    has_vespri_poses = any("vespri" in p.label.lower() for p in poses)
+    if not has_vespri_poses:
+        featured.insert(0, VESPRI_CATALOG)
+
+    if _annie_configured():
+        featured = [o for o in featured if o.id != ANNIE_OFFICE_LOOK_ID]
+        insert_at = 1 if featured and featured[0].id == VESPRI_GROUP_ID else 0
+        featured.insert(insert_at, ANNIE_CATALOG)
+
+    return featured, poses
 
 
 def get_heygen_avatar_catalog_split() -> tuple[list[CatalogOption], list[CatalogOption]]:
@@ -193,10 +238,7 @@ def get_heygen_avatar_catalog_split() -> tuple[list[CatalogOption], list[Catalog
         featured.append(
             CatalogOption(id=str(settings.HEYGEN_AVATAR_ID), label="Default avatar")
         )
-    featured = [o for o in featured if "vespri" not in o.label.lower()]
-    has_vespri_poses = any("vespri" in p.label.lower() for p in poses)
-    if not has_vespri_poses:
-        featured.insert(0, VESPRI_CATALOG)
+    featured, poses = _pin_featured_avatars(featured, poses)
     with _AVATAR_CATALOG_LOCK:
         _AVATAR_CATALOG_CACHE = (now, featured, poses)
     logger.info(

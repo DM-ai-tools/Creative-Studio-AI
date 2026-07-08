@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     OPENROUTER_HTTP_REFERER: str = "http://localhost:3000"
     OPENROUTER_MODEL_CLAUDE: str = "anthropic/claude-haiku-4.5"
     OPENROUTER_MODEL_CLAUDE_SCRIPT: str = "anthropic/claude-sonnet-4"
+    OPENROUTER_MODEL_VISION: str = "google/gemini-2.5-flash"
     OPENROUTER_MODEL_OPENAI: str = "openai/gpt-4o-mini"
     OPENROUTER_MODEL_IMAGE: str = "google/gemini-3.1-flash-image-preview"
     OPENROUTER_MODEL_VIDEO: str = "google/veo-3.1"

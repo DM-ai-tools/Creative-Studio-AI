@@ -40,14 +40,14 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-mesh">
+    <div className="flex h-screen max-h-screen overflow-hidden bg-mesh">
       <Sidebar
         user={user}
         brandName={activeBrand?.name}
         brandSubtitle={brandSubtitle || undefined}
         onLogout={handleLogout}
       />
-      <main className="flex-1 min-w-0 overflow-x-hidden">{children}</main>
+      <main className="flex-1 min-w-0 h-screen overflow-y-auto overflow-x-hidden">{children}</main>
     </div>
   )
 }

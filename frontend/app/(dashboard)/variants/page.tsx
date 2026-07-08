@@ -11,7 +11,7 @@ import { ChipToggle } from '@/components/ui/ChipToggle'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { briefsApi, generationApi, variantsApi } from '@/lib/api'
-import { mapCreativeFormatOptions } from '@/lib/creativeFormats'
+import { mapCreativeFormatOptions, videoPreviewAspectClass, videoModalObjectFit } from '@/lib/creativeFormats'
 import { getVariantPreviewUrls } from '@/lib/variantMedia'
 import { cn, formatDate } from '@/lib/utils'
 import type { Variant, AdFormat, ComplianceStatus } from '@/types'
@@ -22,8 +22,8 @@ export default function VariantsPage() {
   const [briefFilter, setBriefFilter] = useState('all')
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null)
 
-  const { data: catalog } = useApi(() => generationApi.getCatalog(), [], {
-    cacheKey: 'generation/catalog-v2',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
+    cacheKey: 'generation/catalog-v4',
     ttlMs: API_CACHE_TTL.catalog,
   })
   const { data: briefs } = useApi(() => briefsApi.list(), [], {
@@ -170,18 +170,22 @@ export default function VariantsPage() {
                 missingMotionMedia,
               } = getVariantPreviewUrls(selectedVariant)
               if (videoSrc) {
-                const isReel =
-                  selectedVariant.format === 'reel' || selectedVariant.format === 'video'
                 return (
                   <div
                     className={cn(
-                      'mx-auto w-full max-w-[360px] rounded-lg border border-border bg-black overflow-hidden',
-                      isReel && 'aspect-[9/16]'
+                      'mx-auto w-full rounded-lg border border-border bg-black overflow-hidden',
+                      selectedVariant.format === 'video' ? 'max-w-3xl' : 'max-w-[360px]',
+                      videoPreviewAspectClass(selectedVariant.format)
                     )}
                   >
                     <video
                       src={videoSrc}
-                      className="h-full w-full object-cover"
+                      className={cn(
+                        'h-full w-full bg-black',
+                        videoModalObjectFit(selectedVariant.format) === 'contain'
+                          ? 'object-contain'
+                          : 'object-cover'
+                      )}
                       controls
                       playsInline
                     />

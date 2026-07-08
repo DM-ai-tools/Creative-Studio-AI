@@ -1,9 +1,10 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  Asset, AvatarScriptResult, Brand, BrandKit, Brief, DashboardStats,
-  FatigueAlert, GenerationCatalog, MetaExportResponse,
-  MetaStatus, PerformanceMetric, TokenResponse,
+  Asset, AvatarScriptResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  StatsImageExtractionResult, StrategyPreviewResult,
+  WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
+  GenerationCatalog, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
   TopPerformer, User, Variant,
 } from '@/types'
 
@@ -225,8 +226,47 @@ export const performanceApi = {
 
 // ── Generation catalog ───────────────────────────────────────────────────────
 export const generationApi = {
-  getCatalog: () =>
-    api.get<GenerationCatalog>('/generation/catalog', { timeout: 45_000 }).then((r) => r.data),
+  getCatalog: (refresh = false) =>
+    api
+      .get<GenerationCatalog>('/generation/catalog', {
+        timeout: 45_000,
+        params: refresh ? { refresh: true } : undefined,
+      })
+      .then((r) => r.data),
+
+  getVoices: () =>
+    api
+      .get<{ voices: { id: string; label: string; gender?: string | null; language?: string | null; preview_url?: string | null }[] }>('/generation/voices', { timeout: 20_000 })
+      .then((r) => r.data.voices),
+
+  previewVoice: (voiceId: string, text?: string) =>
+    api
+      .get<{ audio_url: string }>('/generation/voice-preview', {
+        params: { voice_id: voiceId, ...(text ? { text } : {}) },
+        timeout: 30_000,
+      })
+      .then((r) => r.data.audio_url),
+
+  createPhotoAvatar: (photo: File, name: string) => {
+    const form = new FormData()
+    form.append('photo', photo)
+    form.append('name', name)
+    return api
+      .post<{ photo_avatar_id: string; status: string; look_id: string | null; name: string }>(
+        '/generation/photo-avatar',
+        form,
+        { timeout: 60_000 },
+      )
+      .then((r) => r.data)
+  },
+
+  getPhotoAvatarStatus: (photoAvatarId: string) =>
+    api
+      .get<{ photo_avatar_id: string; status: string; look_id: string | null; name: string; error?: string | null }>(
+        `/generation/photo-avatar/${photoAvatarId}`,
+        { timeout: 20_000 },
+      )
+      .then((r) => r.data),
 
   generateAvatarScript: (data: {
     script_prompt?: string
@@ -242,10 +282,123 @@ export const generationApi = {
     voice_label?: string
     forbidden_words?: string[]
     variation?: 'default' | 'different_hook'
-    purpose?: 'avatar_script' | 'brief_notes' | 'visual_cues'
+    purpose?: 'avatar_script' | 'brief_notes' | 'visual_cues' | 'scene_broll'
+    performance_stats?: PerformanceStatsContext
+    performance_stats_per_image?: PerformanceStatsContext[]
+    source_script?: string
+    stats_image_count?: number
+    approved_script?: string
+    scene_label?: string
+    scene_custom?: string
   }) =>
     api
       .post<AvatarScriptResult>('/generation/avatar-script', data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  masterScriptPreview: (data: {
+    avatar_script: string
+    scene_broll_directions?: string
+    target_seconds?: number
+    performance_stats_per_image?: PerformanceStatsContext[]
+  }) =>
+    api
+      .post<{
+        beats: {
+          start: string
+          end: string
+          spoken: string
+          visual: string
+          stat_image?: string | null
+          stat_headline?: string | null
+          stat_warning?: string | null
+        }[]
+        warnings: string[]
+        ready: boolean
+      }>('/generation/master-script-preview', data, { timeout: 30_000 })
+      .then((r) => r.data),
+
+  suggestModels: (data: {
+    campaign_name?: string
+    objective?: string
+    formats?: string[]
+    target_audience?: string
+    offer?: string
+    product_name?: string
+    ad_copy_tone?: string
+    cta?: string
+    duration_seconds?: number
+    brand_name?: string
+  }) =>
+    api
+      .post<ModelSuggestion>('/generation/suggest-models', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
+  generateStrategyPreview: (data: {
+    campaign_name?: string
+    brand_name?: string
+    product_name?: string
+    offer?: string
+    target_audience?: string
+    ad_copy_tone?: string
+    cta?: string
+    target_seconds?: number
+    hook_frameworks?: string[]
+    competitors?: string[]
+    objective?: string
+    placements?: string[]
+    formats?: string[]
+    website_url?: string
+  }) =>
+    api
+      .post<StrategyPreviewResult>('/generation/strategy-preview', data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  generateWebsiteScript: (data: {
+    url: string
+    target_seconds?: number
+    brand_name?: string
+    product_name?: string
+    offer?: string
+    ad_copy_tone?: string
+    cta?: string
+    target_audience?: string
+    avatar_label?: string
+    voice_label?: string
+    forbidden_words?: string[]
+    variation?: 'default' | 'different_hook'
+    performance_stats?: PerformanceStatsContext
+  }) =>
+    api
+      .post<WebsiteScriptResult>('/generation/website-script', data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  extractStatsFromImage: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api
+      .post<StatsImageExtractionResult>('/generation/extract-stats-image', form, {
+        timeout: 120_000,
+      })
+      .then((r) => r.data)
+  },
+
+  generateIcpScript: (data: {
+    target_audience?: string
+    offer?: string
+    product_name?: string
+    brand_name?: string
+    ad_copy_tone?: string
+    cta?: string
+    target_seconds?: number
+    avatar_label?: string
+    voice_label?: string
+    forbidden_words?: string[]
+    variation?: 'default' | 'different_hook'
+    performance_stats?: PerformanceStatsContext
+    source_script?: string
+  }) =>
+    api
+      .post<IcpScriptResult>('/generation/icp-script', data, { timeout: 180_000 })
       .then((r) => r.data),
 }
 

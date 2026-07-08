@@ -61,6 +61,31 @@ export function isLandscapeVideoFormat(id: string): boolean {
   return id === 'video'
 }
 
+/** CSS aspect class for video preview tiles and detail modals. */
+export function videoPreviewAspectClass(format: string): string {
+  if (format === 'reel' || format === 'stories') return 'aspect-[9/16] w-full'
+  if (format === 'video') return 'aspect-video w-full'
+  return 'aspect-square w-full'
+}
+
+/** object-fit for detail modal view — shows full video without cropping */
+export function videoModalObjectFit(format: string): 'cover' | 'contain' {
+  return format === 'video' ? 'contain' : 'cover'
+}
+
+/** Grid layout — landscape tiles use 2 cols on medium screens, portrait uses 3-4 */
+export function variantGridClass(variants: { format: string }[]): string {
+  const hasLandscape = variants.some((v) => v.format === 'video')
+  const hasPortrait = variants.some((v) => v.format === 'reel' || v.format === 'stories')
+  if (hasLandscape && !hasPortrait) {
+    return 'grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3'
+  }
+  if (hasLandscape && hasPortrait) {
+    return 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3'
+  }
+  return 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3'
+}
+
 export function mapCreativeFormatOptions(options: CatalogOption[]): CatalogOption[] {
   return options.map((o) => ({
     ...o,
@@ -74,9 +99,9 @@ export function aspectHintFromFormats(
 ): string {
   const hasPortrait = formats.includes('reel')
   const hasLandscape = formats.includes('video')
-  if (hasPortrait && hasLandscape) return '9:16 Portrait · 16:9 Landscape — 30s each'
-  if (hasPortrait) return '9:16 (Portrait) — up to 30 seconds'
-  if (hasLandscape) return '16:9 (Landscape) — up to 30 seconds'
+  if (hasPortrait && hasLandscape) return '9:16 Portrait · 16:9 Landscape — up to 4 minutes each'
+  if (hasPortrait) return '9:16 (Portrait) — up to 4 minutes'
+  if (hasLandscape) return '16:9 (Landscape) — up to 4 minutes'
   const hasLandscapePlacement = placements.some(isLandscapePlacement)
   const hasPortraitPlacement = placements.some(isPortraitPlacement)
   if (hasLandscapePlacement && hasPortraitPlacement) {
