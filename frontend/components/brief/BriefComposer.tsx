@@ -19,7 +19,13 @@ import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipelin
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
-import { VIDEO_DURATION_OPTIONS, type BriefGenerationSettings } from '@/components/brief/BriefGenerationPanel'
+import {
+  VIDEO_DURATION_OPTIONS,
+  durationOptionsForVideoModel,
+  isSeedanceVideoModel,
+  SEEDANCE_MAX_DURATION_SECONDS,
+  type BriefGenerationSettings,
+} from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL, clearBriefListCaches } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
@@ -109,6 +115,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     ttlMs: API_CACHE_TTL.catalog,
   })
 
+  const [mediaType, setMediaType] = useState<'image' | 'video'>('image')
+  const [imageUseCase, setImageUseCase] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
     copyModel: 'claude',
     imageModel: 'nano-banana-2',
@@ -217,6 +225,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const isHeyGen = wantsVideo && genSettings.videoModel.toLowerCase().startsWith('heygen')
   const isHiggsfieldVideo =
     wantsVideo && genSettings.videoModel.toLowerCase().startsWith('hf-')
+  const isSeedanceVideo = isSeedanceVideoModel(genSettings.videoModel)
   const isPdfScriptMode = scriptBuildMode === 'pdf' && wantsVideo
   const isCustomScriptMode = scriptBuildMode === 'custom' && wantsVideo
   const isWebsiteScriptMode = scriptBuildMode === 'website' && wantsVideo
@@ -246,6 +255,26 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     if (wantsImageOnly) return 'Create brief →'
     return 'Create brief →'
   }, [wantsVideo, wantsImageOnly])
+
+  // When user picks Image → force static/carousel formats; when Video → keep what they had or default to reel
+  useEffect(() => {
+    if (mediaType === 'image') {
+      const fmts = watch('formats') ?? []
+      const imageFmts = fmts.filter((f) => !isVideoFormat(f))
+      if (imageFmts.length === 0) {
+        setValue('formats', ['static'], { shouldValidate: true })
+      } else if (imageFmts.length !== fmts.length) {
+        setValue('formats', imageFmts, { shouldValidate: true })
+      }
+      setScriptBuildMode('manual')
+    } else {
+      const fmts = watch('formats') ?? []
+      if (!fmts.some(isVideoFormat)) {
+        setValue('formats', ['reel'], { shouldValidate: true })
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaType])
 
   useEffect(() => {
     if (scriptBuildMode !== 'pdf') return
@@ -638,6 +667,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           tone_text: (d.ad_copy_tone ?? '').trim(),
           copy_model: genSettings.copyModel,
           image_model: genSettings.imageModel,
+          media_type: mediaType,
+          ...(mediaType === 'image' && imageUseCase ? { image_use_case: imageUseCase } : {}),
           ...(wantsVidOnSubmit
             ? {
                 video_model: genSettings.videoModel,
@@ -724,7 +755,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     (isWebsiteScriptMode && !websiteUrl.trim()) ||
     needsApprovedScript
 
-  const durationOptions = VIDEO_DURATION_OPTIONS
+  const durationOptions = durationOptionsForVideoModel(genSettings.videoModel)
+
+  useEffect(() => {
+    if (!isSeedanceVideo) return
+    if (genSettings.videoDurationSeconds > SEEDANCE_MAX_DURATION_SECONDS) {
+      setGenSettings((prev) => ({
+        ...prev,
+        videoDurationSeconds: SEEDANCE_MAX_DURATION_SECONDS,
+      }))
+    }
+  }, [isSeedanceVideo, genSettings.videoModel])
 
   return (
     <div className="min-h-full app-mesh-bg">
@@ -794,18 +835,136 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           </BriefSection>
 
           <BriefSection title="Creative formats & models" step="2">
+
+            {/* ── Video or Image first-choice toggle ── */}
+            <div>
+              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">
+                What are you creating?
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setMediaType('image')}
+                  className={`group relative flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                    mediaType === 'image'
+                      ? 'border-accent bg-accent/5 shadow-sm'
+                      : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
+                  }`}
+                >
+                  <span className="text-2xl">🖼️</span>
+                  <span className={`text-sm font-bold ${mediaType === 'image' ? 'text-accent' : 'text-charcoal'}`}>
+                    Image
+                  </span>
+                  <span className="text-[10px] text-mid text-center leading-snug">
+                    Static, carousel, lifestyle, product shots
+                  </span>
+                  {mediaType === 'image' && (
+                    <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
+                      <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMediaType('video')}
+                  className={`group relative flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                    mediaType === 'video'
+                      ? 'border-accent bg-accent/5 shadow-sm'
+                      : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
+                  }`}
+                >
+                  <span className="text-2xl">🎬</span>
+                  <span className={`text-sm font-bold ${mediaType === 'video' ? 'text-accent' : 'text-charcoal'}`}>
+                    Video
+                  </span>
+                  <span className="text-[10px] text-mid text-center leading-snug">
+                    Portrait, landscape, avatar, B-roll, multi-scene
+                  </span>
+                  {mediaType === 'video' && (
+                    <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
+                      <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      </svg>
+                    </span>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* ── Image use cases (only when Image is chosen) ── */}
+            {mediaType === 'image' && (
+              <div>
+                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">
+                  Image use case
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {[
+                    { id: 'hero_product', emoji: '🏆', label: 'Hero product view', hint: 'Clean product on brand background' },
+                    { id: 'lifestyle', emoji: '✨', label: 'Lifestyle video / image', hint: 'Product in real-life setting' },
+                    { id: 'product_vibe', emoji: '🌿', label: 'Product in environment', hint: 'Creating the scene & mood' },
+                    { id: 'product_person', emoji: '🤝', label: 'Product with person', hint: 'Human interaction & relatability' },
+                    { id: 'feature_explanation', emoji: '💡', label: 'Feature explanation', hint: 'Person or product explains a feature' },
+                    { id: 'material_composition', emoji: '🔬', label: 'Material & composition', hint: 'Ingredient / material benefits close-up' },
+                  ].map((uc) => (
+                    <button
+                      key={uc.id}
+                      type="button"
+                      onClick={() => setImageUseCase(imageUseCase === uc.id ? '' : uc.id)}
+                      className={`relative flex flex-col gap-1 rounded-xl border-2 px-3 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                        imageUseCase === uc.id
+                          ? 'border-accent bg-accent/5 shadow-sm'
+                          : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
+                      }`}
+                    >
+                      <span className="text-xl leading-none">{uc.emoji}</span>
+                      <span className={`text-xs font-semibold leading-snug ${imageUseCase === uc.id ? 'text-accent' : 'text-charcoal'}`}>
+                        {uc.label}
+                      </span>
+                      <span className="text-[10px] text-mid leading-snug">{uc.hint}</span>
+                      {imageUseCase === uc.id && (
+                        <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
+                          <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                {imageUseCase && (
+                  <p className="mt-2 text-[11px] text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+                    Use case: <strong>
+                      {imageUseCase === 'hero_product' && 'Hero product view'}
+                      {imageUseCase === 'lifestyle' && 'Lifestyle video / image'}
+                      {imageUseCase === 'product_vibe' && 'Product creating the vibe in the environment'}
+                      {imageUseCase === 'product_person' && 'Product with person'}
+                      {imageUseCase === 'feature_explanation' && 'Feature explanation by person / product'}
+                      {imageUseCase === 'material_composition' && 'Material composition pictures with benefits'}
+                    </strong> — this will guide the AI image prompt.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* ── Creative format chips ── */}
             <div>
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
                 Creative format
               </p>
-              {!wantsVideo && (selectedFormats ?? []).length > 0 && (
+              {mediaType === 'image' && (
+                <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
+                  Image mode: <strong>Static</strong> and <strong>Carousel</strong> are available. Switch to <strong>Video</strong> above to unlock Portrait/Landscape video formats.
+                </p>
+              )}
+              {mediaType === 'video' && !wantsVideo && (selectedFormats ?? []).length > 0 && (
                 <p className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 mb-3">
-                  <strong>Static</strong> / <strong>Carousel</strong> = image + copy only. Add{' '}
-                  <strong>Landscape</strong> or <strong>Portrait</strong> for video (up to 4 minutes).
+                  Select <strong>Landscape</strong> or <strong>Portrait</strong> to enable video generation (up to 4 minutes).
                 </p>
               )}
               <ChipToggleGroup
-                options={formatOptions}
+                options={mediaType === 'image' ? formatOptions.filter((f) => !isVideoFormat(f.id)) : formatOptions}
                 selected={selectedFormats ?? []}
                 onChange={(next) => setValue('formats', next, { shouldValidate: true })}
                 disabled={!catalog}
@@ -837,10 +996,22 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             </div>
             {isHiggsfieldVideo && (
               <p className="text-xs text-mid bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
-                <strong>Higgsfield:</strong> Veo/DoP models are only <strong>5 seconds</strong> per
-                clip. For longer ads choose <strong>Kling v3.0</strong>,{' '}
-                <strong>Marketing Studio Video</strong>, or <strong>HeyGen</strong> (up to 4 minutes). Text/captions are added after generation
-                (not inside the AI video) so they stay readable.
+                <strong>Higgsfield:</strong>{' '}
+                {isSeedanceVideo ? (
+                  <>
+                    <strong>Seedance</strong> builds ads up to <strong>1m 30s</strong> as multiple{' '}
+                    <strong>15s B-roll scenes</strong> (from your scene directions), then stitches
+                    them. Add scene B-roll in the script step for best results. Voiceover/captions
+                    are added after render.
+                  </>
+                ) : (
+                  <>
+                    Veo/DoP models are only <strong>5 seconds</strong> per clip. For longer ads
+                    choose <strong>Kling v3.0</strong>, <strong>Marketing Studio Video</strong>, or{' '}
+                    <strong>HeyGen</strong> (up to 4 minutes). Text/captions are added after
+                    generation (not inside the AI video) so they stay readable.
+                  </>
+                )}
               </p>
             )}
 
