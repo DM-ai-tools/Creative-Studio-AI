@@ -377,6 +377,42 @@ export const generationApi = {
       .then((r) => r.data)
   },
 
+  previewImagePlan: (data: {
+    brand_name?: string
+    industry?: string
+    product_name?: string
+    offer?: string
+    target_audience?: string
+    ad_copy_tone?: string
+    objective_id?: string
+    cta?: string
+    image_aspect_ratio?: string
+    image_use_cases?: string[]
+    image_prompt_override?: string
+    notes?: string
+    hook?: string
+    headline?: string
+    body_copy?: string
+  }) =>
+    api
+      .post<{ use_cases: string[]; prompt: string; reasoning: string }>('/generation/preview-image-plan', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
+  generateImagePrompt: (data: {
+    product_name?: string
+    brand_name?: string
+    offer?: string
+    target_audience?: string
+    ad_copy_tone?: string
+    image_use_cases?: string[]
+    image_aspect_ratio?: string
+    forbidden_words?: string[]
+    user_prompt?: string
+  }) =>
+    api
+      .post<{ prompt: string }>('/generation/image-prompt', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
   generateIcpScript: (data: {
     target_audience?: string
     offer?: string

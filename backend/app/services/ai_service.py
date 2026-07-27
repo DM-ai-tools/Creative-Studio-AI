@@ -157,13 +157,29 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             copy=copy,
             format_type=format_type,
         )
-        from app.services.video_duration import resolve_video_duration_seconds
+        from app.services.video_duration import (
+            requested_video_duration_seconds,
+            resolve_video_duration_seconds,
+        )
         from app.services.video_script_skeleton import (
             build_veo_prompt_from_skeleton,
             ensure_production_skeleton,
         )
+        from app.services.media.higgsfield_models import (
+            is_higgsfield_video_model,
+            is_seedance_video_spec,
+            resolve_video_spec,
+        )
+        from app.services.media.seedance_multiscene import SEEDANCE_MAX_TOTAL_SECONDS
 
-        duration = resolve_video_duration_seconds(brief, override=duration_seconds)
+        spec = resolve_video_spec(model) if is_higgsfield_video_model(model) else None
+        if is_seedance_video_spec(spec):
+            duration = min(
+                requested_video_duration_seconds(brief, override=duration_seconds),
+                SEEDANCE_MAX_TOTAL_SECONDS,
+            )
+        else:
+            duration = resolve_video_duration_seconds(brief, override=duration_seconds)
         production_skeleton = await ensure_production_skeleton(
             brief,
             copy,
@@ -171,7 +187,6 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             format_type=format_type,
         )
         brief = {**brief, "video_script_skeleton": production_skeleton}
-        from app.services.media.higgsfield_models import is_higgsfield_video_model
 
         if is_higgsfield_video_model(model):
             from app.services.video_script_skeleton import build_higgsfield_motion_prompt

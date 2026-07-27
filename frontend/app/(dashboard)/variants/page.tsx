@@ -242,6 +242,28 @@ export default function VariantsPage() {
               <p className="text-[10px] font-bold text-lt uppercase tracking-wide mb-1">Body Copy</p>
               <p className="text-sm text-mid leading-relaxed">{selectedVariant.body_copy}</p>
             </div>
+            {(() => {
+              const { imageUrl, videoUrl } = getVariantPreviewUrls(selectedVariant)
+              const downloadUrl = videoUrl || imageUrl
+              if (!downloadUrl) return null
+              const isVideo = Boolean(videoUrl)
+              const ext = isVideo ? 'mp4' : 'png'
+              const filename = `${(selectedVariant.headline || selectedVariant.hook || 'variant').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.${ext}`
+              return (
+                <a
+                  href={downloadUrl}
+                  download={filename}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 w-full border-2 border-accent text-accent text-sm font-bold py-2 rounded-lg hover:bg-accent/5 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+                  </svg>
+                  Download {isVideo ? 'video' : 'image'}
+                </a>
+              )
+            })()}
             <div className="flex flex-wrap gap-2 pt-2">
               <button
                 onClick={() => { handleApprove(selectedVariant.id); setSelectedVariant(null) }}

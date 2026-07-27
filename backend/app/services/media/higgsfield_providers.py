@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 import httpx
 
 from app.core.config import settings
+from app.services.file_service import file_service
 from app.services.media.base import ImageGenerationProvider, VideoGenerationProvider
 from app.services.media.higgsfield_client_service import (
     extract_media_url,
@@ -19,12 +21,28 @@ from app.services.media.higgsfield_models import (
     build_video_arguments,
     higgsfield_configured,
     higgsfield_supports_native_audio,
+    is_seedance_video_spec,
     resolve_higgsfield_video_duration,
     resolve_image_spec,
     resolve_video_spec,
 )
+from app.services.media.seedance_multiscene import (
+    SEEDANCE_MAX_TOTAL_SECONDS,
+    build_seedance_scene_prompt,
+    concat_video_files,
+    extract_last_frame_png,
+    plan_seedance_scenes,
+    scene_broll_from_brief,
+    seedance_multiscene_requested,
+    trim_video_to_duration,
+    upload_frame_png,
+)
 from app.services.media.runway_providers import _download_asset
 from app.services.media.voiceover import HIGGSFIELD_VOICE_PRESET_MAP
+from app.services.video_duration import (
+    requested_video_duration_seconds,
+    resolve_video_duration_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +173,6 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
         source_image_url: str | None = None,
         duration_seconds: int | None = None,
     ) -> dict:
-        from app.services.video_duration import resolve_video_duration_seconds
-
         spec = resolve_video_spec(model)
         if not spec:
             return self._fallback(
@@ -169,9 +185,31 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
         if not higgsfield_configured():
             return self._fallback(spec.platform_path, brief, copy, status="mock")
 
-        requested_duration = resolve_video_duration_seconds(
-            brief, override=duration_seconds
-        )
+        if is_seedance_video_spec(spec):
+            requested_duration = min(
+                requested_video_duration_seconds(brief, override=duration_seconds),
+                SEEDANCE_MAX_TOTAL_SECONDS,
+            )
+        else:
+            requested_duration = resolve_video_duration_seconds(
+                brief, override=duration_seconds
+            )
+
+        production_skeleton = str(brief.get("video_script_skeleton") or "")
+
+        if seedance_multiscene_requested(spec.job_set_type, requested_duration):
+            return await self._generate_seedance_multiscene(
+                spec=spec,
+                model=model,
+                brief=brief,
+                copy=copy,
+                format_type=format_type,
+                tenant_id=tenant_id,
+                source_image_url=source_image_url,
+                requested_duration=requested_duration,
+                production_skeleton=production_skeleton,
+            )
+
         api_duration, duration_warning = resolve_higgsfield_video_duration(
             spec.job_set_type, requested_duration
         )
@@ -261,6 +299,180 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
             return out
         except Exception as exc:
             logger.exception("Higgsfield video failed: %s", exc)
+            return self._fallback(
+                spec.platform_path,
+                brief,
+                copy,
+                status="failed",
+                error=str(exc),
+            )
+
+    async def _generate_seedance_multiscene(
+        self,
+        *,
+        spec,
+        model: str,
+        brief: dict,
+        copy: dict,
+        format_type: str,
+        tenant_id: str,
+        source_image_url: str | None,
+        requested_duration: int,
+        production_skeleton: str,
+    ) -> dict:
+        from app.services.media.voiceover import build_voiceover_script
+
+        image_url = await _resolve_image_url_for_video(source_image_url)
+        if spec.requires_image and not image_url:
+            return self._fallback(
+                spec.platform_path,
+                brief,
+                copy,
+                status="failed",
+                error=(
+                    "Seedance multi-scene needs a seed image. "
+                    "Ensure image generation succeeds first."
+                ),
+            )
+
+        scenes = plan_seedance_scenes(
+            requested_duration,
+            job_set_type=spec.job_set_type,
+            broll_raw=scene_broll_from_brief(brief),
+        )
+        if not scenes:
+            return self._fallback(
+                spec.platform_path,
+                brief,
+                copy,
+                status="failed",
+                error="Could not plan Seedance scenes for the requested duration.",
+            )
+
+        spoken_script = build_voiceover_script(copy=copy, brief=brief)
+        selected_hf_voice = str(brief.get("higgsfield_voice_preset") or "").strip().lower()
+        runway_voice_preset = HIGGSFIELD_VOICE_PRESET_MAP.get(selected_hf_voice)
+        native_audio = higgsfield_supports_native_audio(spec.job_set_type)
+
+        scene_prompts: list[str] = []
+        clip_paths: list[Path] = []
+        stitch_dir = Path(file_service.upload_dir) / tenant_id / "generated" / "seedance-stitch"
+        stitch_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                current_image_url = image_url
+                for scene in scenes:
+                    scene_prompt = build_seedance_scene_prompt(
+                        scene,
+                        brief=brief,
+                        copy=copy,
+                        format_type=format_type,
+                        production_skeleton=production_skeleton,
+                        total_duration=requested_duration,
+                    )
+                    scene_prompts.append(scene_prompt)
+                    api_duration = int(scene["duration"])
+                    arguments = build_video_arguments(
+                        prompt=scene_prompt,
+                        format_type=format_type,
+                        duration=api_duration,
+                        image_url=current_image_url,
+                        spec=spec,
+                        spoken_script=spoken_script,
+                    )
+                    result = await subscribe_platform(
+                        spec.platform_path,
+                        arguments,
+                        label=f"video scene {scene['index'] + 1}/{len(scenes)} ({spec.label})",
+                    )
+                    remote_url = extract_media_url(result)
+                    if not remote_url:
+                        raise RuntimeError(
+                            f"Seedance scene {scene['index'] + 1} returned no video URL"
+                        )
+
+                    saved = await _download_asset(
+                        client,
+                        remote_url,
+                        tenant_id=tenant_id,
+                        kind="video",
+                    )
+                    local_path = _local_file_from_url(saved["url"])
+                    if not local_path:
+                        raise RuntimeError(
+                            f"Seedance scene {scene['index'] + 1} could not be saved locally"
+                        )
+                    clip_paths.append(local_path)
+
+                    if scene["index"] + 1 < len(scenes):
+                        frame_png = extract_last_frame_png(local_path)
+                        if frame_png:
+                            current_image_url = await upload_frame_png(
+                                frame_png, tenant_id=tenant_id
+                            )
+                        elif current_image_url:
+                            logger.warning(
+                                "Seedance scene %s: could not extract last frame; reusing seed",
+                                scene["index"] + 1,
+                            )
+
+                stitched_path = stitch_dir / f"seedance-{uuid.uuid4()}.mp4"
+                concat_video_files(clip_paths, stitched_path)
+                trimmed = trim_video_to_duration(stitched_path, float(requested_duration))
+                if trimmed:
+                    stitched_path = trimmed
+
+                saved_final = file_service.save_bytes(
+                    content=stitched_path.read_bytes(),
+                    tenant_id=tenant_id,
+                    subfolder="generated",
+                    suffix=".mp4",
+                    content_type="video/mp4",
+                )
+                final_url = saved_final["url"]
+
+                voiceover: dict = {"status": "skipped"}
+                if settings.RUNWAYML_VOICEOVER_ENABLED and not native_audio:
+                    from app.services.media.voiceover import apply_voiceover_to_video_file
+
+                    voiceover = await apply_voiceover_to_video_file(
+                        client,
+                        final_url,
+                        copy=copy,
+                        brief=brief,
+                        tenant_id=tenant_id,
+                        script_override=spoken_script,
+                        voice_preset_override=runway_voice_preset,
+                    )
+                    if voiceover.get("status") == "done" and voiceover.get("url"):
+                        final_url = str(voiceover["url"])
+                elif not native_audio and not settings.RUNWAYML_VOICEOVER_ENABLED:
+                    voiceover = {
+                        "status": "skipped",
+                        "reason": "Runway TTS disabled (RUNWAYML_VOICEOVER_ENABLED=false)",
+                    }
+
+            clip_max = scenes[0]["duration"] if scenes else 15
+            return {
+                "status": "done",
+                "model": spec.platform_path,
+                "catalog_model": model,
+                "prompt": scene_prompts[0] if scene_prompts else "",
+                "url": final_url,
+                "duration_seconds": requested_duration,
+                "requested_duration_seconds": requested_duration,
+                "storyboard": scene_prompts,
+                "provider": "higgsfield",
+                "voiceover": voiceover,
+                "native_audio": native_audio,
+                "spoken_script": spoken_script,
+                "seedance_multiscene": True,
+                "scene_count": len(scenes),
+                "clip_duration_seconds": clip_max,
+            }
+        except Exception as exc:
+            logger.exception("Seedance multi-scene failed: %s", exc)
             return self._fallback(
                 spec.platform_path,
                 brief,

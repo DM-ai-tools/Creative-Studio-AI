@@ -7,6 +7,8 @@ from app.schemas.generation import GenerationModelOption
 from app.services.media.higgsfield_models import (
     HIGGSFIELD_IMAGE_SPECS,
     HIGGSFIELD_VIDEO_SPECS,
+    SEEDANCE_JOB_TYPES,
+    SEEDANCE_MAX_TOTAL_SECONDS,
     higgsfield_configured,
 )
 
@@ -42,6 +44,8 @@ def _video_label(spec) -> str:
         suffix = " — max 5s clip"
     elif spec.job_set_type.startswith("kling"):
         suffix = " — up to 10s, native audio"
+    elif spec.job_set_type in SEEDANCE_JOB_TYPES:
+        suffix = f" — up to {SEEDANCE_MAX_TOTAL_SECONDS}s (multi-scene stitch)"
     elif spec.job_set_type == "marketing_studio_video":
         suffix = " — up to 30s, native audio"
     elif "dop" in spec.platform_path or spec.job_set_type.startswith("veo"):

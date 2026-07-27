@@ -122,6 +122,10 @@ See `.env.example` for all required variables. Key ones:
 
 Once running, visit `http://localhost:8000/docs` for the interactive Swagger UI.
 
+### Claude Cowork / MCP
+
+To use CreativeStudio from **Claude Cowork**, see [`mcp-server/README.md`](mcp-server/README.md). That package exposes brands, briefs, variants, scripts, and Meta export as MCP tools over Streamable HTTP.
+
 Key endpoints:
 
 | Method | Path | Description |

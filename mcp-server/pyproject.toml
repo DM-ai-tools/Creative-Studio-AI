@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "creativestudio-mcp"
+version = "1.0.0"
+description = "MCP server for CreativeStudio AI — use in Claude Cowork, Desktop, and Code"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp[cli]>=1.12.0",
+  "httpx>=0.27.0",
+  "python-dotenv>=1.0.1",
+  "uvicorn[standard]>=0.29.0",
+]
+
+[project.scripts]
+creativestudio-mcp = "creativestudio_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["creativestudio_mcp*"]

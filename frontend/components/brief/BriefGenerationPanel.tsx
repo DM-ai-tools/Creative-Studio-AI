@@ -24,6 +24,23 @@ export const VIDEO_DURATION_OPTIONS = [
   { id: '240', label: '4m' },
 ]
 
+/** Seedance multi-scene stitch cap (matches backend SEEDANCE_MAX_TOTAL_SECONDS). */
+export const SEEDANCE_MAX_DURATION_SECONDS = 90
+
+export function isSeedanceVideoModel(videoModel: string): boolean {
+  return videoModel.toLowerCase().includes('seedance')
+}
+
+export function durationOptionsForVideoModel(
+  videoModel: string,
+  options: typeof VIDEO_DURATION_OPTIONS = VIDEO_DURATION_OPTIONS,
+) {
+  if (isSeedanceVideoModel(videoModel)) {
+    return options.filter((opt) => Number(opt.id) <= SEEDANCE_MAX_DURATION_SECONDS)
+  }
+  return options
+}
+
 export interface BriefGenerationSettings {
   copyModel: string
   imageModel: string
@@ -57,6 +74,7 @@ export default function BriefGenerationPanel({
 }: BriefGenerationPanelProps) {
   const wantsVideo = formats.some((f) => f === 'reel' || f === 'video')
   const isHeyGen = settings.videoModel.toLowerCase().startsWith('heygen')
+  const isSeedance = isSeedanceVideoModel(settings.videoModel)
 
   const copyOptions =
     catalog?.copy_models.map((m) => ({ value: m.id, label: m.label })) ?? [
@@ -80,7 +98,14 @@ export default function BriefGenerationPanel({
   const higgsfieldVoiceOptions =
     catalog?.higgsfield_voice_options?.map((o) => ({ value: o.id, label: o.label })) ?? []
 
-  const durationOptions = VIDEO_DURATION_OPTIONS
+  const durationOptions = durationOptionsForVideoModel(settings.videoModel)
+
+  React.useEffect(() => {
+    if (!isSeedance) return
+    if (settings.videoDurationSeconds > SEEDANCE_MAX_DURATION_SECONDS) {
+      onChange({ ...settings, videoDurationSeconds: SEEDANCE_MAX_DURATION_SECONDS })
+    }
+  }, [isSeedance, settings.videoModel])
 
   const panelBody = (
     <>
@@ -95,8 +120,19 @@ export default function BriefGenerationPanel({
           <strong>Higgsfield</strong> — motion from your seed image (no AI text in the clip).
           Captions are burned from your ad copy / production script after render. Veo/DoP models are{' '}
           <strong>5s max</strong> and get a <strong>Runway voiceover</strong> (needs Runway API key).
-          For native speech in the clip use <strong>Kling v3.0</strong> or{' '}
-          <strong>Marketing Studio Video</strong> (up to 4 minutes with HeyGen).
+          {isSeedance ? (
+            <>
+              {' '}
+              <strong>Seedance</strong> builds longer ads (up to <strong>1m 30s</strong>) as multiple{' '}
+              <strong>15s scenes</strong> from your B-roll directions, then stitches them together.
+            </>
+          ) : (
+            <>
+              {' '}
+              For native speech in the clip use <strong>Kling v3.0</strong> or{' '}
+              <strong>Marketing Studio Video</strong>.
+            </>
+          )}
         </p>
       )}
       {wantsVideo && !isHeyGen && settings.videoModel.startsWith('hf-') && higgsfieldVoiceOptions.length > 0 && (

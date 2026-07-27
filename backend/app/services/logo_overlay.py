@@ -13,10 +13,12 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 LIGHT_BACKGROUND_THRESHOLD = 165
-CAROUSEL_HEADER_RATIO = 0.11
-VERTICAL_HEADER_RATIO = 0.13
+CAROUSEL_HEADER_RATIO = 0.09
+VERTICAL_HEADER_RATIO = 0.10
 # Runway image_to_video requires width/height >= 0.5 on promptImage.
 RUNWAY_MIN_WH_RATIO = 0.501
+# Logo width inside the white header strip (~18% of image width).
+HEADER_LOGO_WIDTH_RATIO = 0.18
 
 
 def file_url_to_local_path(file_url: str | None) -> Path | None:
@@ -41,13 +43,13 @@ def file_url_to_local_path(file_url: str | None) -> Path | None:
 
 
 def _uses_header_band(format_type: str | None, width: int, height: int) -> bool:
+    """Still ads get a small white top strip for the brand logo (avoids covering copy)."""
+    del width, height
     ft = (format_type or "").lower()
-    # Reels/video: full-bleed portrait; brand logo is burned onto the video file.
+    # Video stills / motion seeds stay full-bleed — logo is burned on the video later.
     if ft in {"reel", "video", "stories"}:
         return False
-    if ft == "carousel":
-        return True
-    return width > int(height * 1.25)
+    return True
 
 
 def _region_is_light(img: Image.Image, left: int, top: int, width: int, height: int) -> bool:
@@ -120,11 +122,13 @@ def _add_carousel_header_band(
     *,
     format_type: str | None = None,
 ) -> tuple[Image.Image, int]:
-    """Shift creative down and add a clean header band for the logo."""
+    """Shift creative down and add a clean white header strip for the logo."""
     ft = (format_type or "").lower()
     ratio = VERTICAL_HEADER_RATIO if ft in {"reel", "video"} else CAROUSEL_HEADER_RATIO
-    header_h = max(int(base.height * ratio), logo_height + pad * 3)
-    canvas = Image.new("RGBA", (base.width, base.height + header_h), (245, 245, 245, 255))
+    header_h = max(int(base.height * ratio), logo_height + pad * 2)
+    # Cap so the strip stays a small bar, not a huge empty zone.
+    header_h = min(header_h, max(56, int(base.height * 0.12)))
+    canvas = Image.new("RGBA", (base.width, base.height + header_h), (255, 255, 255, 255))
     canvas.paste(base, (0, header_h))
     return canvas, header_h
 
@@ -191,45 +195,200 @@ def _pick_logo_rgba_for_placement(
     )
 
 
+def _region_luminance_stats(
+    img: Image.Image, left: int, top: int, width: int, height: int
+) -> tuple[float, float]:
+    """Return (average luminance, luminance std-dev) for a region."""
+    right = min(img.width, left + max(1, width))
+    bottom = min(img.height, top + max(1, height))
+    if right <= left or bottom <= top:
+        return 128.0, 0.0
+    region = img.crop((left, top, right, bottom)).convert("L")
+    # Downsample for speed
+    sample = region.resize(
+        (min(48, region.width), min(32, region.height)),
+        Image.Resampling.BILINEAR,
+    )
+    values = list(sample.getdata())
+    if not values:
+        return 128.0, 0.0
+    n = float(len(values))
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / n
+    return mean, var ** 0.5
+
+
+def _region_edge_density(
+    img: Image.Image, left: int, top: int, width: int, height: int
+) -> float:
+    """Rough text/detail detector: fraction of strong horizontal/vertical edges."""
+    right = min(img.width, left + max(1, width))
+    bottom = min(img.height, top + max(1, height))
+    if right <= left + 2 or bottom <= top + 2:
+        return 0.0
+    region = img.crop((left, top, right, bottom)).convert("L")
+    small = region.resize(
+        (min(64, region.width), min(40, region.height)),
+        Image.Resampling.BILINEAR,
+    )
+    px = small.load()
+    w, h = small.size
+    edges = 0
+    total = 0
+    for y in range(h - 1):
+        for x in range(w - 1):
+            total += 1
+            dx = abs(px[x + 1, y] - px[x, y])
+            dy = abs(px[x, y + 1] - px[x, y])
+            if dx > 28 or dy > 28:
+                edges += 1
+    return edges / total if total else 0.0
+
+
+def _region_is_busy(
+    img: Image.Image, left: int, top: int, width: int, height: int
+) -> bool:
+    """True when corner likely contains text or high-detail UI (avoid logo overlap)."""
+    _mean, std = _region_luminance_stats(img, left, top, width, height)
+    edges = _region_edge_density(img, left, top, width, height)
+    # Text on dark banners: high edge density + moderate variance
+    return edges >= 0.12 or std >= 42.0
+
+
+def _estimate_top_dark_banner_height(img: Image.Image) -> int:
+    """Height of a dark overlay strip at the top (headline bar), if present."""
+    gray = img.convert("L")
+    w, h = gray.size
+    max_scan = max(1, int(h * 0.28))
+    row_step = max(1, max_scan // 40)
+    dark_rows = 0
+    for y in range(0, max_scan, row_step):
+        # Sample a horizontal band across the middle of the frame
+        band = gray.crop((int(w * 0.15), y, int(w * 0.85), min(h, y + row_step)))
+        pixels = list(band.getdata())
+        if not pixels:
+            break
+        avg = sum(pixels) / len(pixels)
+        if avg <= 95:
+            dark_rows = y + row_step
+        elif dark_rows > 0 and avg > 120:
+            break
+    if dark_rows < int(h * 0.06):
+        return 0
+    return min(dark_rows + int(h * 0.01), int(h * 0.32))
+
+
+def _pick_logo_anchor(
+    img: Image.Image,
+    *,
+    logo_w: int,
+    logo_h: int,
+    pad: int,
+) -> tuple[int, int]:
+    """Choose top-left or top-right (or below dark banner) so logo does not cover text."""
+    banner_h = _estimate_top_dark_banner_height(img)
+    # Prefer sitting just below a dark headline strip when present
+    y_below = max(pad, banner_h + pad // 2) if banner_h else pad
+
+    candidates: list[tuple[str, int, int]] = [
+        ("top_left", pad, pad),
+        ("top_right", max(pad, img.width - logo_w - pad), pad),
+        ("below_banner_left", pad, y_below),
+        ("below_banner_right", max(pad, img.width - logo_w - pad), y_below),
+    ]
+    # Prefer left side when clear
+    preference = ("top_left", "below_banner_left", "top_right", "below_banner_right")
+
+    scored: list[tuple[float, int, str, int, int]] = []
+    for name, x, y in candidates:
+        x = max(0, min(x, img.width - logo_w))
+        y = max(0, min(y, img.height - logo_h))
+        busy = _region_is_busy(img, x, y, logo_w, logo_h)
+        edges = _region_edge_density(img, x, y, logo_w, logo_h)
+        pref = preference.index(name) if name in preference else 9
+        # Lower score is better
+        score = (1.0 if busy else 0.0) * 10 + edges * 5 + pref * 0.1
+        scored.append((score, pref, name, x, y))
+
+    scored.sort(key=lambda t: (t[0], t[1]))
+    _score, _pref, name, x, y = scored[0]
+    logger.info(
+        "Logo placement: %s at (%s,%s) banner_h=%s score=%.2f",
+        name,
+        x,
+        y,
+        banner_h,
+        _score,
+    )
+    return x, y
+
+
 def apply_logo_overlay_bytes(
     image_bytes: bytes,
     logo_path: Path,
     *,
     logo_on_light_path: Path | None = None,
     format_type: str | None = None,
-    max_width_ratio: float = 0.18,
-    padding_ratio: float = 0.04,
+    max_width_ratio: float = 0.22,
+    padding_ratio: float = 0.03,
 ) -> bytes:
-    """Paste logo in the top margin; carousel layouts get a dedicated header band."""
+    """Paste brand logo — stills use a small white top strip so logo never covers ad text."""
     base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    pad = max(8, int(base.width * padding_ratio))
+    pad = max(10, int(base.width * padding_ratio))
     header_band = _uses_header_band(format_type, base.width, base.height)
-    max_w_ratio = 0.12 if header_band else max_width_ratio
-    max_w = max(32, int(base.width * max_w_ratio))
 
-    header_h = 0
-    probe_h = max(32, int(max_w * 0.35))
     if header_band:
+        max_w = max(64, int(base.width * HEADER_LOGO_WIDTH_RATIO))
+        probe_h = max(28, int(max_w * 0.35))
         base, header_h = _add_carousel_header_band(
             base, probe_h, pad, format_type=format_type
         )
+        logo = _pick_logo_rgba_for_placement(
+            logo_path=logo_path,
+            logo_on_light_path=logo_on_light_path,
+            light_background=True,
+            max_width=max_w,
+        )
+        max_logo_h = max(20, header_h - pad * 2)
+        if logo.height > max_logo_h:
+            scale = max_logo_h / logo.height
+            logo = logo.resize(
+                (max(1, int(logo.width * scale)), max_logo_h),
+                Image.Resampling.LANCZOS,
+            )
         logo_x = pad
-        logo_y = max(pad, (header_h - probe_h) // 2)
+        logo_y = max(pad // 2, (header_h - logo.height) // 2)
+        base.paste(logo, (logo_x, logo_y), logo)
+        logger.info(
+            "Logo on white header: canvas=%sx%s header_h=%s logo=%sx%s",
+            base.width,
+            base.height,
+            header_h,
+            logo.width,
+            logo.height,
+        )
     else:
-        logo_x = pad
-        logo_y = pad
-
-    light_bg = _region_is_light(base, logo_x, logo_y, max_w, probe_h)
-    logo = _pick_logo_rgba_for_placement(
-        logo_path=logo_path,
-        logo_on_light_path=logo_on_light_path,
-        light_background=light_bg,
-        max_width=max_w,
-    )
-    if header_band:
-        logo_y = max(pad, (header_h - logo.height) // 2)
-
-    base.paste(logo, (logo_x, logo_y), logo)
+        max_w = max(64, int(base.width * max_width_ratio))
+        probe_h = max(40, int(max_w * 0.4))
+        light_probe = _region_is_light(base, pad, pad, max_w, probe_h)
+        logo = _pick_logo_rgba_for_placement(
+            logo_path=logo_path,
+            logo_on_light_path=logo_on_light_path,
+            light_background=light_probe,
+            max_width=max_w,
+        )
+        logo_x, logo_y = _pick_logo_anchor(
+            base, logo_w=logo.width, logo_h=logo.height, pad=pad
+        )
+        light_bg = _region_is_light(base, logo_x, logo_y, logo.width, logo.height)
+        if light_bg != light_probe:
+            logo = _pick_logo_rgba_for_placement(
+                logo_path=logo_path,
+                logo_on_light_path=logo_on_light_path,
+                light_background=light_bg,
+                max_width=max_w,
+            )
+        base.paste(logo, (logo_x, logo_y), logo)
 
     out = io.BytesIO()
     flat = Image.new("RGB", base.size, (255, 255, 255))

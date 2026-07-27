@@ -13,9 +13,15 @@ import Select from '@/components/ui/Select'
 import TextArea from '@/components/ui/TextArea'
 import { ChipToggle, ChipToggleGroup } from '@/components/ui/ChipToggle'
 import BriefSection from '@/components/brief/BriefSection'
+import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
 import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import {
+  emptyImageVariantSlot,
+  resizeImageVariantSlots,
+  type ImageVariantSlot,
+} from '@/lib/imageUseCases'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
@@ -116,7 +122,14 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   })
 
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image')
-  const [imageUseCase, setImageUseCase] = useState<string>('')
+  const [imageVariantSlots, setImageVariantSlots] = useState<ImageVariantSlot[]>([
+    emptyImageVariantSlot(),
+    emptyImageVariantSlot(),
+  ])
+  const [generatingSlotIndex, setGeneratingSlotIndex] = useState<number | null>(null)
+  const [generatingAllSlots, setGeneratingAllSlots] = useState(false)
+  const [imageRatio, setImageRatio] = useState<string>('1:1')
+  const [imageRatioCustom, setImageRatioCustom] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
     copyModel: 'claude',
     imageModel: 'nano-banana-2',
@@ -214,6 +227,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const selectedFrameworks = watch('hook_frameworks')
   const targetVariantCount = watch('target_variant_count')
   const objectiveId = watch('objective_id')
+
+  useEffect(() => {
+    if (mediaType !== 'image') return
+    setImageVariantSlots((prev) =>
+      resizeImageVariantSlots(prev, Number(targetVariantCount) || 1)
+    )
+  }, [targetVariantCount, mediaType])
 
   const brandOptions = (brands ?? []).map((brand) => ({ value: brand.id, label: brand.name }))
   const hasBrands = brandOptions.length > 0
@@ -347,11 +367,14 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       },
       {
         label: 'Audience defined',
-        ok: hideCampaignDetailSteps || Boolean(d.audience_type && d.geography),
+        ok: mediaType === 'image' || hideCampaignDetailSteps || Boolean(d.audience_type && d.geography),
       },
       {
         label: 'CTA & tone set',
-        ok: hideCampaignDetailSteps || Boolean(d.cta && d.ad_copy_tone),
+        ok:
+          mediaType === 'image'
+            ? Boolean(d.cta)
+            : hideCampaignDetailSteps || Boolean(d.cta && d.ad_copy_tone),
       },
       {
         label: 'HeyGen avatar (if video)',
@@ -379,6 +402,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }, [
     formValues,
     wantsVideo,
+    mediaType,
     isHeyGen,
     isPdfScriptMode,
     isCustomScriptMode,
@@ -427,6 +451,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }
 
   const validateManualFields = (data: FormData): string | null => {
+    // Image mode: audience / tone / placement are hidden — not required.
+    if (mediaType === 'image') return null
     if (!data.audience_type?.trim() || data.audience_type.trim().length < 2) {
       return 'Fill in Target Audience (step 3).'
     }
@@ -442,7 +468,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     if (!data.ad_copy_tone?.trim() || data.ad_copy_tone.trim().length < 2) {
       return 'Fill in Tone of Voice (step 3).'
     }
-    if (!data.placements?.length) {
+    if (mediaType === 'video' && !data.placements?.length) {
       return 'Select at least one platform / placement (step 4).'
     }
     return null
@@ -490,6 +516,67 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       toast.error('Could not generate — add OPENROUTER_API_KEY and restart backend')
     } finally {
       setGeneratingNotes(false)
+    }
+  }
+
+  const handleGenerateImageSlot = async (index: number) => {
+    const d = formValues
+    const slot = imageVariantSlots[index]
+    if (!slot) return
+    const targetAudience = [d.audience_type, d.geography, d.age_range].filter(Boolean).join(', ')
+    setGeneratingSlotIndex(index)
+    try {
+      const plan = await generationApi.previewImagePlan({
+        brand_name: selectedBrand?.name ?? '',
+        industry: selectedBrand?.industry ?? '',
+        product_name: d.product_name ?? '',
+        offer: d.offer ?? '',
+        target_audience: targetAudience,
+        ad_copy_tone: d.ad_copy_tone ?? '',
+        objective_id: d.objective_id ?? '',
+        cta: d.cta ?? '',
+        image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+        image_use_cases: slot.use_cases,
+        image_prompt_override: slot.prompt.trim() || undefined,
+        notes: [
+          d.notes ?? '',
+          `Image variant ${index + 1} of ${imageVariantSlots.length}.`,
+          'Make use case, scene, and on-image hook/headline distinct from sibling variants.',
+        ]
+          .filter(Boolean)
+          .join(' '),
+        hook: slot.hook.trim() || undefined,
+        headline: slot.message.trim() || undefined,
+      })
+      setImageVariantSlots((prev) =>
+        prev.map((s, i) =>
+          i === index
+            ? {
+                ...s,
+                use_cases: plan.use_cases?.length ? plan.use_cases : s.use_cases,
+                prompt: plan.prompt || s.prompt,
+                reasoning: plan.reasoning || '',
+              }
+            : s
+        )
+      )
+      toast.success(`Variant ${index + 1} AI plan ready — edit hook, message, and prompt`)
+    } catch {
+      toast.error('Could not generate plan — check OPENROUTER_API_KEY and restart backend')
+    } finally {
+      setGeneratingSlotIndex(null)
+    }
+  }
+
+  const handleGenerateAllImageSlots = async () => {
+    setGeneratingAllSlots(true)
+    try {
+      for (let i = 0; i < imageVariantSlots.length; i++) {
+        // Re-read latest slot inside loop via functional updates in handleGenerateImageSlot
+        await handleGenerateImageSlot(i)
+      }
+    } finally {
+      setGeneratingAllSlots(false)
     }
   }
 
@@ -668,7 +755,25 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           copy_model: genSettings.copyModel,
           image_model: genSettings.imageModel,
           media_type: mediaType,
-          ...(mediaType === 'image' && imageUseCase ? { image_use_case: imageUseCase } : {}),
+          ...(mediaType === 'image'
+            ? {
+                image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+                image_variants: imageVariantSlots.map((s) => ({
+                  use_cases: s.use_cases,
+                  hook: s.hook.trim(),
+                  message: s.message.trim(),
+                  prompt: s.prompt.trim(),
+                  reasoning: s.reasoning.trim() || undefined,
+                })),
+                // Back-compat for older readers: first slot as shared fields
+                ...(imageVariantSlots[0]?.use_cases?.length
+                  ? { image_use_cases: imageVariantSlots[0].use_cases }
+                  : {}),
+                ...(imageVariantSlots[0]?.prompt?.trim()
+                  ? { image_prompt_override: imageVariantSlots[0].prompt.trim() }
+                  : {}),
+              }
+            : {}),
           ...(wantsVidOnSubmit
             ? {
                 video_model: genSettings.videoModel,
@@ -893,60 +998,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </div>
             </div>
 
-            {/* ── Image use cases (only when Image is chosen) ── */}
-            {mediaType === 'image' && (
-              <div>
-                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">
-                  Image use case
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {[
-                    { id: 'hero_product', emoji: '🏆', label: 'Hero product view', hint: 'Clean product on brand background' },
-                    { id: 'lifestyle', emoji: '✨', label: 'Lifestyle video / image', hint: 'Product in real-life setting' },
-                    { id: 'product_vibe', emoji: '🌿', label: 'Product in environment', hint: 'Creating the scene & mood' },
-                    { id: 'product_person', emoji: '🤝', label: 'Product with person', hint: 'Human interaction & relatability' },
-                    { id: 'feature_explanation', emoji: '💡', label: 'Feature explanation', hint: 'Person or product explains a feature' },
-                    { id: 'material_composition', emoji: '🔬', label: 'Material & composition', hint: 'Ingredient / material benefits close-up' },
-                  ].map((uc) => (
-                    <button
-                      key={uc.id}
-                      type="button"
-                      onClick={() => setImageUseCase(imageUseCase === uc.id ? '' : uc.id)}
-                      className={`relative flex flex-col gap-1 rounded-xl border-2 px-3 py-3 text-left transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
-                        imageUseCase === uc.id
-                          ? 'border-accent bg-accent/5 shadow-sm'
-                          : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
-                      }`}
-                    >
-                      <span className="text-xl leading-none">{uc.emoji}</span>
-                      <span className={`text-xs font-semibold leading-snug ${imageUseCase === uc.id ? 'text-accent' : 'text-charcoal'}`}>
-                        {uc.label}
-                      </span>
-                      <span className="text-[10px] text-mid leading-snug">{uc.hint}</span>
-                      {imageUseCase === uc.id && (
-                        <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
-                          <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                {imageUseCase && (
-                  <p className="mt-2 text-[11px] text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
-                    Use case: <strong>
-                      {imageUseCase === 'hero_product' && 'Hero product view'}
-                      {imageUseCase === 'lifestyle' && 'Lifestyle video / image'}
-                      {imageUseCase === 'product_vibe' && 'Product creating the vibe in the environment'}
-                      {imageUseCase === 'product_person' && 'Product with person'}
-                      {imageUseCase === 'feature_explanation' && 'Feature explanation by person / product'}
-                      {imageUseCase === 'material_composition' && 'Material composition pictures with benefits'}
-                    </strong> — this will guide the AI image prompt.
-                  </p>
-                )}
-              </div>
-            )}
 
             {/* ── Creative format chips ── */}
             <div>
@@ -971,6 +1022,80 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               />
               {errors.formats && <p className="mt-1 text-xs text-red-500">{errors.formats.message}</p>}
             </div>
+
+            {/* ── Image ratio picker (image mode only) ── */}
+            {mediaType === 'image' && (
+              <div>
+                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">Image ratio</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
+                  {[
+                    { id: '1:1',    label: '1:1',      desc: 'Instagram · Facebook feed' },
+                    { id: '4:5',    label: '4:5',      desc: 'Instagram portrait feed' },
+                    { id: '9:16',   label: '9:16',     desc: 'Reels · Stories · TikTok' },
+                    { id: '16:9',   label: '16:9',     desc: 'Website · YouTube · Landscape' },
+                    { id: '1.91:1', label: '1.91:1',   desc: 'Facebook · Google ads' },
+                    { id: '2:3',    label: '2:3',      desc: 'Pinterest · Print' },
+                  ].map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => { setImageRatio(r.id); setImageRatioCustom('') }}
+                      className={`relative flex flex-col gap-0.5 rounded-xl border-2 px-3 py-2.5 text-left transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                        imageRatio === r.id && !imageRatioCustom
+                          ? 'border-accent bg-accent/5 shadow-sm'
+                          : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
+                      }`}
+                    >
+                      <span className={`text-sm font-bold leading-none ${imageRatio === r.id && !imageRatioCustom ? 'text-accent' : 'text-charcoal'}`}>
+                        {r.label}
+                      </span>
+                      <span className="text-[10px] text-mid leading-snug">{r.desc}</span>
+                      {imageRatio === r.id && !imageRatioCustom && (
+                        <span className="absolute top-1.5 right-1.5 w-3.5 h-3.5 rounded-full bg-accent flex items-center justify-center">
+                          <svg className="w-2 h-2 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-semibold text-navy shrink-0">Custom ratio:</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 3:4 or 1200x628"
+                    value={imageRatioCustom}
+                    onChange={(e) => setImageRatioCustom(e.target.value)}
+                    className={`flex-1 rounded-lg border px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                      imageRatioCustom ? 'border-accent bg-accent/5' : 'border-border bg-surface'
+                    }`}
+                  />
+                  {imageRatioCustom && (
+                    <button
+                      type="button"
+                      onClick={() => setImageRatioCustom('')}
+                      className="text-xs text-mid hover:text-charcoal underline"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1.5 text-[10px] text-mid">
+                  Selected: <strong className="text-charcoal">{imageRatioCustom.trim() || imageRatio}</strong>
+                  {!imageRatioCustom && {
+                    '1:1': ' — square, works everywhere',
+                    '4:5': ' — portrait, best click-through on Instagram',
+                    '9:16': ' — full-screen vertical',
+                    '16:9': ' — landscape, website hero & YouTube',
+                    '1.91:1': ' — Facebook/Google recommended',
+                    '2:3': ' — Pinterest standard',
+                  }[imageRatio]}
+                </p>
+              </div>
+            )}
+
+            {mediaType === 'video' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <p className="text-xs font-bold text-navy uppercase tracking-wide mb-1">Aspect Ratio</p>
@@ -994,7 +1119,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 </div>
               )}
             </div>
-            {isHiggsfieldVideo && (
+            )}
+            {isHiggsfieldVideo && mediaType === 'video' && (
               <p className="text-xs text-mid bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
                 <strong>Higgsfield:</strong>{' '}
                 {isSeedanceVideo ? (
@@ -1015,6 +1141,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </p>
             )}
 
+            {mediaType === 'video' && (
             <div className="mt-4 pt-4 border-t border-violet-200 rounded-lg bg-violet-50/40 p-4">
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
                 Script source
@@ -1206,10 +1333,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 </div>
               )}
             </div>
+            )}
 
           </BriefSection>
 
-          {!hideCampaignDetailSteps && (
+          {!hideCampaignDetailSteps && mediaType === 'video' && (
             <>
           <BriefSection title="Audience & Tone" step="3">
             <Input
@@ -1253,6 +1381,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             </div>
           </BriefSection>
 
+          </>
+          )}
+
+          {!hideCampaignDetailSteps && mediaType === 'video' && (
           <BriefSection title="Script & Content" step="5">
             <Input
               label="Hero Product (optional)"
@@ -1307,8 +1439,22 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </p>
             </div>
           </BriefSection>
+          )}
 
-          </>
+          {mediaType === 'image' && (
+            <BriefSection title="Image Variants" step="5">
+              <p className="text-[11px] text-mid -mt-1">
+                One creative direction per variant — unique use case, hook, on-image message, and prompt.
+              </p>
+              <ImageVariantSlotsPanel
+                slots={imageVariantSlots}
+                onChange={setImageVariantSlots}
+                generatingIndex={generatingSlotIndex}
+                generatingAll={generatingAllSlots}
+                onGenerateSlot={(i) => void handleGenerateImageSlot(i)}
+                onGenerateAll={() => void handleGenerateAllImageSlots()}
+              />
+            </BriefSection>
           )}
 
           {wantsVideo && isHeyGen && (
@@ -1431,6 +1577,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             <div className="space-y-2 text-xs text-subtle mb-4">
               <p>
                 <span className="text-white font-semibold">Variants:</span> {targetVariantCount || 0}
+                {mediaType === 'image' ? (
+                  <span className="text-subtle"> · {imageVariantSlots.filter((s) => s.prompt.trim()).length}/{imageVariantSlots.length} prompts set</span>
+                ) : null}
               </p>
               <p>
                 <span className="text-white font-semibold">Formats:</span>{' '}

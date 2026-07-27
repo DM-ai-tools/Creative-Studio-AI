@@ -215,6 +215,97 @@ async def icp_script(
     return await generate_icp_script(data)
 
 
+class ImagePromptRequest(BaseModel):
+    product_name: str = ""
+    brand_name: str = ""
+    offer: str = ""
+    target_audience: str = ""
+    ad_copy_tone: str = ""
+    image_use_case: str = ""          # legacy single
+    image_use_cases: list[str] = []   # new multi-select
+    image_aspect_ratio: str = "1:1"
+    forbidden_words: list[str] = []
+    user_prompt: str = ""             # when set, used as primary prompt seed
+
+
+class ImagePromptResponse(BaseModel):
+    prompt: str
+
+
+@router.post("/image-prompt", response_model=ImagePromptResponse)
+async def generate_image_prompt_endpoint(
+    data: ImagePromptRequest,
+    _current_user=Depends(get_current_user),
+):
+    """Generate a detailed AI image generation prompt from brief context."""
+    from app.services.image_prompt_service import generate_image_prompt
+    return ImagePromptResponse(prompt=await generate_image_prompt(data))
+
+
+class ImagePlanRequest(BaseModel):
+    """Campaign context for intelligent use-case selection + prompt generation."""
+    brand_name: str = ""
+    industry: str = ""
+    product_name: str = ""
+    offer: str = ""
+    target_audience: str = ""
+    ad_copy_tone: str = ""
+    objective_id: str = ""
+    cta: str = ""
+    image_aspect_ratio: str = "1:1"
+    image_use_cases: list[str] = []    # user-selected hints (optional)
+    image_prompt_override: str = ""    # user-written prompt to refine (optional)
+    notes: str = ""
+    # Optional ad copy to bake into the prompt (hook, headline, body)
+    hook: str = ""
+    headline: str = ""
+    body_copy: str = ""
+
+
+class ImagePlanResponse(BaseModel):
+    use_cases: list[str]
+    prompt: str
+    reasoning: str
+
+
+@router.post("/preview-image-plan", response_model=ImagePlanResponse)
+async def preview_image_plan(
+    data: ImagePlanRequest,
+    _current_user=Depends(get_current_user),
+):
+    """
+    Intelligent preview: LLM reads campaign brief, selects best image use cases,
+    and returns the final image generation prompt — before the brief is created.
+    """
+    from app.services.image_prompt_service import select_and_build_image_plan
+
+    brief = {
+        "brand_name": data.brand_name,
+        "target_industry_label": data.industry,
+        "campaign_product": data.product_name,
+        "product_name": data.product_name,
+        "key_benefits": {"offer": data.offer},
+        "audience": data.target_audience,
+        "audience_type": data.target_audience,
+        "ad_copy_tone": data.ad_copy_tone,
+        "objective_id": data.objective_id,
+        "cta_text": data.cta,
+        "image_aspect_ratio": data.image_aspect_ratio,
+        "image_use_cases": data.image_use_cases,
+        "image_prompt_override": data.image_prompt_override,
+        "notes": data.notes,
+    }
+    brand = {"brand_name": data.brand_name, "agency_industry": data.industry}
+    copy = {
+        "hook": data.hook,
+        "headline": data.headline,
+        "body_copy": data.body_copy,
+        "cta": data.cta,
+    } if (data.hook or data.headline) else None
+    plan = await select_and_build_image_plan(brief, brand, copy=copy)
+    return ImagePlanResponse(**plan.to_dict())
+
+
 class ProductionScriptFromBriefRequest(BaseModel):
     brand_name: str = ""
     product_name: str = ""

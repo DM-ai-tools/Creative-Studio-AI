@@ -102,6 +102,8 @@ def build_image_prompt(
         f"Professional Meta {format_type} ad for {target_industry}. "
         "Natural, realistic photography or clean modern layout — true-to-life colors, "
         "not a heavy color filter or monochromatic tint over the whole image. "
+        "Any human subjects must have sharp, clear, in-focus faces — do NOT blur, "
+        "obscure, pixelate, or turn away faces; faces must be fully visible and well-lit. "
     )
     prompt += (
         f"Brand accent colors (use sparingly): {primary} for CTA button only, "
@@ -110,7 +112,13 @@ def build_image_prompt(
         "Do not orange-wash, duotone, or recolor the entire photo. "
     )
     if has_logo and format_type not in {"carousel", "reel", "video"}:
-        prompt += "Leave top-left corner empty (logo added later). No drawn logos or wordmarks. "
+        prompt += (
+            "Single continuous full-bleed photograph filling the entire frame — "
+            "NO mirrored panels, NO blurred side strips, NO stretched halves, NO collage seams. "
+            "Do NOT leave an empty white header for a logo (logo is added in post above the image). "
+            "Headline and CTA may sit on the photo; keep faces sharp. "
+            "No drawn logos or wordmarks inside the image. "
+        )
 
     themes = parse_campaign_themes(
         brief.get("campaign_product") or brief.get("product_name") or "",
@@ -120,8 +128,8 @@ def build_image_prompt(
     if format_type == "carousel" and isinstance(slides, list) and len(slides) > 1:
         n = len(slides)
         prompt += (
-            f"Meta carousel: {n} equal panels in a row below a top header margin "
-            "(empty light band ~12% height for logo — panels must not extend into header). "
+            f"Meta carousel: {n} equal panels in a row as ONE continuous layout — "
+            "no mirrored or blurred side strips. Logo is added in a white strip in post. "
         )
         for i, slide in enumerate(slides[:5]):
             if not isinstance(slide, dict):
@@ -156,9 +164,12 @@ def build_image_prompt(
     else:
         if offer and not texts_duplicate(offer, headline):
             prompt += f"Offer: {offer}. "
-        prompt += f'One headline only: "{headline}".'
+        prompt += (
+            f'One headline only (positioned in the middle or lower half of the image, '
+            f'never in the top 15%): "{headline}".'
+        )
         if hook and not texts_duplicate(hook, headline) and not texts_duplicate(hook, campaign):
-            prompt += f' Subtext: "{hook}".'
+            prompt += f' Subtext below headline: "{hook}".'
         prompt += f' CTA button text must read exactly: "{cta}". '
         prompt += "Do not repeat the headline in multiple banners. "
 

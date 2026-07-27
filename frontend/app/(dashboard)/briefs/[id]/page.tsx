@@ -826,6 +826,47 @@ function VariantDetailBody({
         <p className="text-sm text-mid leading-relaxed whitespace-pre-line">{variant.body_copy}</p>
       </div>
 
+      {(videoSrc || imageSrc) && (
+        <button
+          type="button"
+          onClick={() => {
+            const downloadUrl = videoSrc || imageSrc
+            if (!downloadUrl) return
+            const isVideo = Boolean(videoSrc)
+            const ext = isVideo ? 'mp4' : 'png'
+            const filename = `${(variant.headline || variant.hook || 'variant')
+              .replace(/[^a-z0-9]+/gi, '-')
+              .replace(/^-|-$/g, '')
+              .toLowerCase() || 'variant'}.${ext}`
+
+            void (async () => {
+              try {
+                const res = await fetch(downloadUrl)
+                if (!res.ok) throw new Error('fetch failed')
+                const blob = await res.blob()
+                const objectUrl = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = objectUrl
+                a.download = filename
+                document.body.appendChild(a)
+                a.click()
+                a.remove()
+                URL.revokeObjectURL(objectUrl)
+              } catch {
+                // Cross-origin fallback: open in new tab so user can save manually
+                window.open(downloadUrl, '_blank', 'noopener,noreferrer')
+              }
+            })()
+          }}
+          className="flex items-center justify-center gap-2 w-full border-2 border-accent text-accent text-sm font-bold py-2 rounded-lg hover:bg-accent/5 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+          </svg>
+          Download {videoSrc ? 'video' : 'image'}
+        </button>
+      )}
+
       <div className="flex flex-wrap gap-2 pt-2">
         <button
           type="button"

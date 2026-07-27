@@ -268,6 +268,25 @@ def build_image_arguments(*, prompt: str, format_type: str) -> dict:
     }
 
 
+SEEDANCE_JOB_TYPES: frozenset[str] = frozenset({"seedance_2_0", "seedance1_5"})
+SEEDANCE_MAX_TOTAL_SECONDS = 90
+
+
+def is_seedance_video_spec(spec: HiggsfieldModelSpec | None) -> bool:
+    if not spec:
+        return False
+    return spec.job_set_type in SEEDANCE_JOB_TYPES
+
+
+def seedance_max_clip_seconds(job_set_type: str) -> int:
+    job = (job_set_type or "").lower()
+    if job == "seedance1_5":
+        return 12
+    if job == "seedance_2_0":
+        return 15
+    return 15
+
+
 def resolve_higgsfield_video_duration(
     job_set_type: str, requested: int
 ) -> tuple[int, str | None]:

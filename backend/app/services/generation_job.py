@@ -144,6 +144,22 @@ async def run_brief_generation_job(
 
             created = 0
             any_failed_motion = False
+            variant_index = 0
+
+            # Flatten image-mode fields from key_benefits onto brief_dict for prompt builders.
+            for _kb_key in (
+                "media_type",
+                "image_aspect_ratio",
+                "image_use_cases",
+                "image_prompt_override",
+                "image_variants",
+            ):
+                if _kb_key in kb_models and _kb_key not in brief_dict:
+                    brief_dict[_kb_key] = kb_models[_kb_key]
+
+            image_variants = kb_models.get("image_variants")
+            if not isinstance(image_variants, list):
+                image_variants = []
 
             for fmt in formats:
                 for _ in range(count_per_format):
@@ -151,7 +167,28 @@ async def run_brief_generation_job(
                     brief.status = "RUNNING"
                     await db.commit()
 
-                    logger.info("Brief %s: generating variant format=%s", brief_id, fmt)
+                    slot = (
+                        image_variants[variant_index]
+                        if variant_index < len(image_variants)
+                        and isinstance(image_variants[variant_index], dict)
+                        else None
+                    )
+                    slot_use_cases = (
+                        list(slot.get("use_cases") or [])
+                        if isinstance(slot, dict)
+                        else []
+                    )
+                    slot_hook = (str(slot.get("hook") or "").strip() if slot else "")
+                    slot_message = (str(slot.get("message") or "").strip() if slot else "")
+                    slot_prompt = (str(slot.get("prompt") or "").strip() if slot else "")
+
+                    logger.info(
+                        "Brief %s: generating variant format=%s index=%s slot=%s",
+                        brief_id,
+                        fmt,
+                        variant_index,
+                        bool(slot),
+                    )
                     copy = await ai_service.generate_ad_copy(
                         brand_voice=voice,
                         forbidden_words=brand.forbidden_words or [],
@@ -159,6 +196,12 @@ async def run_brief_generation_job(
                         format_type=fmt,
                         model=data.ai_model,
                     )
+                    # Per-variant on-image hook / message override (image mode).
+                    if slot_hook:
+                        copy["hook"] = slot_hook
+                    if slot_message:
+                        copy["headline"] = slot_message
+
                     compliance = await ai_service.run_compliance_check(
                         copy,
                         brand.forbidden_words or [],
@@ -190,17 +233,94 @@ async def run_brief_generation_job(
                         }
                     elif fmt in {"static", "carousel", "reel", "video"}:
                         from app.services.brand_logo import resolve_video_logo_urls
+                        from app.services.image_prompt_service import select_and_build_image_plan
 
                         img_logo, img_logo_light = resolve_video_logo_urls(
                             brand=snap,
                             brief=brief_dict,
                         )
-                        image_prompt = build_image_prompt(
-                            brand=snap,
-                            brief=brief_dict,
-                            copy=copy,
-                            format_type=fmt,
-                        )
+
+                        # ── Intelligent LLM pipeline ───────────────────────────────────────
+                        # For still-image formats (static/carousel):
+                        #   Prefer per-variant slot prompt/use-cases when provided.
+                        # For video formats: use existing template (video pipeline unchanged)
+                        if fmt in {"static", "carousel"}:
+                            media_type = (
+                                brief_dict.get("media_type")
+                                or kb_models.get("media_type")
+                                or "image"
+                            )
+                            if media_type == "image":
+                                # Apply this variant's creative direction onto brief for planning.
+                                variant_brief = {
+                                    **brief_dict,
+                                    "image_use_cases": slot_use_cases
+                                    or brief_dict.get("image_use_cases")
+                                    or kb_models.get("image_use_cases")
+                                    or [],
+                                    "image_prompt_override": slot_prompt
+                                    or brief_dict.get("image_prompt_override")
+                                    or kb_models.get("image_prompt_override")
+                                    or "",
+                                    "image_aspect_ratio": brief_dict.get("image_aspect_ratio")
+                                    or kb_models.get("image_aspect_ratio")
+                                    or "1:1",
+                                }
+                                if slot_prompt:
+                                    # User (or AI-preview) already wrote the final prompt for this variant.
+                                    image_prompt = slot_prompt
+                                    # Ensure on-image hook/message are requested if user filled them separately.
+                                    bake_bits = []
+                                    if slot_hook and slot_hook.lower() not in image_prompt.lower():
+                                        bake_bits.append(
+                                            f'Large hook text on the ad must read exactly: "{slot_hook}".'
+                                        )
+                                    if slot_message and slot_message.lower() not in image_prompt.lower():
+                                        bake_bits.append(
+                                            f'Bold headline on the ad must read exactly: "{slot_message}".'
+                                        )
+                                    if bake_bits:
+                                        image_prompt = f"{image_prompt.rstrip()} {' '.join(bake_bits)}"
+                                    brief_dict["_image_plan_use_cases"] = slot_use_cases
+                                    brief_dict["_image_plan_reasoning"] = (
+                                        (slot.get("reasoning") if slot else "") or "per_variant_prompt"
+                                    )
+                                    logger.info(
+                                        "Image slot prompt used: index=%s use_cases=%s prompt_len=%d",
+                                        variant_index,
+                                        slot_use_cases,
+                                        len(image_prompt),
+                                    )
+                                else:
+                                    plan = await select_and_build_image_plan(
+                                        variant_brief, snap, copy=copy
+                                    )
+                                    image_prompt = plan.prompt
+                                    brief_dict["_image_plan_use_cases"] = plan.use_cases
+                                    brief_dict["_image_plan_reasoning"] = plan.reasoning
+                                    logger.info(
+                                        "Image plan: index=%s use_cases=%s reasoning=%s prompt_len=%d",
+                                        variant_index,
+                                        plan.use_cases,
+                                        plan.reasoning,
+                                        len(image_prompt),
+                                    )
+                            else:
+                                # Video stills for non-image mode: keep old template
+                                image_prompt = build_image_prompt(
+                                    brand=snap,
+                                    brief=brief_dict,
+                                    copy=copy,
+                                    format_type=fmt,
+                                )
+                        else:
+                            # reel / video: template-based still for seed frame only
+                            image_prompt = build_image_prompt(
+                                brand=snap,
+                                brief=brief_dict,
+                                copy=copy,
+                                format_type=fmt,
+                            )
                         burn_logo_on_still = fmt not in {"reel", "video"}
                         pipeline["image"] = await ai_service.generate_image_asset(
                             prompt=image_prompt,
@@ -290,6 +410,15 @@ async def run_brief_generation_job(
                                 "video": video_model,
                                 "video_duration_seconds": requested_duration,
                             },
+                            # Image plan metadata (populated for image-mode stills)
+                            "image_plan": {
+                                "use_cases": brief_dict.get("_image_plan_use_cases") or [],
+                                "reasoning": brief_dict.get("_image_plan_reasoning") or "",
+                                "variant_index": variant_index,
+                                "hook": slot_hook or None,
+                                "message": slot_message or None,
+                                "prompt": slot_prompt or None,
+                            },
                         },
                         status=variant_status,
                         compliance_status="PASSED" if compliance["passed"] else "FAILED",
@@ -297,6 +426,7 @@ async def run_brief_generation_job(
                     )
                     db.add(variant)
                     created += 1
+                    variant_index += 1
                     brief.completed_variants = created
                     await db.commit()
                     video_err = video_step.get("error") if isinstance(video_step, dict) else None

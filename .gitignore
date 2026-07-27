@@ -2,6 +2,8 @@
 node_modules/
 frontend/node_modules/
 backend/venv/
+mcp-server/.venv/
+mcp-server/.env
 
 # Environment & secrets
 .env
