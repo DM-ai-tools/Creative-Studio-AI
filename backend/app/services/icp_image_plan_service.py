@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.config import settings
+from app.services.ad_angle_library import (
+    ANGLE_GUIDANCE,
+    assign_angles_to_variants,
+    per_variant_angle_instructions,
+)
 from app.services.australian_copy import AUSTRALIAN_ENGLISH_BRIEF_RULES
 from app.services.image_prompt_service import (
     _SELECTOR_FALLBACK_USE_CASES,
@@ -177,6 +182,7 @@ Output ONLY valid JSON:
 
 Rules:
 - Each variant MUST differ in scene, angle, hook, message, CTA, use cases, environment, props, and lighting.
+- When a VARIANT AD ANGLE ASSIGNMENT is provided, that variant MUST use ONLY that angle for hook + visual.
 - When AD STYLES / HOOK FRAMEWORKS are provided, they are MANDATORY — hooks AND visuals must clearly match them.
 - If pattern_interrupt is selected: NEVER produce generic stock meeting/laptop huddle scenes; the image must feel unexpected and scroll-stopping; do NOT use the phrase "professional stock photography".
 - use_cases: 1-3 ids from the catalogue only.
@@ -212,6 +218,7 @@ class IcpImageVariantPlan:
     offer: str
     prompt: str
     reasoning: str
+    ad_angle: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -222,6 +229,7 @@ class IcpImageVariantPlan:
             "offer": self.offer,
             "prompt": self.prompt,
             "reasoning": self.reasoning,
+            "ad_angle": self.ad_angle,
         }
 
 
@@ -454,6 +462,7 @@ def _fallback_variants(
     variant_count: int,
     existing_hooks: list[str],
     scene_mandates: list[str] | None = None,
+    angle_assignments: list[str] | None = None,
 ) -> list[IcpImageVariantPlan]:
     """Template variants when no API key."""
     brand = brand_name or "your brand"
@@ -494,53 +503,11 @@ def _fallback_variants(
                 offer=offer,
                 prompt=prompt,
                 reasoning=f"Fallback variant {i + 1} from campaign name (no API key).",
+                ad_angle=(angle_assignments[i] if angle_assignments and i < len(angle_assignments) else ""),
             )
         )
     return variants
 
-
-_HOOK_FRAMEWORK_GUIDANCE = {
-    "problem_agitate_solve": (
-        "Open on visible pain, heighten urgency in the scene mood, then imply the calm solution. "
-        "Hook is a sharp pain question; visual shows the stuck reality."
-    ),
-    "ugc_style": (
-        "Candid phone-camera / documentary feel — slight grain, imperfect framing, authentic workplace. "
-        "NOT polished studio stock. Subject feels real, mid-action."
-    ),
-    "pattern_interrupt": (
-        "STOP-THE-SCROLL creative. The visual MUST be unexpected for this industry — not a normal meeting, "
-        "not a smiling stock huddle, not a polite laptop desk shot. Use one strong interrupt device: "
-        "odd camera angle, surprising prop metaphor, empty chair / missing lead visual, crossed-out competitor ad, "
-        "phone blowing up with notifications, broken pipeline metaphor, or a bold confrontation with the viewer. "
-        "Hook must be a pattern-breaking question or shocking claim (max 12 words). "
-        "NEVER write 'professional stock photography' — prefer bold commercial, high-contrast, scroll-stopping."
-    ),
-    "social_proof": (
-        "Credibility on screen: peers reacting, results vibe, trusted professional context (no fake logos). "
-        "Hook references proof, demand, or what others are already doing."
-    ),
-    "founder_led": (
-        "Authority / expert energy — confident subject, direct eye contact or decisive workplace leadership. "
-        "Hook sounds like a founder calling out the problem."
-    ),
-    "before_after": (
-        "Contrast stuck-old-way vs improved-new-way in mood, props, or expression within ONE full-bleed frame "
-        "(no split collage panels)."
-    ),
-    "testimonial": (
-        "Word-of-mouth energy — someone recommending from lived experience; warm, believable, not staged pitch."
-    ),
-    "offer_urgency": (
-        "Time-sensitive action energy — decisive posture, clear next step, urgency without spammy clutter."
-    ),
-    "educational": (
-        "Teaching moment — whiteboard, checklist, explainer posture, helpful clarity; hook teaches one insight."
-    ),
-    "myth_busting": (
-        "Call out a common false belief in the hook, then show the corrected reality in the scene."
-    ),
-}
 
 _PATTERN_INTERRUPT_SCENES = [
     "Extreme close-up of a broker's phone exploding with competitor lead notifications — startled reaction, harsh phone glow",
@@ -559,7 +526,7 @@ def _style_enforcement_block(frameworks: list[str]) -> str:
         "STYLE ENFORCEMENT (mandatory — selected frameworks override generic stock scenes):",
     ]
     for fid in frameworks:
-        tip = _HOOK_FRAMEWORK_GUIDANCE.get(fid)
+        tip = ANGLE_GUIDANCE.get(fid)
         if tip:
             lines.append(f"- {fid.upper().replace('_', ' ')}: {tip}")
     if "pattern_interrupt" in frameworks:
@@ -598,15 +565,17 @@ async def generate_icp_image_plan(
     hooks_avoid = [h.strip() for h in (existing_hooks or []) if h and h.strip()]
     prompts_avoid = [p.strip() for p in (existing_prompts or []) if p and p.strip()]
     frameworks = [f.strip() for f in (hook_frameworks or []) if f and str(f).strip()]
+    angle_assignments = assign_angles_to_variants(frameworks, count, objective_id)
     framework_lines = []
     for fid in frameworks:
-        tip = _HOOK_FRAMEWORK_GUIDANCE.get(fid, "Apply this marketing angle clearly in hook + scene.")
+        tip = ANGLE_GUIDANCE.get(fid, "Apply this marketing angle clearly in hook + scene.")
         framework_lines.append(f"- {fid}: {tip}")
     framework_block = (
         "\n".join(framework_lines)
         if framework_lines
-        else "- (none selected) — vary styles naturally across variants using PAS, pattern interrupt, and social proof."
+        else "- (none selected) — AI will pick angles from campaign objective and ICP."
     )
+    angle_block = per_variant_angle_instructions(angle_assignments)
 
     icp_text = await build_icp_from_campaign(
         campaign_name=campaign_name,
@@ -634,10 +603,11 @@ async def generate_icp_image_plan(
             variant_count=count,
             existing_hooks=hooks_avoid,
             scene_mandates=scene_mandates,
+            angle_assignments=angle_assignments,
         )
         return {"icp_text": icp_text, "variants": [v.to_dict() for v in variants]}
 
-    style_block = _style_enforcement_block(frameworks)
+    style_block = _style_enforcement_block(list(dict.fromkeys(angle_assignments)))
     user_msg = "\n".join([
         _USE_CASE_CATALOGUE,
         "",
@@ -652,8 +622,10 @@ async def generate_icp_image_plan(
         f"ASPECT RATIO: {image_aspect_ratio}",
         f"VARIANT COUNT: {count}",
         "",
-        "SELECTED AD STYLES / HOOK FRAMEWORKS (apply across the batch; rotate if multiple):",
+        "SELECTED AD ANGLES (user picked — rotate across batch):",
         framework_block,
+        "",
+        angle_block,
         "",
         *( [style_block, ""] if style_block else [] ),
         "VARIETY GUIDANCE:",
@@ -727,6 +699,7 @@ async def generate_icp_image_plan(
                         prompt=prompt,
                         reasoning=str(item.get("reasoning") or "").strip()
                         or f"ICP-driven variant {i + 1} for {campaign_name}.",
+                        ad_angle=angle_assignments[i] if i < len(angle_assignments) else "",
                     )
                 )
             if variants:
@@ -762,5 +735,6 @@ async def generate_icp_image_plan(
         variant_count=count,
         existing_hooks=hooks_avoid,
         scene_mandates=scene_mandates,
+        angle_assignments=angle_assignments,
     )
     return {"icp_text": icp_text, "variants": [v.to_dict() for v in variants]}

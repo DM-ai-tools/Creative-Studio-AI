@@ -14,12 +14,10 @@ from app.services.website_script_service import choose_framework
 
 logger = logging.getLogger(__name__)
 
+from app.services.ad_angle_library import AD_ANGLE_CATALOG, label_for as ad_angle_label_for
+
 HOOK_FRAMEWORK_LABELS: dict[str, str] = {
-    "problem_agitate_solve": "Problem-Agitate-Solve",
-    "ugc_style": "UGC-Style",
-    "pattern_interrupt": "Pattern Interrupt",
-    "social_proof": "Social Proof",
-    "founder_led": "Founder-Led",
+    aid: ad_angle_label_for(aid) for aid, _, _ in AD_ANGLE_CATALOG
 }
 
 

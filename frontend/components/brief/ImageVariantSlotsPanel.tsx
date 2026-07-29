@@ -15,6 +15,8 @@ import {
   labelForUseCase,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
+import { labelForAngle } from '@/lib/adAngles'
+import type { CatalogOption } from '@/types'
 
 type Props = {
   slots: ImageVariantSlot[]
@@ -25,6 +27,7 @@ type Props = {
   generatingAll?: boolean
   campaignOffer?: string
   onCampaignOfferChange?: (value: string) => void
+  angleOptions?: CatalogOption[]
   exportContext?: ImageVariantExportContext
 }
 
@@ -48,6 +51,7 @@ export default function ImageVariantSlotsPanel({
   generatingAll,
   campaignOffer = '',
   onCampaignOfferChange,
+  angleOptions,
   exportContext,
 }: Props) {
   const [openPicker, setOpenPicker] = useState<number | null>(null)
@@ -96,9 +100,10 @@ export default function ImageVariantSlotsPanel({
             {slots.length} image variant{slots.length !== 1 ? 's' : ''}
           </p>
           <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
-            Plans are built from your <strong>campaign name</strong> and <strong>brand</strong> (ICP + HALO) —
-            not product, offer, or audience fields. Each variant gets its own use case, hook, message, CTA, and prompt.
-            Change <strong>Target Variants</strong> in step 1 to add or remove slots.
+            Plans are built from your <strong>industry</strong>, <strong>niche</strong>, and{' '}
+            <strong>brand</strong> (ICP + HALO). Each variant gets its own ad angle, use case, hook,
+            message, CTA, and prompt. Change <strong>Target Variants</strong> in step 1 to add or
+            remove slots.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -147,6 +152,11 @@ export default function ImageVariantSlotsPanel({
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-bold text-navy">
                 Variant {index + 1}
+                {slot.ad_angle ? (
+                  <span className="ml-2 text-[10px] font-semibold text-accent normal-case">
+                    {labelForAngle(slot.ad_angle, angleOptions)}
+                  </span>
+                ) : null}
                 {slot.prompt ? (
                   <span className="ml-2 text-teal-600 font-semibold text-[11px] normal-case">
                     ✓ Prompt ready

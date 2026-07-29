@@ -38,6 +38,7 @@ function buildVariantDetailRows(
   return [
     ['Field', 'Value'],
     ['Variant', String(variantIndex + 1)],
+    ['Ad angle', slot.ad_angle || '—'],
     ['Use case(s)', useCaseLabels(slot)],
     ['Hook on image', slot.hook || '—'],
     ['Message / headline on image', slot.message || '—'],

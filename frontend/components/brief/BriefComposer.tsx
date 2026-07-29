@@ -13,6 +13,7 @@ import Select from '@/components/ui/Select'
 import TextArea from '@/components/ui/TextArea'
 import { ChipToggle, ChipToggleGroup } from '@/components/ui/ChipToggle'
 import BriefSection from '@/components/brief/BriefSection'
+import AdAngleSelector from '@/components/brief/AdAngleSelector'
 import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
 import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
@@ -33,7 +34,7 @@ import {
   type BriefGenerationSettings,
 } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
-import { API_CACHE_TTL, clearBriefListCaches } from '@/lib/apiCache'
+import { API_CACHE_TTL, clearApiCache, clearBriefListCaches } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import {
@@ -48,28 +49,57 @@ import {
 } from '@/lib/creativeFormats'
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
-import type { AdFormat, CatalogOption, PerformanceStatsContext, StrategyPreviewResult } from '@/types'
+import { assignAnglesToVariants } from '@/lib/adAngles'
+import type { AdFormat, CatalogOption, PerformanceStatsContext, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
 
-const schema = z.object({
-  brand_id: z.string().min(1, 'Select a brand'),
-  title: z.string().min(3, 'Campaign name required'),
-  objective_id: z.string().min(1, 'Select an objective'),
-  target_variant_count: z.coerce.number().int().min(1).max(20),
-  offer: z.string().optional(),
-  product_name: z.string().optional(),
-  cta: z.string().optional(),
-  audience_type: z.string().optional(),
-  geography: z.string().optional(),
-  age_range: z.string().optional(),
-  languages: z.string().optional(),
-  placements: z.array(z.string()).optional(),
-  formats: z.array(z.string()).min(1, 'Select at least one creative format'),
-  hook_frameworks: z.array(z.string()).optional(),
-  notes: z.string().max(2000).optional(),
-  ad_copy_tone: z.string().optional(),
-})
+const schema = z
+  .object({
+    brand_id: z.string().optional(),
+    title: z.string().min(2, 'Industry required'),
+    niche: z.string().optional(),
+    brand_source: z.enum(['brand', 'website']),
+    website_url: z.string().optional(),
+    objective_id: z.string().min(1, 'Select an objective'),
+    target_variant_count: z.coerce.number().int().min(1).max(20),
+    offer: z.string().optional(),
+    product_name: z.string().optional(),
+    cta: z.string().optional(),
+    audience_type: z.string().optional(),
+    geography: z.string().optional(),
+    age_range: z.string().optional(),
+    languages: z.string().optional(),
+    placements: z.array(z.string()).optional(),
+    formats: z.array(z.string()).min(1, 'Select at least one creative format'),
+    hook_frameworks: z.array(z.string()).optional(),
+    notes: z.string().max(2000).optional(),
+    ad_copy_tone: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.brand_source === 'brand' && !(data.brand_id || '').trim()) {
+      ctx.addIssue({ code: 'custom', path: ['brand_id'], message: 'Select a brand' })
+    }
+    if (data.brand_source === 'website' && !(data.website_url || '').trim()) {
+      ctx.addIssue({ code: 'custom', path: ['website_url'], message: 'Enter a website URL' })
+    }
+  })
 
 type FormData = z.infer<typeof schema>
+
+function campaignLabel(industry: string, niche?: string): string {
+  const i = industry.trim()
+  const n = (niche || '').trim()
+  return n ? `${i} — ${n}` : i
+}
+
+function websiteHost(url: string): string {
+  try {
+    const raw = url.trim()
+    const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`)
+    return u.hostname.replace(/^www\./i, '').toLowerCase()
+  } catch {
+    return url.trim().toLowerCase()
+  }
+}
 
 interface BriefComposerProps {
   defaultBrandId?: string
@@ -94,6 +124,11 @@ const FALLBACK_HOOK_FRAMEWORKS: CatalogOption[] = [
   { id: 'offer_urgency', label: 'Offer / Urgency' },
   { id: 'educational', label: 'Educational / How-to' },
   { id: 'myth_busting', label: 'Myth Busting' },
+  { id: 'curiosity_hook', label: 'Curiosity Hook' },
+  { id: 'pain_led', label: 'Pain-Led Hook' },
+  { id: 'fear_loss_aversion', label: 'Fear / Loss Aversion' },
+  { id: 'fomo_scarcity', label: 'FOMO / Scarcity' },
+  { id: 'contrarian', label: 'Contrarian / Unpopular Opinion' },
 ]
 
 function optionLabel(options: CatalogOption[], id: string): string {
@@ -133,12 +168,12 @@ function PillRadio({
 
 export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const router = useRouter()
-  const { data: brands } = useApi(() => brandsApi.list(), [], {
+  const { data: brands, refetch: refetchBrands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
   })
   const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
-    cacheKey: 'generation/catalog-v6',
+    cacheKey: 'generation/catalog-v7',
     ttlMs: API_CACHE_TTL.catalog,
   })
 
@@ -151,6 +186,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [generatingAllSlots, setGeneratingAllSlots] = useState(false)
   const [imageIcpText, setImageIcpText] = useState<string | null>(null)
   const [imageCampaignOffer, setImageCampaignOffer] = useState('')
+  const [suggestingAngles, setSuggestingAngles] = useState(false)
+  const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
+  const anglesAutoSuggestedRef = useRef(false)
+  const [websiteBrand, setWebsiteBrand] = useState<WebsiteBrandFetchResult | null>(null)
+  const [fetchingWebsiteBrand, setFetchingWebsiteBrand] = useState(false)
   const [imageRatio, setImageRatio] = useState<string>('1:1')
   const [imageRatioCustom, setImageRatioCustom] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
@@ -201,6 +241,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     resolver: zodResolver(schema),
     defaultValues: {
       brand_id: defaultBrandId ?? '',
+      title: '',
+      niche: '',
+      brand_source: 'brand',
+      website_url: '',
       target_variant_count: 2,
       placements: [],
       formats: [],
@@ -250,6 +294,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const selectedFrameworks = watch('hook_frameworks')
   const targetVariantCount = watch('target_variant_count')
   const objectiveId = watch('objective_id')
+  const brandSource = watch('brand_source')
+  const websiteUrlField = watch('website_url')
 
   useEffect(() => {
     if (mediaType !== 'image') return
@@ -270,9 +316,182 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     return source
   }, [catalog?.hook_frameworks])
 
+  const variantAngleAssignments = useMemo(
+    () =>
+      assignAnglesToVariants(
+        selectedFrameworks ?? [],
+        Number(targetVariantCount) || 1,
+        objectiveId
+      ),
+    [selectedFrameworks, targetVariantCount, objectiveId]
+  )
+
   const brandOptions = (brands ?? []).map((brand) => ({ value: brand.id, label: brand.name }))
   const hasBrands = brandOptions.length > 0
   const selectedBrand = (brands ?? []).find((brand) => brand.id === watch('brand_id'))
+
+  const handleSuggestAdAngles = async (silent = false) => {
+    const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
+    if (campaignName.length < 2) {
+      if (!silent) toast.error('Enter an industry first.')
+      return
+    }
+    setSuggestingAngles(true)
+    try {
+      const result = await generationApi.suggestAdAngles({
+        campaign_name: campaignName,
+        brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
+        industry: (watch('title') ?? '').trim(),
+        niche: (watch('niche') ?? '').trim(),
+        objective_id: objectiveId ?? '',
+        variant_count: Number(targetVariantCount) || 2,
+      })
+      setValue('hook_frameworks', result.suggested_angles)
+      setAngleSuggestionReason(result.reasoning)
+      if (result.icp_text?.trim()) setImageIcpText(result.icp_text.trim())
+      if (!silent) {
+        if (result.source === 'ai') {
+          toast.success('Ad angles suggested by AI from your industry & ICP')
+        } else {
+          toast.success('Ad angles suggested from campaign objective (rule-based)')
+        }
+      }
+    } catch {
+      if (!silent) toast.error('Could not suggest angles — check OPENROUTER_API_KEY')
+    } finally {
+      setSuggestingAngles(false)
+    }
+  }
+
+  const handleFetchWebsiteBrand = async () => {
+    const url = (websiteUrlField ?? '').trim()
+    if (url.length < 4) {
+      toast.error('Enter a website URL first')
+      return
+    }
+    setFetchingWebsiteBrand(true)
+    try {
+      const result = await generationApi.fetchBrandFromUrl({ url })
+      setWebsiteBrand(result)
+
+      const host = websiteHost(result.source_url || url)
+      const industrySlug =
+        (watch('title') || result.industry || 'general')
+          .trim()
+          .replace(/\s+/g, '_')
+          .toLowerCase() || 'general'
+
+      const existing = (brands ?? []).find((b) => {
+        const vr = (b.voice_rules || {}) as Record<string, unknown>
+        const saved = typeof vr.website_url === 'string' ? vr.website_url : ''
+        return saved ? websiteHost(saved) === host : false
+      })
+
+      const voiceRules = {
+        ...((existing?.voice_rules as Record<string, unknown>) || {}),
+        website_url: result.source_url || url,
+        scraped_from: 'firecrawl',
+        scraped_at: new Date().toISOString(),
+      }
+
+      let savedBrand
+      if (existing) {
+        savedBrand = await brandsApi.update(existing.id, {
+          name: result.brand_name || existing.name,
+          primary_color: result.primary_color,
+          secondary_color: result.secondary_color,
+          logo_url: result.logo_url || existing.logo_url || undefined,
+          voice_rules: voiceRules,
+          ...(watch('title')?.trim() ? { industry: industrySlug } : {}),
+        })
+        try {
+          const kit = await brandsApi.getKit(existing.id)
+          await brandsApi.updateKit(existing.id, kit.id, {
+            name: kit.name || 'Default Kit',
+            colors: {
+              ...(kit.colors || {}),
+              primary: result.primary_color,
+              secondary: result.secondary_color,
+            },
+            fonts: kit.fonts || {},
+            logo_variations: kit.logo_variations || {},
+          })
+        } catch {
+          /* kit optional */
+        }
+        toast.success(`Updated Brand Kit: ${savedBrand.name}`)
+      } else {
+        savedBrand = await brandsApi.create({
+          name: result.brand_name || host,
+          industry: industrySlug,
+          primary_color: result.primary_color,
+          secondary_color: result.secondary_color,
+          language: 'English',
+          voice_rules: voiceRules,
+        })
+        if (result.logo_url) {
+          try {
+            savedBrand = await brandsApi.update(savedBrand.id, { logo_url: result.logo_url })
+          } catch {
+            /* logo optional */
+          }
+        }
+        try {
+          await brandsApi.createKit(savedBrand.id, {
+            name: 'Default Kit',
+            colors: {
+              primary: result.primary_color,
+              secondary: result.secondary_color,
+            },
+          })
+        } catch {
+          /* kit optional */
+        }
+        toast.success(`Saved to Brand Kit: ${savedBrand.name}`)
+      }
+
+      clearApiCache('brands')
+      await refetchBrands({ background: true })
+      setValue('brand_source', 'brand', { shouldValidate: true })
+      setValue('brand_id', savedBrand.id, { shouldValidate: true })
+      setValue('website_url', result.source_url || url)
+
+      if (result.warning) toast(result.warning, { icon: '⚠️' })
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not fetch brand from website')
+    } finally {
+      setFetchingWebsiteBrand(false)
+    }
+  }
+
+  useEffect(() => {
+    if (mediaType !== 'image') return
+    const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
+    if (
+      campaignName.length < 2 ||
+      (selectedFrameworks?.length ?? 0) > 0 ||
+      anglesAutoSuggestedRef.current
+    ) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      anglesAutoSuggestedRef.current = true
+      void handleSuggestAdAngles(true)
+    }, 1500)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watch('title'), watch('niche'), mediaType, selectedFrameworks?.length, objectiveId])
+
+  useEffect(() => {
+    if (mediaType !== 'image') return
+    setImageVariantSlots((prev) =>
+      prev.map((slot, i) => ({
+        ...slot,
+        ad_angle: variantAngleAssignments[i] || slot.ad_angle,
+      }))
+    )
+  }, [variantAngleAssignments, mediaType])
+
   const wantsVideo = (selectedFormats ?? []).some(isVideoFormat)
   const wantsImageOnly =
     (selectedFormats ?? []).length > 0 &&
@@ -492,9 +711,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     const d = formValues
     const slot = imageVariantSlots[index]
     if (!slot) return
-    const campaignName = (d.title ?? '').trim()
-    if (campaignName.length < 3) {
-      toast.error('Enter a campaign name in step 1 (at least 3 characters) before generating image plans.')
+    const campaignName = campaignLabel(d.title ?? '', d.niche)
+    if (campaignName.length < 2) {
+      toast.error('Enter an industry before generating image plans.')
       return
     }
     const siblingHooks = imageVariantSlots
@@ -505,15 +724,20 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       .filter(Boolean)
     setGeneratingSlotIndex(index)
     try {
+      const slotAngle = variantAngleAssignments[index]
       const plan = await generationApi.previewIcpImagePlan({
         campaign_name: campaignName,
-        brand_name: selectedBrand?.name ?? '',
-        industry: selectedBrand?.industry ?? '',
+        brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
+        industry:
+          (d.title ?? '').trim() ||
+          selectedBrand?.industry ||
+          websiteBrand?.industry ||
+          '',
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-        hook_frameworks: d.hook_frameworks ?? [],
+        hook_frameworks: slotAngle ? [slotAngle] : (d.hook_frameworks ?? []),
         variant_count: 1,
         existing_hooks: siblingHooks,
         existing_prompts: siblingPrompts,
@@ -539,6 +763,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 offer: variant.offer || imageCampaignOffer.trim() || s.offer,
                 prompt: variant.prompt || s.prompt,
                 reasoning: variant.reasoning || '',
+                ad_angle: variant.ad_angle || slotAngle || '',
                 generated_at: generatedAt,
               }
             : s
@@ -554,17 +779,21 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
   const handleGenerateAllImageSlots = async () => {
     const d = formValues
-    const campaignName = (d.title ?? '').trim()
-    if (campaignName.length < 3) {
-      toast.error('Enter a campaign name in step 1 (at least 3 characters) before generating image plans.')
+    const campaignName = campaignLabel(d.title ?? '', d.niche)
+    if (campaignName.length < 2) {
+      toast.error('Enter an industry before generating image plans.')
       return
     }
     setGeneratingAllSlots(true)
     try {
       const plan = await generationApi.previewIcpImagePlan({
         campaign_name: campaignName,
-        brand_name: selectedBrand?.name ?? '',
-        industry: selectedBrand?.industry ?? '',
+        brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
+        industry:
+          (d.title ?? '').trim() ||
+          selectedBrand?.industry ||
+          websiteBrand?.industry ||
+          '',
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || undefined,
@@ -589,6 +818,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             offer: variant.offer || imageCampaignOffer.trim() || s.offer,
             prompt: variant.prompt || s.prompt,
             reasoning: variant.reasoning || '',
+            ad_angle: variant.ad_angle || variantAngleAssignments[i] || '',
             generated_at: generatedAt,
           }
         })
@@ -766,9 +996,45 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         referenceImageUrl = asset.file_url
       }
 
+      let brandId = (d.brand_id || '').trim()
+      // Website fetch now saves into Brand Kit immediately — only create here if somehow missing.
+      if (d.brand_source === 'website' && !brandId) {
+        if (!websiteBrand) {
+          toast.error('Fetch brand from website first (click Fetch brand).')
+          return
+        }
+        const created = await brandsApi.create({
+          name: websiteBrand.brand_name || campaignLabel(d.title, d.niche),
+          industry: (d.title || 'general').trim().replace(/\s+/g, '_').toLowerCase() || 'general',
+          primary_color: websiteBrand.primary_color,
+          secondary_color: websiteBrand.secondary_color,
+          language: 'English',
+          voice_rules: {
+            website_url: websiteBrand.source_url || d.website_url || '',
+            scraped_from: 'firecrawl',
+            scraped_at: new Date().toISOString(),
+          },
+        })
+        brandId = created.id
+        if (websiteBrand.logo_url) {
+          try {
+            await brandsApi.update(brandId, { logo_url: websiteBrand.logo_url })
+          } catch {
+            /* logo optional */
+          }
+        }
+        clearApiCache('brands')
+      }
+      if (!brandId) {
+        toast.error('Select a brand or fetch one from a website URL.')
+        return
+      }
+
+      const briefTitle = campaignLabel(d.title ?? '', d.niche)
+
       const brief = await briefsApi.create({
-        brand_id: d.brand_id,
-        title: d.title,
+        brand_id: brandId,
+        title: briefTitle,
         objective: optionLabel(catalog.objectives, d.objective_id),
         target_audience: targetAudience,
         formats: d.formats as AdFormat[],
@@ -786,6 +1052,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           notes: d.notes ?? '',
           audience,
           objective_id: d.objective_id,
+          industry: d.title ?? '',
+          niche: d.niche ?? '',
+          brand_source: d.brand_source,
+          ...(d.brand_source === 'website'
+            ? {
+                website_url: d.website_url ?? websiteBrand?.source_url ?? '',
+                scraped_brand: websiteBrand ?? undefined,
+              }
+            : {}),
           cta_text:
             (d.cta ?? '').trim() ||
             imageVariantSlots.map((s) => s.cta.trim()).find(Boolean) ||
@@ -799,7 +1074,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           ...(mediaType === 'image'
             ? {
                 image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-                image_variants: imageVariantSlots.map((s) => ({
+                image_variants: imageVariantSlots.map((s, i) => ({
                   use_cases: s.use_cases,
                   hook: s.hook.trim(),
                   message: s.message.trim(),
@@ -807,6 +1082,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   offer: s.offer.trim(),
                   prompt: s.prompt.trim(),
                   reasoning: s.reasoning.trim() || undefined,
+                  ad_angle: s.ad_angle || variantAngleAssignments[i] || undefined,
                   generated_at: s.generated_at ?? undefined,
                 })),
                 ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
@@ -898,7 +1174,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     wantsVideo && isHeyGen && !hideCampaignDetailSteps && !approvedAvatarScript
 
   const submitBlocked =
-    !hasBrands ||
+    (brandSource === 'brand' && !hasBrands && !(watch('brand_id') || '').trim()) ||
+    (brandSource === 'website' && !websiteBrand && !(watch('brand_id') || '').trim()) ||
     !catalog ||
     (isPdfScriptMode && !pdfFile) ||
     (isCustomScriptMode && (!customPrompt.trim() || !referenceImageFile)) ||
@@ -923,7 +1200,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-charcoal tracking-tight">Create Brief</h1>
           <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full">
-            Campaign
+            {mediaType === 'image' ? 'Image' : 'Video'}
           </span>
         </div>
         <Button type="submit" form="brief-form" variant="outline" size="sm" disabled={isSubmitting}>
@@ -931,37 +1208,165 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         </Button>
       </header>
 
+      {/* Image / Video tabs */}
+      <div className="sticky top-[65px] z-10 border-b border-border bg-white/90 backdrop-blur-md">
+        <div className="w-full max-w-[1600px] mx-auto px-6 md:px-8 flex gap-1">
+          {([
+            { id: 'image' as const, label: 'Image', hint: 'Static & carousel ads' },
+            { id: 'video' as const, label: 'Video', hint: 'Portrait & landscape' },
+          ]).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setMediaType(tab.id)}
+              className={`relative px-5 py-3 text-sm font-semibold transition-colors ${
+                mediaType === tab.id
+                  ? 'text-charcoal'
+                  : 'text-mid hover:text-charcoal'
+              }`}
+            >
+              {tab.label}
+              <span className="hidden sm:inline text-mid font-normal text-[11px] ml-1.5">
+                · {tab.hint}
+              </span>
+              {mediaType === tab.id && (
+                <span className="absolute left-2 right-2 bottom-0 h-0.5 rounded-full bg-accent" />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <form
         id="brief-form"
         onSubmit={handleSubmit(onSubmit, onInvalid)}
         className="w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4"
       >
         <div className="space-y-4">
-          {!hasBrands && (
+          {brandSource === 'brand' && !hasBrands && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               No brands yet. Create one in{' '}
               <Link href="/brand-kit" className="font-semibold text-teal hover:underline">
                 Brand Kit
               </Link>
-              .
+              , or switch to <strong>Website URL</strong> below to fetch brand automatically.
             </div>
           )}
 
-          <BriefSection title="Campaign & Brand" step="1">
+          <BriefSection title="Industry & Brand" step="1">
             <Input
-              label="Campaign Name"
-              placeholder="e.g. Dental Clinic — New Patient Acquisition"
+              label="Industry"
+              placeholder="e.g. Dental, Legal Services, Digital Marketing"
               error={errors.title?.message}
               {...register('title')}
             />
-            <Select
-              label="Brand"
-              options={brandOptions}
-              placeholder={hasBrands ? 'Select brand' : 'No brands'}
-              disabled={!hasBrands}
-              error={errors.brand_id?.message}
-              {...register('brand_id')}
+            <Input
+              label="Niche"
+              placeholder="e.g. New patient acquisition, Meta ads for SMBs"
+              error={errors.niche?.message}
+              {...register('niche')}
             />
+
+            <div>
+              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
+                Brand source
+              </p>
+              <div className="flex gap-2 mb-3">
+                {(
+                  [
+                    { id: 'brand' as const, label: 'Brand Kit' },
+                    { id: 'website' as const, label: 'Website URL' },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setValue('brand_source', opt.id, { shouldValidate: true })}
+                    className={`px-3.5 py-2 text-xs font-semibold rounded-full border transition-all ${
+                      brandSource === opt.id
+                        ? 'border-accent/50 bg-accent/10 text-charcoal'
+                        : 'border-border text-mid hover:border-accent/30'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {brandSource === 'brand' ? (
+                <Select
+                  label="Brand"
+                  options={brandOptions}
+                  placeholder={hasBrands ? 'Select brand' : 'No brands'}
+                  disabled={!hasBrands}
+                  error={errors.brand_id?.message}
+                  {...register('brand_id')}
+                />
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+                    <div className="flex-1">
+                      <Input
+                        label="Website URL"
+                        placeholder="https://yourbrand.com"
+                        error={errors.website_url?.message}
+                        {...register('website_url')}
+                      />
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0 mb-0.5"
+                      isLoading={fetchingWebsiteBrand}
+                      onClick={() => void handleFetchWebsiteBrand()}
+                    >
+                      Fetch brand
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-mid">
+                    Fetches colours &amp; logo with Firecrawl, then <strong>saves into Brand Kit</strong> so
+                    you can reuse it next time without fetching again. Industry and niche stay yours to type
+                    above.
+                  </p>
+                  {websiteBrand && (
+                    <div className="rounded-xl border border-accent/25 bg-accent/5 p-3 flex flex-wrap items-center gap-3">
+                      {websiteBrand.logo_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={websiteBrand.logo_url}
+                          alt={websiteBrand.brand_name}
+                          className="h-10 w-10 object-contain rounded-lg bg-white border border-border"
+                        />
+                      ) : (
+                        <div className="h-10 w-10 rounded-lg bg-white border border-border" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-charcoal truncate">
+                          {websiteBrand.brand_name}
+                        </p>
+                        <p className="text-[11px] text-mid">
+                          Saved to Brand Kit — pick it under Brand Kit next time
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="w-6 h-6 rounded-full border border-border"
+                          style={{ background: websiteBrand.primary_color }}
+                          title={websiteBrand.primary_color}
+                        />
+                        <span
+                          className="w-6 h-6 rounded-full border border-border"
+                          style={{ background: websiteBrand.secondary_color }}
+                          title={websiteBrand.secondary_color}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <Select
               label="Objective"
               options={objectiveOptions}
@@ -984,64 +1389,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
           <BriefSection title="Creative formats & models" step="2">
 
-            {/* ── Video or Image first-choice toggle ── */}
-            <div>
-              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">
-                What are you creating?
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setMediaType('image')}
-                  className={`group relative flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
-                    mediaType === 'image'
-                      ? 'border-accent bg-accent/5 shadow-sm'
-                      : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
-                  }`}
-                >
-                  <span className="text-2xl">🖼️</span>
-                  <span className={`text-sm font-bold ${mediaType === 'image' ? 'text-accent' : 'text-charcoal'}`}>
-                    Image
-                  </span>
-                  <span className="text-[10px] text-mid text-center leading-snug">
-                    Static, carousel, lifestyle, product shots
-                  </span>
-                  {mediaType === 'image' && (
-                    <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
-                      <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                      </svg>
-                    </span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMediaType('video')}
-                  className={`group relative flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-4 transition-all focus:outline-none focus:ring-2 focus:ring-accent/40 ${
-                    mediaType === 'video'
-                      ? 'border-accent bg-accent/5 shadow-sm'
-                      : 'border-border bg-surface hover:border-accent/40 hover:bg-accent/[0.03]'
-                  }`}
-                >
-                  <span className="text-2xl">🎬</span>
-                  <span className={`text-sm font-bold ${mediaType === 'video' ? 'text-accent' : 'text-charcoal'}`}>
-                    Video
-                  </span>
-                  <span className="text-[10px] text-mid text-center leading-snug">
-                    Portrait, landscape, avatar, B-roll, multi-scene
-                  </span>
-                  {mediaType === 'video' && (
-                    <span className="absolute top-2 right-2 w-4 h-4 rounded-full bg-accent flex items-center justify-center">
-                      <svg className="w-2.5 h-2.5 text-white" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                      </svg>
-                    </span>
-                  )}
-                </button>
-              </div>
-            </div>
-
-
             {/* ── Creative format chips ── */}
             <div>
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
@@ -1049,7 +1396,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </p>
               {mediaType === 'image' && (
                 <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
-                  Image mode: <strong>Static</strong> and <strong>Carousel</strong> are available. Switch to <strong>Video</strong> above to unlock Portrait/Landscape video formats.
+                  Image tab: <strong>Static</strong> and <strong>Carousel</strong>. Switch to the{' '}
+                  <strong>Video</strong> tab above for Portrait/Landscape.
                 </p>
               )}
               {mediaType === 'video' && !wantsVideo && (selectedFormats ?? []).length > 0 && (
@@ -1070,16 +1418,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             {mediaType === 'image' && (
               <div>
                 <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
-                  Ad style / hook framework
+                  Ad angles
                 </p>
-                <p className="text-[11px] text-mid mb-3">
-                  Choose how the ads should sell — Pattern Interrupt, UGC, Social Proof, etc.
-                  AI plans will follow these styles for hooks and scenes.
-                </p>
-                <ChipToggleGroup
+                <AdAngleSelector
                   options={hookFrameworkOptions}
                   selected={selectedFrameworks ?? []}
                   onChange={(next) => setValue('hook_frameworks', next)}
+                  onSuggest={() => void handleSuggestAdAngles(false)}
+                  suggesting={suggestingAngles}
+                  suggestionReason={angleSuggestionReason}
                 />
               </div>
             )}
@@ -1515,8 +1862,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 onGenerateAll={() => void handleGenerateAllImageSlots()}
                 campaignOffer={imageCampaignOffer}
                 onCampaignOfferChange={setImageCampaignOffer}
+                angleOptions={hookFrameworkOptions}
                 exportContext={{
-                  campaignName: formValues.title ?? '',
+                  campaignName: campaignLabel(formValues.title ?? '', formValues.niche),
                   brandName: selectedBrand?.name ?? '',
                   objectiveId: formValues.objective_id ?? '',
                   aspectRatio: imageRatioCustom.trim() || imageRatio,
@@ -1647,7 +1995,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               imageModelSelect={imageModelSelect}
               videoModelSelect={videoModelSelect}
               getSuggestionInputs={() => ({
-                campaign_name: formValues.title ?? '',
+                campaign_name: campaignLabel(formValues.title ?? '', formValues.niche),
                 objective: formValues.objective_id
                   ? (catalog?.objectives.find(o => o.id === formValues.objective_id)?.label ?? formValues.objective_id)
                   : '',
@@ -1669,7 +2017,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               canBuild={Boolean(catalog && hasBrands)}
               onPreviewChange={setStrategyPreview}
               getInputs={() => ({
-                campaign_name: formValues.title ?? '',
+                campaign_name: campaignLabel(formValues.title ?? '', formValues.niche),
                 brand_name: selectedBrand?.name ?? '',
                 product_name: formValues.product_name ?? '',
                 offer: formValues.offer ?? '',

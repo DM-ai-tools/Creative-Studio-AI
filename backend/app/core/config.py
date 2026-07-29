@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     HIGGSFIELD_BASE_URL: str = "https://platform.higgsfield.ai"
     HIGGSFIELD_POLL_MAX_WAIT_SECONDS: int = 1800
 
+    # Firecrawl — scrape website → brand colors, logo, industry
+    # Official: POST https://api.firecrawl.dev/v2/scrape with formats=["branding"]
+    # https://docs.firecrawl.dev/features/scrape#extract-brand-identity
+    FIRECRAWL_API_KEY: str = ""
+    FIRECRAWL_BASE_URL: str = "https://api.firecrawl.dev/v2"
+
     META_APP_ID: str = ""
     META_APP_SECRET: str = ""
     META_ACCESS_TOKEN: str = ""

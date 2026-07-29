@@ -61,6 +61,7 @@ def slim_generation_params_for_list(params: Dict[str, Any] | None) -> Dict[str, 
                 "hook",
                 "message",
                 "cta",
+                "ad_angle",
             )
             if k in image_plan
         }

@@ -13,6 +13,7 @@ import BriefGenerationPanel, {
   type BriefGenerationSettings,
   VIDEO_DURATION_OPTIONS,
 } from '@/components/brief/BriefGenerationPanel'
+import BriefOverviewPanel from '@/components/brief/BriefOverviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar } from '@/lib/heygenAvatars'
@@ -542,6 +543,12 @@ export default function BriefDetailPage() {
             )}
           </div>
         )}
+
+        <BriefOverviewPanel
+          brief={brief}
+          brand={brand}
+          angleOptions={catalog?.hook_frameworks}
+        />
 
         <BriefGenerationPanel
           catalog={catalog ?? undefined}

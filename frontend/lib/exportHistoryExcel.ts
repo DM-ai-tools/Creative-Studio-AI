@@ -99,6 +99,7 @@ export function buildHistoryDetailFields(row: HistoryRow): Array<[string, string
     ['Hashtags', (variant.hashtags || []).join(' ') || '—'],
     ['Offer (caption / slot)', str(slot.offer)],
     ['Use case(s)', useCaseLabels(imagePlan.use_cases || slot.use_cases)],
+    ['Ad angle', imagePlan.ad_angle || slot.ad_angle || '—'],
     ['AI reasoning', str(imagePlan.reasoning || slot.reasoning)],
     ['Image generation prompt', str(imagePlan.prompt || slot.prompt)],
     ['Copy model', str(models.copy || variant.ai_model || kb.copy_model)],

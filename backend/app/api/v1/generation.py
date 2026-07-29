@@ -314,7 +314,42 @@ class IcpImageVariantPlanItem(BaseModel):
     offer: str = ""
     prompt: str
     reasoning: str
+    ad_angle: str = ""
 
+
+class SuggestAdAnglesRequest(BaseModel):
+    campaign_name: str = Field(..., min_length=2)
+    brand_name: str = ""
+    industry: str = ""
+    niche: str = ""
+    objective_id: str = ""
+    variant_count: int = Field(default=2, ge=1, le=20)
+
+
+class SuggestAdAnglesResponse(BaseModel):
+    suggested_angles: list[str]
+    reasoning: str
+    icp_text: str = ""
+    source: str = "rules"  # "ai" | "rules"
+
+
+@router.post("/suggest-ad-angles", response_model=SuggestAdAnglesResponse)
+async def suggest_ad_angles_endpoint(
+    data: SuggestAdAnglesRequest,
+    _current_user=Depends(get_current_user),
+):
+    """Suggest ad angles from industry + niche + ICP (business logic)."""
+    from app.services.ad_angle_library import suggest_ad_angles
+
+    result = await suggest_ad_angles(
+        campaign_name=data.campaign_name.strip(),
+        brand_name=data.brand_name,
+        industry=data.industry,
+        niche=data.niche,
+        objective_id=data.objective_id,
+        variant_count=data.variant_count,
+    )
+    return SuggestAdAnglesResponse(**result)
 
 class IcpImagePlanRequest(BaseModel):
     """ICP-driven image plans from campaign name (+ brand / industry)."""
@@ -361,6 +396,41 @@ async def icp_image_plan(
         existing_prompts=data.existing_prompts,
     )
     return IcpImagePlanResponse(**result)
+
+
+class FetchBrandFromUrlRequest(BaseModel):
+    url: str = Field(..., min_length=4)
+
+
+class FetchBrandFromUrlResponse(BaseModel):
+    source_url: str
+    brand_name: str
+    industry: str
+    niche: str = ""
+    primary_color: str
+    secondary_color: str
+    logo_url: str | None = None
+    page_title: str = ""
+    description: str = ""
+    provider: str = "firecrawl"
+    warning: str | None = None
+
+
+@router.post("/fetch-brand-from-url", response_model=FetchBrandFromUrlResponse)
+async def fetch_brand_from_url(
+    data: FetchBrandFromUrlRequest,
+    _current_user=Depends(get_current_user),
+):
+    """Scrape a website (Firecrawl) and return brand colors, logo, industry, niche."""
+    from app.services.firecrawl_brand_service import fetch_brand_from_website
+
+    try:
+        result = await fetch_brand_from_website(data.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not fetch brand from URL: {exc}") from exc
+    return FetchBrandFromUrlResponse(**result)
 
 
 class ProductionScriptFromBriefRequest(BaseModel):

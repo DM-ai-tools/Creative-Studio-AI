@@ -51,6 +51,8 @@ export type ImageVariantSlot = {
   offer: string
   prompt: string
   reasoning: string
+  /** Assigned ad angle id for this variant (e.g. pattern_interrupt). */
+  ad_angle: string
   /** ISO timestamp when AI plan was last generated for this variant. */
   generated_at: string | null
 }
@@ -64,6 +66,7 @@ export function emptyImageVariantSlot(): ImageVariantSlot {
     offer: '',
     prompt: '',
     reasoning: '',
+    ad_angle: '',
     generated_at: null,
   }
 }

@@ -182,6 +182,7 @@ async def run_brief_generation_job(
                     slot_message = (str(slot.get("message") or "").strip() if slot else "")
                     slot_cta = (str(slot.get("cta") or "").strip() if slot else "")
                     slot_prompt = (str(slot.get("prompt") or "").strip() if slot else "")
+                    slot_ad_angle = (str(slot.get("ad_angle") or "").strip() if slot else "")
 
                     logger.info(
                         "Brief %s: generating variant format=%s index=%s slot=%s",
@@ -432,7 +433,10 @@ async def run_brief_generation_job(
                                 "message": slot_message or None,
                                 "cta": slot_cta or copy.get("cta") or None,
                                 "prompt": slot_prompt or None,
+                                "ad_angle": slot_ad_angle or None,
+                                "hook_framework": slot_ad_angle or None,
                             },
+                            "hook_framework": slot_ad_angle or None,
                         },
                         status=variant_status,
                         compliance_status="PASSED" if compliance["passed"] else "FAILED",

@@ -2,6 +2,7 @@ import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
   Asset, AvatarScriptResult, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  SuggestAdAnglesResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
   GenerationCatalog, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
@@ -419,6 +420,23 @@ export const generationApi = {
   }) =>
     api
       .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  suggestAdAngles: (data: {
+    campaign_name: string
+    brand_name?: string
+    industry?: string
+    niche?: string
+    objective_id?: string
+    variant_count?: number
+  }) =>
+    api
+      .post<SuggestAdAnglesResult>('/generation/suggest-ad-angles', data, { timeout: 90_000 })
+      .then((r) => r.data),
+
+  fetchBrandFromUrl: (data: { url: string }) =>
+    api
+      .post<WebsiteBrandFetchResult>('/generation/fetch-brand-from-url', data, { timeout: 120_000 })
       .then((r) => r.data),
 
   generateImagePrompt: (data: {

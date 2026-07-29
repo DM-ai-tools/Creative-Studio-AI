@@ -179,6 +179,28 @@ export interface IcpImageVariantPlan {
   offer: string
   prompt: string
   reasoning: string
+  ad_angle?: string
+}
+
+export interface SuggestAdAnglesResult {
+  suggested_angles: string[]
+  reasoning: string
+  icp_text?: string
+  source?: 'ai' | 'rules' | string
+}
+
+export interface WebsiteBrandFetchResult {
+  source_url: string
+  brand_name: string
+  industry: string
+  niche?: string
+  primary_color: string
+  secondary_color: string
+  logo_url?: string | null
+  page_title?: string
+  description?: string
+  provider?: string
+  warning?: string | null
 }
 
 export interface IcpImagePlanResult {

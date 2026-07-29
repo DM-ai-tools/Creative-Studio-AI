@@ -19,6 +19,7 @@ from app.services.media.higgsfield_catalog import (
     higgsfield_image_catalog_options,
     higgsfield_video_catalog_options,
 )
+from app.services.ad_angle_library import catalog_options as ad_angle_catalog_options
 from app.services.media.runway_catalog import (
     runway_image_catalog_options,
     runway_video_catalog_options,
@@ -102,16 +103,7 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
             CatalogOption(id="carousel", label="Carousel"),
         ],
         hook_frameworks=[
-            CatalogOption(id="problem_agitate_solve", label="Problem-Agitate-Solve"),
-            CatalogOption(id="ugc_style", label="UGC-Style"),
-            CatalogOption(id="pattern_interrupt", label="Pattern Interrupt"),
-            CatalogOption(id="social_proof", label="Social Proof"),
-            CatalogOption(id="founder_led", label="Founder-Led"),
-            CatalogOption(id="before_after", label="Before / After"),
-            CatalogOption(id="testimonial", label="Testimonial / Review"),
-            CatalogOption(id="offer_urgency", label="Offer / Urgency"),
-            CatalogOption(id="educational", label="Educational / How-to"),
-            CatalogOption(id="myth_busting", label="Myth Busting"),
+            CatalogOption(id=o["id"], label=o["label"]) for o in ad_angle_catalog_options()
         ],
         cta_options=[
             CatalogOption(id="shop_now", label="Shop Now"),
