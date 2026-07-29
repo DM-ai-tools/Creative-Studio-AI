@@ -51,9 +51,14 @@ export function useApi<T>(
         }
       } catch (err: unknown) {
         if (mountedRef.current) {
+          const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data
+            ?.detail
           const msg =
-            (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-            'An error occurred'
+            typeof detail === 'string'
+              ? detail
+              : Array.isArray(detail)
+                ? detail.map((d) => (typeof d === 'object' && d && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d))).join('; ')
+                : (err as { message?: string })?.message || 'An error occurred'
           setError(msg)
         }
       } finally {

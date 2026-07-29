@@ -1,11 +1,12 @@
 'use client'
 
-import React from 'react'
+import React, { useMemo } from 'react'
 import HeyGenAvatarPicker from '@/components/brief/HeyGenAvatarPicker'
 import Card from '@/components/ui/Card'
 import Select from '@/components/ui/Select'
 import { ChipToggle } from '@/components/ui/ChipToggle'
 import { cn } from '@/lib/utils'
+import { estimateGenerationCost, formatUsd } from '@/lib/estimateGenerationCost'
 import type { GenerationCatalog } from '@/types'
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 
@@ -61,6 +62,8 @@ interface BriefGenerationPanelProps {
   hideHeyGenPresenter?: boolean
   /** Scroll long model pickers inside the card instead of stretching the page. */
   scrollable?: boolean
+  /** Variant count for live cost estimate (defaults to 1). */
+  variantCount?: number
 }
 
 export default function BriefGenerationPanel({
@@ -71,10 +74,33 @@ export default function BriefGenerationPanel({
   disabled,
   hideHeyGenPresenter = false,
   scrollable = false,
+  variantCount = 1,
 }: BriefGenerationPanelProps) {
   const wantsVideo = formats.some((f) => f === 'reel' || f === 'video')
+  const wantsImageOnly =
+    formats.length > 0 && formats.every((f) => f === 'static' || f === 'carousel')
   const isHeyGen = settings.videoModel.toLowerCase().startsWith('heygen')
   const isSeedance = isSeedanceVideoModel(settings.videoModel)
+
+  const costEstimate = useMemo(
+    () =>
+      estimateGenerationCost({
+        catalog,
+        mediaType: wantsVideo ? 'video' : 'image',
+        imageModelId: settings.imageModel,
+        videoModelId: settings.videoModel,
+        variantCount,
+        videoDurationSeconds: settings.videoDurationSeconds,
+      }),
+    [
+      catalog,
+      wantsVideo,
+      settings.imageModel,
+      settings.videoModel,
+      settings.videoDurationSeconds,
+      variantCount,
+    ]
+  )
 
   const copyOptions =
     catalog?.copy_models.map((m) => ({ value: m.id, label: m.label })) ?? [
@@ -82,12 +108,28 @@ export default function BriefGenerationPanel({
       { value: 'openai', label: 'GPT copy' },
     ]
   const imageOptions =
-    catalog?.image_models.map((m) => ({ value: m.id, label: m.label })) ?? [
-      { value: 'nano-banana-2', label: 'Nano Banana 2' },
-    ]
-  const imageSelect = buildModelSelectGroups(catalog?.image_models, imageOptions)
+    catalog?.image_models.map((m) => ({
+      value: m.id,
+      label:
+        typeof m.cost_usd === 'number'
+          ? `${m.label} · $${m.cost_usd.toFixed(2)}/img`
+          : m.label,
+    })) ?? [{ value: 'nano-banana-2', label: 'Nano Banana 2' }]
+  const imageSelectOptions = [
+    { value: '', label: 'Choose image model…' },
+    ...imageOptions,
+  ]
+  const imageSelect = buildModelSelectGroups(catalog?.image_models, imageSelectOptions)
   const videoOptions =
-    catalog?.video_models.map((m) => ({ value: m.id, label: m.label })) ?? [
+    catalog?.video_models.map((m) => ({
+      value: m.id,
+      label:
+        typeof m.cost_usd === 'number'
+          ? m.cost_unit === 'second'
+            ? `${m.label} · $${m.cost_usd.toFixed(2)}/s`
+            : `${m.label} · $${m.cost_usd.toFixed(2)}`
+          : m.label,
+    })) ?? [
       { value: 'heygen-video-agent', label: 'HeyGen Video Agent (v3)' },
       { value: 'veo-3.1', label: 'Veo 3.1 (Runway — no avatar)' },
     ]
@@ -112,8 +154,16 @@ export default function BriefGenerationPanel({
       <p className="text-xs text-mid mb-4 -mt-1">
         {wantsVideo
           ? 'Choose copy, image, and video provider before generating or regenerating.'
-          : 'This brief is image-only (static/carousel). Video and HeyGen settings are hidden.'}
+          : wantsImageOnly
+            ? 'Pick the image model you want (Runway or Higgsfield), then click Generate variants.'
+            : 'This brief is image-only (static/carousel). Video and HeyGen settings are hidden.'}
       </p>
+
+      {wantsImageOnly && !settings.imageModel ? (
+        <p className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          Select an <strong>image model</strong> below before generating — nothing is auto-selected.
+        </p>
+      ) : null}
 
       {wantsVideo && !isHeyGen && settings.videoModel.startsWith('hf-') && (
         <p className="text-xs text-mid bg-light border border-border rounded-lg px-3 py-2 mb-4">
@@ -192,7 +242,7 @@ export default function BriefGenerationPanel({
           label="Image model"
           options={imageSelect.options}
           groups={imageSelect.groups}
-          hint="Groups: Runway, Higgsfield"
+          hint="Groups: Runway, Higgsfield — required before generating images"
           value={settings.imageModel}
           disabled={disabled}
           onChange={(e) => onChange({ ...settings, imageModel: e.target.value })}
@@ -206,6 +256,34 @@ export default function BriefGenerationPanel({
           disabled={disabled || !wantsVideo}
           onChange={(e) => onChange({ ...settings, videoModel: e.target.value })}
         />
+      </div>
+
+      <div
+        className={cn(
+          'mt-4 rounded-xl border px-4 py-3 flex items-center justify-between gap-3',
+          costEstimate.ready
+            ? 'border-accent/25 bg-accent/[0.06]'
+            : 'border-border bg-surface/80'
+        )}
+      >
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted">
+            Estimated cost
+          </p>
+          <p className="text-[11px] text-muted mt-0.5 truncate">
+            {costEstimate.ready
+              ? `${costEstimate.modelLabel} · ${variantCount} variant${variantCount === 1 ? '' : 's'}`
+              : costEstimate.pendingReason}
+          </p>
+        </div>
+        <p
+          className={cn(
+            'text-xl font-extrabold tabular-nums shrink-0',
+            costEstimate.ready ? 'text-charcoal' : 'text-muted/50'
+          )}
+        >
+          {formatUsd(costEstimate.costUsd)}
+        </p>
       </div>
 
       {wantsVideo && isHeyGen && !hideHeyGenPresenter && (catalog?.heygen_avatar_options?.length ?? 0) > 0 && (

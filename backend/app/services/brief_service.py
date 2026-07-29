@@ -33,7 +33,11 @@ class BriefService:
 
     @staticmethod
     def _reconcile_running_with_variants(brief: Brief) -> bool:
-        """If variants were saved but status stayed RUNNING, sync immediately (no 2-minute wait)."""
+        """Sync progress while RUNNING — only flip READY when the full target is done.
+
+        Important: do NOT mark PARTIAL after the first variant. That stops the UI poller
+        while later image variants are still generating.
+        """
         if brief.status != "RUNNING":
             return False
         variants = getattr(brief, "variants", None) or []
@@ -42,16 +46,22 @@ class BriefService:
         ready = sum(1 for v in variants if getattr(v, "status", "") == "READY")
         total = len(variants)
         target = max(1, int(brief.variant_count or 0))
+        changed = False
+
+        # Progress counter for the brief page ("1/3 variants ready").
+        done = max(int(brief.completed_variants or 0), ready, total)
+        if done != brief.completed_variants:
+            brief.completed_variants = done
+            changed = True
+
+        # Only finish when every requested variant exists and is ready.
         if total >= target and ready >= target:
             brief.status = "READY"
             brief.completed_variants = max(brief.completed_variants, ready)
             return True
-        if ready > 0 or brief.completed_variants > 0:
-            done = max(brief.completed_variants, ready, total)
-            brief.completed_variants = done
-            brief.status = "READY" if done >= target else "PARTIAL"
-            return True
-        return False
+
+        # Still generating the rest — keep RUNNING so the UI keeps polling.
+        return changed
 
     @staticmethod
     def _reconcile_stale_running(brief: Brief, *, force_orphan: bool = False) -> bool:
@@ -121,6 +131,9 @@ class BriefService:
             brief
         ):
             await db.flush()
+            # Refresh so server-side onupdate columns (updated_at) are loaded before
+            # response serialization — avoids MissingGreenlet on expired attributes.
+            await db.refresh(brief, attribute_names=["updated_at", "status", "completed_variants"])
         return brief
 
     @staticmethod
@@ -131,18 +144,13 @@ class BriefService:
         limit: int = 20,
         offset: int = 0,
     ) -> list[Brief]:
-        q = (
-            select(Brief)
-            .options(selectinload(Brief.variants))
-            .where(Brief.tenant_id == tenant_id)
-        )
+        # List view: no variant eager-load or reconciliation — keeps History/Briefs fast.
+        q = select(Brief).where(Brief.tenant_id == tenant_id)
         if status_filter:
             q = q.where(Brief.status == status_filter)
         q = q.order_by(Brief.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(q)
-        briefs = list(result.scalars().all())
-        await BriefService._reconcile_briefs_in_list(briefs, db)
-        return briefs
+        return list(result.scalars().all())
 
     @staticmethod
     async def update_brief(

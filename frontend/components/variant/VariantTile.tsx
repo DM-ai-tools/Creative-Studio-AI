@@ -35,6 +35,8 @@ export default function VariantTile({
     imageUrl: previewUrl,
     videoUrl,
     videoFailed,
+    imageFailed,
+    imageError,
     missingMotionMedia,
     videoError,
     subtitlesMissing,
@@ -42,13 +44,25 @@ export default function VariantTile({
     logoMissing,
     logoWarning,
   } = getVariantPreviewUrls(variant)
-  const failureMessage =
+
+  const isLandscape = variant.format === 'video'
+  const isPortrait = variant.format === 'reel'
+  const isMotionVariant = isLandscape || isPortrait
+
+  const imageFailureMessage =
+    imageFailed || (!previewUrl && !isMotionVariant && (variant.status === 'READY' || variant.status === 'FAILED'))
+      ? formatVideoErrorMessage(imageError) ||
+        'Image not generated. Check Runway model settings, then regenerate.'
+      : null
+
+  const videoFailureMessage =
     variant.status === 'FAILED' || videoFailed || missingMotionMedia
       ? formatVideoErrorMessage(videoError) || 'Video not generated'
       : null
 
-  const isLandscape = variant.format === 'video'
-  const isPortrait = variant.format === 'reel'
+  const failureMessage = isMotionVariant ? videoFailureMessage : imageFailureMessage
+  const failureLabel = isMotionVariant ? 'Video failed' : 'Image failed'
+
   // Inline aspect classes so Tailwind scanner always includes them
   const aspectClass = isLandscape
     ? 'aspect-video'
@@ -74,17 +88,19 @@ export default function VariantTile({
             className="absolute inset-0 h-full w-full object-cover"
             muted
             playsInline
-            preload="metadata"
+            preload="none"
           />
         ) : previewUrl ? (
           <img
             src={previewUrl}
             alt={variant.headline || variant.hook}
             className="absolute inset-0 h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
           />
         ) : failureMessage ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-amber-950/90">
-            <span className="text-amber-200 text-[10px] font-bold uppercase tracking-wide mb-1">Video failed</span>
+            <span className="text-amber-200 text-[10px] font-bold uppercase tracking-wide mb-1">{failureLabel}</span>
             <p className="text-white text-[10px] leading-snug">{failureMessage}</p>
           </div>
         ) : (
@@ -167,12 +183,18 @@ export default function VariantTile({
         </div>
       )}
 
-      {videoUrl === null && missingMotionMedia === false && variant.status === 'READY' && !previewUrl && (
+      {isMotionVariant && videoUrl === null && missingMotionMedia === false && variant.status === 'READY' && !previewUrl && (
         <div className="px-3 py-1.5 border-t border-amber-200 bg-amber-50">
           <p className="text-[9px] text-amber-900 leading-snug">
             Video metadata exists but the file is missing (often wiped after Railway redeploy).
             Re-upload Brand Kit logo, attach a Railway volume at /app/uploads, then regenerate.
           </p>
+        </div>
+      )}
+
+      {!isMotionVariant && imageFailureMessage && (
+        <div className="px-3 py-1.5 border-t border-amber-200 bg-amber-50">
+          <p className="text-[9px] text-amber-900 leading-snug">{imageFailureMessage}</p>
         </div>
       )}
 

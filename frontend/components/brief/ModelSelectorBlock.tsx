@@ -17,6 +17,7 @@ interface ModelSelectData {
 interface ModelSelectorBlockProps {
   catalog: GenerationCatalog | undefined
   wantsVideo: boolean
+  hideImageModel?: boolean
   genSettings: BriefGenerationSettings
   setGenSettings: React.Dispatch<React.SetStateAction<BriefGenerationSettings>>
   imageModelSelect: ModelSelectData
@@ -46,6 +47,7 @@ function ReasonBadge({ reason, applied }: { reason: string; applied: boolean }) 
 export default function ModelSelectorBlock({
   catalog,
   wantsVideo,
+  hideImageModel = false,
   genSettings,
   setGenSettings,
   imageModelSelect,
@@ -80,7 +82,7 @@ export default function ModelSelectorBlock({
       setGenSettings((prev) => ({
         ...prev,
         copyModel: result.copy_model || prev.copyModel,
-        imageModel: result.image_model || prev.imageModel,
+        imageModel: hideImageModel ? prev.imageModel : result.image_model || prev.imageModel,
         videoModel: result.video_model && wantsVideo ? result.video_model : prev.videoModel,
       }))
       setApplied(true)
@@ -134,7 +136,11 @@ export default function ModelSelectorBlock({
       {/* Dropdowns */}
       <div
         className={`grid grid-cols-1 gap-3 ${
-          wantsVideo ? 'md:grid-cols-3' : 'md:grid-cols-2'
+          wantsVideo && !hideImageModel
+            ? 'md:grid-cols-3'
+            : wantsVideo || !hideImageModel
+              ? 'md:grid-cols-2'
+              : 'md:grid-cols-1'
         }`}
       >
         <div>
@@ -154,25 +160,27 @@ export default function ModelSelectorBlock({
             />
           )}
         </div>
-        <div>
-          <Select
-            label="Image model"
-            hint="Groups: Runway, Higgsfield"
-            options={imageModelSelect.options}
-            groups={imageModelSelect.groups}
-            value={genSettings.imageModel}
-            onChange={(e) => {
-              setGenSettings((prev) => ({ ...prev, imageModel: e.target.value }))
-              if (suggestion) setApplied(false)
-            }}
-          />
-          {suggestion && (
-            <ReasonBadge
-              reason={suggestion.image_reason}
-              applied={applied && genSettings.imageModel === suggestion.image_model}
+        {!hideImageModel ? (
+          <div>
+            <Select
+              label="Image model"
+              hint="Groups: Runway, Higgsfield"
+              options={imageModelSelect.options}
+              groups={imageModelSelect.groups}
+              value={genSettings.imageModel}
+              onChange={(e) => {
+                setGenSettings((prev) => ({ ...prev, imageModel: e.target.value }))
+                if (suggestion) setApplied(false)
+              }}
             />
-          )}
-        </div>
+            {suggestion && (
+              <ReasonBadge
+                reason={suggestion.image_reason}
+                applied={applied && genSettings.imageModel === suggestion.image_model}
+              />
+            )}
+          </div>
+        ) : null}
         {wantsVideo && (
           <div>
             <Select

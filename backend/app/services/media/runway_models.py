@@ -48,6 +48,15 @@ VIDEO_MODELS_REQUIRING_IMAGE: frozenset[str] = frozenset({"gen4.turbo", "gen3a.t
 # gemini_image3.1_flash (Nano Banana 2) uses pixel ratios like 768:1344 — not 9:16 + imageSize.
 GEMINI_PIXEL_MODELS = {NANO_BANANA_2, NANO_BANANA, NANO_BANANA_PRO}
 
+# GPT Image 2 on Runway — allowed `ratio` values from API validation (Apr 2026).
+GPT_IMAGE_2_MODELS = {"gpt_image_2"}
+GPT_IMAGE_2_RATIO_BY_FORMAT = {
+    "static": "1920:1920",      # 1:1
+    "carousel": "1920:1088",    # ~16:9
+    "reel": "1088:1920",        # ~9:16
+    "video": "1920:1088",       # ~16:9
+}
+
 _PIXEL_RATIO_BY_FORMAT = {
     "static": "1024:1024",
     "carousel": "1344:768",
@@ -81,6 +90,14 @@ def build_text_to_image_payload(*, model: str, prompt: str, format_type: str) ->
             "model": model,
             "promptText": prompt,
             "ratio": _PIXEL_RATIO_BY_FORMAT.get(format_type, "1024:1024"),
+        }
+
+    # GPT Image 2 rejects gen4-style ratios like 1080:1080 — use its validated pixel set.
+    if model in GPT_IMAGE_2_MODELS:
+        return {
+            "model": model,
+            "promptText": prompt,
+            "ratio": GPT_IMAGE_2_RATIO_BY_FORMAT.get(format_type, "1920:1920"),
         }
 
     # gen4_image / gen4_image_turbo use pixel dimensions

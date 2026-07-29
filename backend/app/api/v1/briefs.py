@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.brief import Brief
-from app.schemas.brief import BriefCreate, BriefResponse, BriefUpdate, GenerationRequest
+from app.schemas.brief import BriefCreate, BriefListResponse, BriefResponse, BriefUpdate, GenerationRequest
 from app.services.brand_service import BrandService
 from app.services.brief_service import BriefService
 from app.services.generation_job import run_brief_generation_job
@@ -35,11 +35,11 @@ async def create_brief(
     return await BriefService.create_brief(db, current_user.tenant_id, current_user.id, data)
 
 
-@router.get("", response_model=list[BriefResponse], include_in_schema=False)
-@router.get("/", response_model=list[BriefResponse])
+@router.get("", response_model=list[BriefListResponse], include_in_schema=False)
+@router.get("/", response_model=list[BriefListResponse])
 async def list_briefs(
     status: Optional[str] = Query(None),
-    limit: int = Query(20, le=100),
+    limit: int = Query(50, le=200),
     offset: int = Query(0),
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

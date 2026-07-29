@@ -50,19 +50,28 @@ export function getPipelineNodeStates(
     return steps.map(() => 'done')
   }
 
+  // PARTIAL with incomplete target: treat like RUNNING so pipeline stays animated.
+  const effectiveRunning =
+    briefStatus === 'RUNNING' ||
+    (briefStatus === 'PARTIAL' && readyCount < target)
+
+  if (briefStatus === 'PARTIAL' && readyCount >= target) {
+    return steps.map(() => 'done')
+  }
+
   return steps.map((step) => {
     const key = step.toLowerCase()
-    if (key.includes('plan')) return briefStatus === 'RUNNING' ? 'done' : 'pend'
-    if (key.includes('hook')) return copyDone > 0 ? 'done' : briefStatus === 'RUNNING' ? 'run' : 'pend'
+    if (key.includes('plan')) return effectiveRunning ? 'done' : 'pend'
+    if (key.includes('hook')) return copyDone > 0 ? 'done' : effectiveRunning ? 'run' : 'pend'
     if (key.includes('copy')) return copyDone >= target ? 'done' : copyDone > 0 ? 'run' : 'pend'
     if (key.includes('image')) {
       if (imageDone >= target) return 'done'
-      if (imageDone > 0 || briefStatus === 'RUNNING') return 'run'
+      if (imageDone > 0 || effectiveRunning) return 'run'
       return 'pend'
     }
     if (key.includes('video')) {
       if (videoDone >= target) return 'done'
-      if (videoDone > 0 || briefStatus === 'RUNNING') return 'run'
+      if (videoDone > 0 || effectiveRunning) return 'run'
       return 'pend'
     }
     if (key.includes('caption') || key.includes('compose')) {

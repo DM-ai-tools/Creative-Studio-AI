@@ -22,8 +22,8 @@ INDUSTRY_DEFAULT_CTA: dict[str, str] = {
     "food_beverage": "Order Now",
     "retail": "Shop Now",
     "dtc": "Shop Now",
-    "digital_marketing": "Learn More",
-    "general": "Learn More",
+    "digital_marketing": "Get Free Audit",
+    "general": "Get Free Quote",
 }
 
 RETAIL_CTAS = frozenset({"shop now", "shop", "buy now", "add to cart"})
@@ -31,7 +31,7 @@ RETAIL_CTAS = frozenset({"shop now", "shop", "buy now", "add to cart"})
 
 def suggested_cta_for_industry(industry_id: str) -> str:
     key = (industry_id or "general").strip().lower()
-    return INDUSTRY_DEFAULT_CTA.get(key, "Learn More")
+    return INDUSTRY_DEFAULT_CTA.get(key, "Get Free Quote")
 
 
 def resolve_campaign_cta(brief: dict) -> str:

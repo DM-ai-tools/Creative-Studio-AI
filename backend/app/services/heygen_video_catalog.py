@@ -16,6 +16,10 @@ def heygen_video_catalog_options() -> list[GenerationModelOption]:
             provider_model="heygen-video-agent",
             modality="video",
             provider="heygen",
+            # Approximate HeyGen API usage (not Runway credits).
+            cost_usd=0.05,
+            cost_unit="second",
+            estimated_seconds=180,
         ),
         GenerationModelOption(
             id="heygen-avatar-v2",
@@ -23,5 +27,8 @@ def heygen_video_catalog_options() -> list[GenerationModelOption]:
             provider_model="heygen-avatar-v2",
             modality="video",
             provider="heygen",
+            cost_usd=0.04,
+            cost_unit="second",
+            estimated_seconds=120,
         ),
     ]

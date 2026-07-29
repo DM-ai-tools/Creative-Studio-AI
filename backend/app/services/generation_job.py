@@ -180,6 +180,7 @@ async def run_brief_generation_job(
                     )
                     slot_hook = (str(slot.get("hook") or "").strip() if slot else "")
                     slot_message = (str(slot.get("message") or "").strip() if slot else "")
+                    slot_cta = (str(slot.get("cta") or "").strip() if slot else "")
                     slot_prompt = (str(slot.get("prompt") or "").strip() if slot else "")
 
                     logger.info(
@@ -196,11 +197,15 @@ async def run_brief_generation_job(
                         format_type=fmt,
                         model=data.ai_model,
                     )
-                    # Per-variant on-image hook / message override (image mode).
+                    # Per-variant on-image hook / message / CTA override (image mode).
                     if slot_hook:
                         copy["hook"] = slot_hook
                     if slot_message:
                         copy["headline"] = slot_message
+                    if slot_cta:
+                        copy["cta"] = slot_cta
+                    elif not str(copy.get("cta") or "").strip():
+                        copy["cta"] = resolve_campaign_cta(brief_dict)
 
                     compliance = await ai_service.run_compliance_check(
                         copy,
@@ -278,6 +283,14 @@ async def run_brief_generation_job(
                                     if slot_message and slot_message.lower() not in image_prompt.lower():
                                         bake_bits.append(
                                             f'Bold headline on the ad must read exactly: "{slot_message}".'
+                                        )
+                                    effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                    if (
+                                        effective_cta
+                                        and effective_cta.lower() not in image_prompt.lower()
+                                    ):
+                                        bake_bits.append(
+                                            f'CTA button text on the ad must read exactly: "{effective_cta}".'
                                         )
                                     if bake_bits:
                                         image_prompt = f"{image_prompt.rstrip()} {' '.join(bake_bits)}"
@@ -417,6 +430,7 @@ async def run_brief_generation_job(
                                 "variant_index": variant_index,
                                 "hook": slot_hook or None,
                                 "message": slot_message or None,
+                                "cta": slot_cta or copy.get("cta") or None,
                                 "prompt": slot_prompt or None,
                             },
                         },

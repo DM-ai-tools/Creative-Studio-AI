@@ -50,7 +50,7 @@ function defaultSettingsFromBrief(
     ''
   return {
     copyModel: (kb.copy_model as string) || 'claude',
-    imageModel: (kb.image_model as string) || 'nano-banana-2',
+    imageModel: (kb.image_model as string) || '',
     videoModel:
       (kb.video_model as string) ||
       catalog?.video_models?.find((m) => m.id === 'heygen-video-agent')?.id ||
@@ -98,8 +98,8 @@ export default function BriefDetailPage() {
   const generateButtonRef = useRef<HTMLDivElement | null>(null)
   const focusedFromCreateRef = useRef(false)
 
-  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
-    cacheKey: 'generation/catalog-v4',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
+    cacheKey: 'generation/catalog-v6',
     ttlMs: API_CACHE_TTL.catalog,
   })
   const { data: brief, isLoading: briefLoading, refetch: refetchBrief } = useApi(
@@ -155,34 +155,86 @@ export default function BriefDetailPage() {
 
     const t = window.setTimeout(() => {
       generateButtonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      toast.success('Brief ready — click Generate video to start', { duration: 5000 })
+      const isImageOnly =
+        (brief.formats ?? []).length > 0 &&
+        (brief.formats ?? []).every((f) => f === 'static' || f === 'carousel')
+      toast.success(
+        isImageOnly
+          ? 'Brief ready — choose your image model, then click Generate variants'
+          : 'Brief ready — click Generate video to start',
+        { duration: 5000 }
+      )
     }, 250)
     return () => window.clearTimeout(t)
   }, [brief, briefLoading, genSettings, router, id])
 
-  // Poll quietly while a generation job is active — stop once variants are ready.
+  // Poll quietly while a generation job is active — keep going until ALL target variants
+  // are ready (do NOT stop after the first READY variant, or the UI looks stuck at 1/N).
+  // Also keep polling PARTIAL when completed_variants < variant_count (mid-batch images).
   useEffect(() => {
-    if (brief?.status !== 'RUNNING') {
+    if (!brief) return
+    const target = Math.max(1, Number(brief.variant_count) || 1)
+    const readyCount = (variants ?? []).filter(
+      (v) => v.status === 'READY' || v.status === 'APPROVED'
+    ).length
+    const listed = variants?.length ?? 0
+    const incomplete =
+      listed < target ||
+      readyCount < target ||
+      Number(brief.completed_variants || 0) < target
+    const shouldPoll =
+      brief.status === 'RUNNING' || (brief.status === 'PARTIAL' && incomplete)
+
+    if (!shouldPoll) {
       runningStatusSyncRef.current = false
       return
     }
-    const hasReadyVariant = (variants ?? []).some((v) => v.status === 'READY')
-    if ((variants?.length ?? 0) > 0 && hasReadyVariant) {
+
+    if (!incomplete) {
       if (!runningStatusSyncRef.current) {
         runningStatusSyncRef.current = true
-        void refetchBrief()
+        void refetchBrief({ background: true })
+        void refetchVariants({ background: true })
       }
       return
     }
+
     const tick = () => {
       if (document.visibilityState === 'hidden') return
       void refetchBrief({ background: true })
       void refetchVariants({ background: true })
     }
     tick()
-    const timer = window.setInterval(tick, 20_000)
+    // Image stills finish in ~20–40s each — poll every 4s while incomplete.
+    const timer = window.setInterval(tick, 4_000)
     return () => window.clearInterval(timer)
-  }, [brief?.status, variants, refetchBrief, refetchVariants])
+  }, [
+    brief,
+    brief?.status,
+    brief?.variant_count,
+    brief?.completed_variants,
+    variants,
+    refetchBrief,
+    refetchVariants,
+  ])
+
+  // When the job finishes (READY / PARTIAL / FAILED), force one fresh variants fetch
+  // so variants 2..N appear even if an earlier poll stopped short.
+  const prevBriefStatusRef = useRef<string | null>(null)
+  useEffect(() => {
+    const status = brief?.status ?? null
+    const prev = prevBriefStatusRef.current
+    prevBriefStatusRef.current = status
+    if (
+      prev &&
+      status &&
+      prev !== status &&
+      (status === 'READY' || status === 'PARTIAL' || status === 'FAILED')
+    ) {
+      void refetchBrief()
+      void refetchVariants()
+    }
+  }, [brief?.status, refetchBrief, refetchVariants])
 
   // Safety: never leave the app in a scroll-locked state after leaving this page.
   useEffect(() => {
@@ -203,6 +255,9 @@ export default function BriefDetailPage() {
   }, [brief, pipelineSteps, variants])
 
   const wantsVideoBrief = (brief?.formats ?? []).some((f) => f === 'reel' || f === 'video')
+  const wantsImageOnlyBrief =
+    (brief?.formats ?? []).length > 0 &&
+    (brief?.formats ?? []).every((f) => f === 'static' || f === 'carousel')
   const isHeyGen =
     wantsVideoBrief && Boolean(genSettings?.videoModel?.toLowerCase().startsWith('heygen'))
   const avatarLabel =
@@ -226,6 +281,13 @@ export default function BriefDetailPage() {
   const runGenerate = async () => {
     if (!brief || !genSettings) return
     const wantsVideo = (brief.formats ?? []).some((f) => f === 'reel' || f === 'video')
+    const wantsImageOnly =
+      (brief.formats ?? []).length > 0 &&
+      (brief.formats ?? []).every((f) => f === 'static' || f === 'carousel')
+    if (wantsImageOnly && !genSettings.imageModel) {
+      toast.error('Choose an image model in Generation models before generating.')
+      return
+    }
     const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
     const pdfMode = kb.script_source === 'pdf'
 
@@ -247,7 +309,7 @@ export default function BriefDetailPage() {
       const result = await briefsApi.generate(id, {
         formats: brief.formats,
         ai_model: genSettings.copyModel,
-        image_model: genSettings.imageModel,
+        image_model: genSettings.imageModel || undefined,
         video_model: genSettings.videoModel,
         ...(wantsVideo ? { video_duration_seconds: genSettings.videoDurationSeconds } : {}),
         ...(wantsVideo && genSettings.videoModel.toLowerCase().startsWith('heygen')
@@ -457,12 +519,22 @@ export default function BriefDetailPage() {
           </span>
         </div>
 
-        {brief.status === 'RUNNING' && (
+        {(brief.status === 'RUNNING' ||
+          (brief.status === 'PARTIAL' &&
+            Number(brief.completed_variants || 0) < Math.max(1, brief.variant_count))) && (
           <div className="text-sm text-lt rounded-lg border border-mint/30 bg-mint/5 px-3 py-2 space-y-2">
             <p>
-              Video generation is in progress (often 10–15 minutes for HeyGen). New variants appear
-              below when ready — this page checks every 20 seconds without reloading your script edits.
+              Generation in progress — {brief.completed_variants}/{brief.variant_count} variants ready.
+              {wantsVideoBrief && isHeyGen
+                ? ' HeyGen video can take 10–35 minutes.'
+                : ' Image variants usually finish in a few minutes each.'}{' '}
+              This page checks every few seconds and will show each variant as it completes.
             </p>
+            {(variants?.length ?? 0) < Math.max(1, brief.variant_count) && (
+              <p className="text-xs text-mid">
+                Showing {variants?.length ?? 0} of {brief.variant_count} so far — keep this page open.
+              </p>
+            )}
             {brief.completed_variants === 0 && (
               <Button type="button" variant="outline" size="sm" onClick={() => void handleResetStuckGeneration()}>
                 Reset stuck generation
@@ -479,6 +551,7 @@ export default function BriefDetailPage() {
           disabled={brief.status === 'RUNNING' || isGenerating}
           hideHeyGenPresenter={isHeyGen}
           scrollable
+          variantCount={Math.max(1, Number(brief.variant_count) || 1)}
         />
 
         {scriptFromPdf && isHeyGen && (
@@ -691,6 +764,7 @@ export default function BriefDetailPage() {
           onChange={setGenSettings}
           disabled={isGenerating}
           scrollable
+          variantCount={Math.max(1, Number(brief.variant_count) || 1)}
         />
       </Modal>
 

@@ -20,6 +20,13 @@ def _catalog_id(job_set_type: str) -> str:
 def higgsfield_image_catalog_options() -> list[GenerationModelOption]:
     if not higgsfield_configured():
         return []
+    # Approximate list prices when Higgsfield does not expose credit rates in-app.
+    _HF_IMAGE_COST = {
+        "gpt_image_2": 0.20,
+        "nano_banana": 0.05,
+        "nano_banana_2": 0.07,
+        "soul": 0.08,
+    }
     return [
         GenerationModelOption(
             id=_catalog_id(spec.job_set_type),
@@ -27,6 +34,9 @@ def higgsfield_image_catalog_options() -> list[GenerationModelOption]:
             provider_model=spec.platform_path,
             modality="image",
             provider="higgsfield",
+            cost_usd=_HF_IMAGE_COST.get(spec.job_set_type, 0.10),
+            cost_unit="image",
+            estimated_seconds=30,
         )
         for spec in HIGGSFIELD_IMAGE_SPECS
     ]
@@ -63,6 +73,9 @@ def higgsfield_video_catalog_options() -> list[GenerationModelOption]:
             provider_model=spec.platform_path,
             modality="video",
             provider="higgsfield",
+            cost_usd=0.08,
+            cost_unit="second",
+            estimated_seconds=90,
         )
         for spec in HIGGSFIELD_VIDEO_SPECS
     ]

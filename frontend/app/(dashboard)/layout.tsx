@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import toast from 'react-hot-toast'
 import Sidebar from '@/components/layout/Sidebar'
@@ -10,26 +10,47 @@ import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi } from '@/lib/api'
 import { agencyIndustryLabel } from '@/lib/industries'
+import { cn } from '@/lib/utils'
 
 function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const { user, isLoading, logout } = useAuth()
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+
   const { data: brands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
   })
 
   useEffect(() => {
-    if (!isLoading && !user) {
-      router.replace('/login')
-    }
+    if (!isLoading && !user) router.replace('/login')
   }, [user, isLoading, router])
 
-  // Always clear body scroll lock on navigation (modals / generating UI can leave it stuck).
   useEffect(() => {
     document.body.style.overflow = ''
   }, [pathname])
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('sidebar-open')
+      if (saved !== null) setSidebarOpen(saved === 'true')
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const toggleSidebar = () => {
+    setSidebarOpen((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem('sidebar-open', String(next))
+      } catch {
+        /* ignore */
+      }
+      return next
+    })
+  }
 
   if (isLoading && !user) return <PageLoader />
   if (!user) return null
@@ -47,13 +68,27 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-screen max-h-screen overflow-hidden bg-mesh">
-      <Sidebar
-        user={user}
-        brandName={activeBrand?.name}
-        brandSubtitle={brandSubtitle || undefined}
-        onLogout={handleLogout}
-      />
-      <main className="flex-1 min-w-0 h-screen overflow-y-auto overflow-x-hidden">{children}</main>
+      {/* Sidebar sits in the flex flow — never overlays content */}
+      <div
+        className={cn(
+          'hidden md:flex flex-shrink-0 h-screen transition-[width] duration-200 ease-out',
+          sidebarOpen ? 'w-[240px]' : 'w-14'
+        )}
+      >
+        <Sidebar
+          user={user}
+          brandName={activeBrand?.name}
+          brandSubtitle={brandSubtitle || undefined}
+          onLogout={handleLogout}
+          collapsed={!sidebarOpen}
+          onToggleCollapse={toggleSidebar}
+        />
+      </div>
+
+      {/* Content starts after sidebar — title never covered */}
+      <main className="flex-1 min-w-0 h-screen overflow-y-auto overflow-x-hidden">
+        {children}
+      </main>
     </div>
   )
 }

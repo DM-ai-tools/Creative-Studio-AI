@@ -88,6 +88,10 @@ export interface GenerationModelOption {
   provider_model: string
   modality: string
   provider?: string | null
+  /** Estimated USD per image, or per second when cost_unit === 'second' */
+  cost_usd?: number | null
+  cost_unit?: 'image' | 'second' | string | null
+  estimated_seconds?: number | null
 }
 
 export interface MetaStatus {
@@ -165,6 +169,21 @@ export interface AvatarScriptResult {
 export interface IcpScriptResult {
   icp_text: string
   script: AvatarScriptResult
+}
+
+export interface IcpImageVariantPlan {
+  use_cases: string[]
+  hook: string
+  message: string
+  cta?: string
+  offer: string
+  prompt: string
+  reasoning: string
+}
+
+export interface IcpImagePlanResult {
+  icp_text: string
+  variants: IcpImageVariantPlan[]
 }
 
 export interface WebsiteScriptResult {

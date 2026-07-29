@@ -107,6 +107,11 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
             CatalogOption(id="pattern_interrupt", label="Pattern Interrupt"),
             CatalogOption(id="social_proof", label="Social Proof"),
             CatalogOption(id="founder_led", label="Founder-Led"),
+            CatalogOption(id="before_after", label="Before / After"),
+            CatalogOption(id="testimonial", label="Testimonial / Review"),
+            CatalogOption(id="offer_urgency", label="Offer / Urgency"),
+            CatalogOption(id="educational", label="Educational / How-to"),
+            CatalogOption(id="myth_busting", label="Myth Busting"),
         ],
         cta_options=[
             CatalogOption(id="shop_now", label="Shop Now"),
@@ -132,7 +137,8 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
             "Compliance",
             "Persist",
         ],
-        estimate=GenerationEstimate(cost_per_variant_usd=0.60, seconds_per_variant=90),
+        # Fallback only when a model has no cost_usd — UI prefers per-model pricing.
+        estimate=GenerationEstimate(cost_per_variant_usd=0.0, seconds_per_variant=90),
     )
     with _CATALOG_LOCK:
         _CATALOG_CACHE = (now, response)

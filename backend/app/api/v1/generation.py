@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 
 import httpx
@@ -304,6 +304,63 @@ async def preview_image_plan(
     } if (data.hook or data.headline) else None
     plan = await select_and_build_image_plan(brief, brand, copy=copy)
     return ImagePlanResponse(**plan.to_dict())
+
+
+class IcpImageVariantPlanItem(BaseModel):
+    use_cases: list[str]
+    hook: str
+    message: str
+    cta: str = ""
+    offer: str = ""
+    prompt: str
+    reasoning: str
+
+
+class IcpImagePlanRequest(BaseModel):
+    """ICP-driven image plans from campaign name (+ brand / industry)."""
+    campaign_name: str = Field(..., min_length=3)
+    brand_name: str = ""
+    industry: str = ""
+    objective_id: str = ""
+    cta: str = ""
+    offer: str = ""
+    image_aspect_ratio: str = "1:1"
+    hook_frameworks: list[str] = Field(default_factory=list)
+    variant_count: int = Field(default=1, ge=1, le=20)
+    existing_hooks: list[str] = Field(default_factory=list)
+    existing_prompts: list[str] = Field(default_factory=list)
+
+
+class IcpImagePlanResponse(BaseModel):
+    icp_text: str
+    variants: list[IcpImageVariantPlanItem]
+
+
+@router.post("/icp-image-plan", response_model=IcpImagePlanResponse)
+async def icp_image_plan(
+    data: IcpImagePlanRequest,
+    _current_user=Depends(get_current_user),
+):
+    """
+    Build ICP from campaign name, then return N distinct image variant plans
+    (use cases, hook, message, prompt) for Generate AI plan / Generate AI for all.
+    """
+    from app.services.icp_image_plan_service import generate_icp_image_plan
+
+    result = await generate_icp_image_plan(
+        campaign_name=data.campaign_name.strip(),
+        brand_name=data.brand_name,
+        industry=data.industry,
+        objective_id=data.objective_id,
+        cta=data.cta,
+        offer=data.offer,
+        image_aspect_ratio=data.image_aspect_ratio,
+        hook_frameworks=data.hook_frameworks,
+        variant_count=data.variant_count,
+        existing_hooks=data.existing_hooks,
+        existing_prompts=data.existing_prompts,
+    )
+    return IcpImagePlanResponse(**result)
 
 
 class ProductionScriptFromBriefRequest(BaseModel):

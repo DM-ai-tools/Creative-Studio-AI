@@ -1,8 +1,14 @@
 'use client'
 
 import React, { useState } from 'react'
+import toast from 'react-hot-toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import {
+  downloadAllImageVariantsExcel,
+  downloadImageVariantExcel,
+  type ImageVariantExportContext,
+} from '@/lib/exportImageVariantExcel'
 import {
   IMAGE_USE_CASES,
   IMAGE_USE_CASE_GROUPS,
@@ -17,6 +23,20 @@ type Props = {
   onGenerateSlot(index: number): void
   onGenerateAll(): void
   generatingAll?: boolean
+  campaignOffer?: string
+  onCampaignOfferChange?: (value: string) => void
+  exportContext?: ImageVariantExportContext
+}
+
+function formatGenerationTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+  } catch {
+    return iso
+  }
 }
 
 export default function ImageVariantSlotsPanel({
@@ -26,8 +46,34 @@ export default function ImageVariantSlotsPanel({
   onGenerateSlot,
   onGenerateAll,
   generatingAll,
+  campaignOffer = '',
+  onCampaignOfferChange,
+  exportContext,
 }: Props) {
   const [openPicker, setOpenPicker] = useState<number | null>(null)
+
+  const hasVariantContent = (slot: ImageVariantSlot) =>
+    Boolean(slot.hook.trim() || slot.message.trim() || slot.prompt.trim())
+
+  const handleDownloadVariant = (index: number) => {
+    const slot = slots[index]
+    if (!slot || !hasVariantContent(slot)) {
+      toast.error('Generate or fill in this variant before downloading.')
+      return
+    }
+    downloadImageVariantExcel(slot, index, exportContext)
+    toast.success(`Variant ${index + 1} downloaded (.xlsx)`)
+  }
+
+  const handleDownloadAll = () => {
+    const filled = slots.filter(hasVariantContent)
+    if (filled.length === 0) {
+      toast.error('Generate or fill in at least one variant before downloading.')
+      return
+    }
+    downloadAllImageVariantsExcel(slots, exportContext)
+    toast.success(`${slots.length} variant${slots.length !== 1 ? 's' : ''} downloaded (.xlsx)`)
+  }
 
   const updateSlot = (index: number, patch: Partial<ImageVariantSlot>) => {
     onChange(slots.map((s, i) => (i === index ? { ...s, ...patch } : s)))
@@ -50,30 +96,52 @@ export default function ImageVariantSlotsPanel({
             {slots.length} image variant{slots.length !== 1 ? 's' : ''}
           </p>
           <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
-            Each variant needs its own <strong>use case</strong>, <strong>hook / message on the image</strong>,
-            and <strong>prompt</strong> so creatives stay unique (e.g. Meta Ads Audit → 3 different ads).
+            Plans are built from your <strong>campaign name</strong> and <strong>brand</strong> (ICP + HALO) —
+            not product, offer, or audience fields. Each variant gets its own use case, hook, message, CTA, and prompt.
             Change <strong>Target Variants</strong> in step 1 to add or remove slots.
           </p>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="primary"
-          isLoading={Boolean(generatingAll)}
-          disabled={generatingIndex != null}
-          onClick={() => onGenerateAll()}
-          className="shrink-0"
-        >
-          Generate AI for all
-        </Button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={generatingIndex != null || Boolean(generatingAll)}
+            onClick={handleDownloadAll}
+          >
+            Download all Excel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="primary"
+            isLoading={Boolean(generatingAll)}
+            disabled={generatingIndex != null}
+            onClick={() => onGenerateAll()}
+          >
+            Generate AI for all
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border bg-white px-4 py-3">
+        <Input
+          label="Offer"
+          placeholder="e.g. Free Meta ads audit this week"
+          value={campaignOffer}
+          onChange={(e) => onCampaignOfferChange?.(e.target.value)}
+        />
+        <p className="text-[10px] text-mid mt-1">
+          Used when generating AI plans — each variant can also have its own offer below.
+        </p>
       </div>
 
       {slots.map((slot, index) => {
         const busy = generatingIndex === index || Boolean(generatingAll)
         const pickerOpen = openPicker === index
         return (
+          <div key={index} className="space-y-1">
           <div
-            key={index}
             className="rounded-2xl border-2 border-border bg-surface p-4 space-y-3 shadow-sm"
           >
             <div className="flex items-center justify-between gap-2">
@@ -85,16 +153,27 @@ export default function ImageVariantSlotsPanel({
                   </span>
                 ) : null}
               </p>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                isLoading={generatingIndex === index}
-                disabled={busy && generatingIndex !== index}
-                onClick={() => onGenerateSlot(index)}
-              >
-                {slot.prompt ? 'Regenerate AI plan' : 'Generate AI plan'}
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !hasVariantContent(slot)}
+                  onClick={() => handleDownloadVariant(index)}
+                >
+                  Download Excel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  isLoading={generatingIndex === index}
+                  disabled={busy && generatingIndex !== index}
+                  onClick={() => onGenerateSlot(index)}
+                >
+                  {slot.prompt ? 'Regenerate AI plan' : 'Generate AI plan'}
+                </Button>
+              </div>
             </div>
 
             <div>
@@ -180,10 +259,23 @@ export default function ImageVariantSlotsPanel({
                 onChange={(e) => updateSlot(index, { message: e.target.value })}
               />
             </div>
+            <Input
+              label="CTA on image (this variant)"
+              placeholder="e.g. Book Consultation, Get Free Audit, Claim Pilot"
+              value={slot.cta}
+              onChange={(e) => updateSlot(index, { cta: e.target.value })}
+            />
             <p className="text-[10px] text-mid -mt-1">
-              These words are burned into the ad creative for this variant only — keep them different
-              across variants.
+              Hook, headline, and CTA are burned into this variant&apos;s image only — each variant
+              should use a different CTA when it fits the angle.
             </p>
+
+            <Input
+              label="Offer (caption)"
+              placeholder="e.g. I’m tired of guessing. I want proof that this actually works. Claim the free review and get next steps."
+              value={slot.offer}
+              onChange={(e) => updateSlot(index, { offer: e.target.value })}
+            />
 
             <div>
               <div className="flex items-center justify-between mb-1.5">
@@ -193,7 +285,9 @@ export default function ImageVariantSlotsPanel({
                 {slot.prompt ? (
                   <button
                     type="button"
-                    onClick={() => updateSlot(index, { prompt: '', reasoning: '' })}
+                    onClick={() =>
+                      updateSlot(index, { prompt: '', reasoning: '', generated_at: null })
+                    }
                     className="text-[11px] text-mid underline hover:text-charcoal"
                   >
                     Clear
@@ -201,11 +295,11 @@ export default function ImageVariantSlotsPanel({
                 ) : null}
               </div>
               <textarea
-                rows={5}
+                rows={10}
                 value={slot.prompt}
                 onChange={(e) => updateSlot(index, { prompt: e.target.value })}
                 placeholder="Describe the unique scene for this variant — lighting, subject, layout, and how the hook/message appear on the image…"
-                className={`w-full rounded-xl border-2 px-4 py-3 text-sm text-charcoal placeholder:text-mid/50 focus:outline-none focus:ring-2 resize-none leading-relaxed transition-colors ${
+                className={`w-full min-h-[220px] rounded-xl border-2 px-4 py-3 text-sm text-charcoal placeholder:text-mid/50 focus:outline-none focus:ring-2 resize-y leading-relaxed transition-colors ${
                   slot.prompt
                     ? 'border-teal-400 bg-teal-50/30 focus:border-teal-500 focus:ring-teal-200'
                     : 'border-border bg-white focus:border-accent focus:ring-accent/20'
@@ -217,6 +311,12 @@ export default function ImageVariantSlotsPanel({
                 </p>
               ) : null}
             </div>
+          </div>
+          {slot.generated_at ? (
+            <p className="text-[10px] text-mid text-right px-1">
+              Generated {formatGenerationTime(slot.generated_at)}
+            </p>
+          ) : null}
           </div>
         )
       })}

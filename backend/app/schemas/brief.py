@@ -40,6 +40,29 @@ class VariantSummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BriefListResponse(BaseModel):
+    """Lightweight row for list endpoints — no key_benefits or nested variants."""
+
+    id: UUID
+    tenant_id: UUID
+    brand_id: UUID
+    created_by: Optional[UUID]
+    title: str
+    objective: str
+    target_audience: str
+    formats: List[str]
+    ad_copy_tone: str
+    cta: str
+    product_name: str
+    status: str
+    variant_count: int
+    completed_variants: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class BriefResponse(BaseModel):
     id: UUID
     tenant_id: UUID

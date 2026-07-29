@@ -57,7 +57,7 @@ const schema = z.object({
   target_variant_count: z.coerce.number().int().min(1).max(20),
   offer: z.string().optional(),
   product_name: z.string().optional(),
-  cta: z.string().min(2, 'Enter a call to action'),
+  cta: z.string().optional(),
   audience_type: z.string().optional(),
   geography: z.string().optional(),
   age_range: z.string().optional(),
@@ -74,6 +74,27 @@ type FormData = z.infer<typeof schema>
 interface BriefComposerProps {
   defaultBrandId?: string
 }
+
+const FALLBACK_OBJECTIVES: CatalogOption[] = [
+  { id: 'conversions', label: 'Conversions (Purchase)' },
+  { id: 'add_to_cart', label: 'Add to Cart' },
+  { id: 'lead_generation', label: 'Lead Generation' },
+  { id: 'traffic', label: 'Traffic' },
+  { id: 'awareness', label: 'Awareness' },
+]
+
+const FALLBACK_HOOK_FRAMEWORKS: CatalogOption[] = [
+  { id: 'problem_agitate_solve', label: 'Problem-Agitate-Solve' },
+  { id: 'ugc_style', label: 'UGC-Style' },
+  { id: 'pattern_interrupt', label: 'Pattern Interrupt' },
+  { id: 'social_proof', label: 'Social Proof' },
+  { id: 'founder_led', label: 'Founder-Led' },
+  { id: 'before_after', label: 'Before / After' },
+  { id: 'testimonial', label: 'Testimonial / Review' },
+  { id: 'offer_urgency', label: 'Offer / Urgency' },
+  { id: 'educational', label: 'Educational / How-to' },
+  { id: 'myth_busting', label: 'Myth Busting' },
+]
 
 function optionLabel(options: CatalogOption[], id: string): string {
   return options.find((option) => option.id === id)?.label ?? id
@@ -116,8 +137,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
   })
-  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
-    cacheKey: 'generation/catalog-v4',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
+    cacheKey: 'generation/catalog-v6',
     ttlMs: API_CACHE_TTL.catalog,
   })
 
@@ -128,11 +149,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   ])
   const [generatingSlotIndex, setGeneratingSlotIndex] = useState<number | null>(null)
   const [generatingAllSlots, setGeneratingAllSlots] = useState(false)
+  const [imageIcpText, setImageIcpText] = useState<string | null>(null)
+  const [imageCampaignOffer, setImageCampaignOffer] = useState('')
   const [imageRatio, setImageRatio] = useState<string>('1:1')
   const [imageRatioCustom, setImageRatioCustom] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
     copyModel: 'claude',
-    imageModel: 'nano-banana-2',
+    imageModel: '',
     videoModel: 'heygen-video-agent',
     videoDurationSeconds: 30,
     heygenAvatarId: '',
@@ -191,13 +214,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
   useEffect(() => {
     if (!catalog) return
-    if (catalog.objectives[0] && !watch('objective_id')) {
-      setValue('objective_id', catalog.objectives[0].id)
+    const objectives = catalog.objectives?.length ? catalog.objectives : FALLBACK_OBJECTIVES
+    if (objectives[0] && !watch('objective_id')) {
+      setValue('objective_id', objectives[0].id)
     }
     setGenSettings((prev) => ({
       ...prev,
       copyModel: catalog.copy_models[0]?.id ?? prev.copyModel,
-      imageModel: catalog.image_models[0]?.id ?? prev.imageModel,
       videoModel:
         catalog.video_models.find((m) => m.id === 'heygen-video-agent')?.id ??
         catalog.video_models[0]?.id ??
@@ -234,6 +257,18 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       resizeImageVariantSlots(prev, Number(targetVariantCount) || 1)
     )
   }, [targetVariantCount, mediaType])
+
+  const objectiveOptions = useMemo(() => {
+    const source =
+      catalog?.objectives?.length ? catalog.objectives : FALLBACK_OBJECTIVES
+    return source.map((o) => ({ value: o.id, label: o.label }))
+  }, [catalog?.objectives])
+
+  const hookFrameworkOptions = useMemo(() => {
+    const source =
+      catalog?.hook_frameworks?.length ? catalog.hook_frameworks : FALLBACK_HOOK_FRAMEWORKS
+    return source
+  }, [catalog?.hook_frameworks])
 
   const brandOptions = (brands ?? []).map((brand) => ({ value: brand.id, label: brand.name }))
   const hasBrands = brandOptions.length > 0
@@ -344,77 +379,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }
   }, [selectedFormats, wantsVideo, isHeyGen])
 
-  const estimate = useMemo(() => {
-    const count = Number(targetVariantCount) || 0
-    const perVariant = catalog?.estimate.cost_per_variant_usd ?? 0
-    const seconds = catalog?.estimate.seconds_per_variant ?? 0
-    return {
-      cost: count * perVariant,
-      minutes: Math.max(1, Math.round((count * seconds) / 60)),
-    }
-  }, [catalog, targetVariantCount])
-
   const formValues = watch()
-
-  const checklist = useMemo(() => {
-    const d = formValues
-    return [
-      { label: 'Campaign & brand', ok: Boolean(d.title && d.brand_id) },
-      { label: 'Objective selected', ok: Boolean(d.objective_id) },
-      {
-        label: wantsVideo ? 'Landscape or Portrait chosen' : 'Creative format chosen',
-        ok: (d.formats ?? []).length > 0,
-      },
-      {
-        label: 'Audience defined',
-        ok: mediaType === 'image' || hideCampaignDetailSteps || Boolean(d.audience_type && d.geography),
-      },
-      {
-        label: 'CTA & tone set',
-        ok:
-          mediaType === 'image'
-            ? Boolean(d.cta)
-            : hideCampaignDetailSteps || Boolean(d.cta && d.ad_copy_tone),
-      },
-      {
-        label: 'HeyGen avatar (if video)',
-        ok: !wantsVideo || !isHeyGen || Boolean(genSettings.heygenAvatarId),
-      },
-      {
-        label: isPdfScriptMode
-          ? 'PDF script file chosen'
-          : isCustomScriptMode
-            ? 'Custom prompt & image ready'
-            : isWebsiteScriptMode
-              ? 'Website URL & script approved'
-              : 'Avatar script approved',
-        ok:
-          !wantsVideo ||
-          (isCustomScriptMode
-            ? Boolean(customPrompt.trim() && referenceImageFile)
-            : isPdfScriptMode
-              ? Boolean(pdfFile)
-              : isWebsiteScriptMode
-                ? Boolean(websiteUrl.trim() && (!isHeyGen || approvedAvatarScript))
-                : !isHeyGen || Boolean(approvedAvatarScript)),
-      },
-    ]
-  }, [
-    formValues,
-    wantsVideo,
-    mediaType,
-    isHeyGen,
-    isPdfScriptMode,
-    isCustomScriptMode,
-    hideCampaignDetailSteps,
-    isWebsiteScriptMode,
-    genSettings.heygenAvatarId,
-    approvedAvatarScript,
-    pdfFile,
-    customPrompt,
-    referenceImageFile,
-    websiteUrl,
-  ])
 
   const avatarLabel =
     catalog?.heygen_avatar_options?.find((o) => o.id === genSettings.heygenAvatarId)?.label ?? ''
@@ -452,7 +417,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
   const validateManualFields = (data: FormData): string | null => {
     // Image mode: audience / tone / placement are hidden — not required.
+    // Per-variant CTAs live on Image Variants (step 5); step 7 is optional.
     if (mediaType === 'image') return null
+    if (!data.cta?.trim() || data.cta.trim().length < 2) {
+      return 'Enter a call to action (step 7).'
+    }
     if (!data.audience_type?.trim() || data.audience_type.trim().length < 2) {
       return 'Fill in Target Audience (step 3).'
     }
@@ -523,44 +492,59 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     const d = formValues
     const slot = imageVariantSlots[index]
     if (!slot) return
-    const targetAudience = [d.audience_type, d.geography, d.age_range].filter(Boolean).join(', ')
+    const campaignName = (d.title ?? '').trim()
+    if (campaignName.length < 3) {
+      toast.error('Enter a campaign name in step 1 (at least 3 characters) before generating image plans.')
+      return
+    }
+    const siblingHooks = imageVariantSlots
+      .map((s, i) => (i === index ? '' : s.hook.trim()))
+      .filter(Boolean)
+    const siblingPrompts = imageVariantSlots
+      .map((s, i) => (i === index ? '' : s.prompt.trim()))
+      .filter(Boolean)
     setGeneratingSlotIndex(index)
     try {
-      const plan = await generationApi.previewImagePlan({
+      const plan = await generationApi.previewIcpImagePlan({
+        campaign_name: campaignName,
         brand_name: selectedBrand?.name ?? '',
         industry: selectedBrand?.industry ?? '',
-        product_name: d.product_name ?? '',
-        offer: d.offer ?? '',
-        target_audience: targetAudience,
-        ad_copy_tone: d.ad_copy_tone ?? '',
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
+        offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-        image_use_cases: slot.use_cases,
-        image_prompt_override: slot.prompt.trim() || undefined,
-        notes: [
-          d.notes ?? '',
-          `Image variant ${index + 1} of ${imageVariantSlots.length}.`,
-          'Make use case, scene, and on-image hook/headline distinct from sibling variants.',
-        ]
-          .filter(Boolean)
-          .join(' '),
-        hook: slot.hook.trim() || undefined,
-        headline: slot.message.trim() || undefined,
+        hook_frameworks: d.hook_frameworks ?? [],
+        variant_count: 1,
+        existing_hooks: siblingHooks,
+        existing_prompts: siblingPrompts,
       })
+      const variant = plan.variants[0]
+      if (!variant) {
+        toast.error('No variant returned — try again')
+        return
+      }
+      if (plan.icp_text?.trim()) {
+        setImageIcpText(plan.icp_text.trim())
+      }
+      const generatedAt = new Date().toISOString()
       setImageVariantSlots((prev) =>
         prev.map((s, i) =>
           i === index
             ? {
                 ...s,
-                use_cases: plan.use_cases?.length ? plan.use_cases : s.use_cases,
-                prompt: plan.prompt || s.prompt,
-                reasoning: plan.reasoning || '',
+                use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
+                hook: variant.hook || s.hook,
+                message: variant.message || s.message,
+                cta: variant.cta || s.cta,
+                offer: variant.offer || imageCampaignOffer.trim() || s.offer,
+                prompt: variant.prompt || s.prompt,
+                reasoning: variant.reasoning || '',
+                generated_at: generatedAt,
               }
             : s
         )
       )
-      toast.success(`Variant ${index + 1} AI plan ready — edit hook, message, and prompt`)
+      toast.success(`Variant ${index + 1} AI plan ready — ICP from campaign name`)
     } catch {
       toast.error('Could not generate plan — check OPENROUTER_API_KEY and restart backend')
     } finally {
@@ -569,18 +553,58 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }
 
   const handleGenerateAllImageSlots = async () => {
+    const d = formValues
+    const campaignName = (d.title ?? '').trim()
+    if (campaignName.length < 3) {
+      toast.error('Enter a campaign name in step 1 (at least 3 characters) before generating image plans.')
+      return
+    }
     setGeneratingAllSlots(true)
     try {
-      for (let i = 0; i < imageVariantSlots.length; i++) {
-        // Re-read latest slot inside loop via functional updates in handleGenerateImageSlot
-        await handleGenerateImageSlot(i)
+      const plan = await generationApi.previewIcpImagePlan({
+        campaign_name: campaignName,
+        brand_name: selectedBrand?.name ?? '',
+        industry: selectedBrand?.industry ?? '',
+        objective_id: d.objective_id ?? '',
+        cta: d.cta ?? '',
+        offer: imageCampaignOffer.trim() || undefined,
+        image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+        hook_frameworks: d.hook_frameworks ?? [],
+        variant_count: imageVariantSlots.length,
+      })
+      if (plan.icp_text?.trim()) {
+        setImageIcpText(plan.icp_text.trim())
       }
+      const generatedAt = new Date().toISOString()
+      setImageVariantSlots((prev) =>
+        prev.map((s, i) => {
+          const variant = plan.variants[i]
+          if (!variant) return s
+          return {
+            ...s,
+            use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
+            hook: variant.hook || s.hook,
+            message: variant.message || s.message,
+            cta: variant.cta || s.cta,
+            offer: variant.offer || imageCampaignOffer.trim() || s.offer,
+            prompt: variant.prompt || s.prompt,
+            reasoning: variant.reasoning || '',
+            generated_at: generatedAt,
+          }
+        })
+      )
+      toast.success(
+        `${plan.variants.length} image variant${plan.variants.length !== 1 ? 's' : ''} filled from ICP — edit hook, message, CTA, and prompt as needed`
+      )
+    } catch {
+      toast.error('Could not generate plans — check OPENROUTER_API_KEY and restart backend')
     } finally {
       setGeneratingAllSlots(false)
     }
   }
 
   const handleDownloadBriefExcel = () => {
+    const isImageBrief = mediaType === 'image'
     const payload = buildBriefExportPayload({
       formValues,
       catalog: catalog ?? undefined,
@@ -597,25 +621,34 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       referenceImageName: referenceImageFile?.name,
       approvedScript: approvedAvatarScript,
       generatedFullScript: avatarExportSnapshot.generatedFullScript,
-      icpText: avatarExportSnapshot.icpText,
+      // For image briefs, we generate ICP from the image plan preview (Image Variants step).
+      icpText: isImageBrief ? imageIcpText : avatarExportSnapshot.icpText,
       customScriptText: customPrompt,
-      strategyPreview,
+      strategyPreview: isImageBrief ? null : strategyPreview,
       labelForIds: (options, ids) => labelsForIds(options, ids),
     })
 
     const hasIcp = Boolean(
-      avatarExportSnapshot.icpText?.trim() || strategyPreview?.icp_text?.trim()
+      (isImageBrief ? imageIcpText : avatarExportSnapshot.icpText)?.trim() ||
+        (!isImageBrief ? strategyPreview?.icp_text?.trim() : null)
     )
-    const hasScript = Boolean(
-      avatarExportSnapshot.generatedFullScript?.trim() ||
-        avatarExportSnapshot.spokenScript?.trim() ||
-        approvedAvatarScript?.trim()
-    )
+    const hasScript = isImageBrief
+      ? true
+      : Boolean(
+          avatarExportSnapshot.generatedFullScript?.trim() ||
+            avatarExportSnapshot.spokenScript?.trim() ||
+            approvedAvatarScript?.trim()
+        )
 
     if (!hasIcp && !hasScript) {
-      toast('Exporting Steps 1–9 — generate ICP + script in Step 8 first for full export.', {
+      toast(
+        isImageBrief
+          ? 'Exporting image brief — generate image ICP + variant plans in “Image Variants” first.'
+          : 'Exporting Steps 1–9 — generate ICP + script in Step 8 first for full export.',
+        {
         icon: '⚠️',
-      })
+        }
+      )
     } else {
       toast.success('Brief exported to Excel (.xlsx)')
     }
@@ -740,7 +773,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         target_audience: targetAudience,
         formats: d.formats as AdFormat[],
         ad_copy_tone: (d.ad_copy_tone ?? '').trim(),
-        cta: d.cta.trim(),
+        cta:
+          (d.cta ?? '').trim() ||
+          imageVariantSlots.map((s) => s.cta.trim()).find(Boolean) ||
+          'Learn More',
         product_name: d.product_name ?? '',
         key_benefits: {
           target_variant_count: d.target_variant_count,
@@ -750,10 +786,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           notes: d.notes ?? '',
           audience,
           objective_id: d.objective_id,
-          cta_text: d.cta.trim(),
+          cta_text:
+            (d.cta ?? '').trim() ||
+            imageVariantSlots.map((s) => s.cta.trim()).find(Boolean) ||
+            '',
           tone_text: (d.ad_copy_tone ?? '').trim(),
           copy_model: genSettings.copyModel,
-          image_model: genSettings.imageModel,
+          ...(mediaType !== 'image' && genSettings.imageModel
+            ? { image_model: genSettings.imageModel }
+            : {}),
           media_type: mediaType,
           ...(mediaType === 'image'
             ? {
@@ -762,9 +803,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   use_cases: s.use_cases,
                   hook: s.hook.trim(),
                   message: s.message.trim(),
+                  cta: s.cta.trim(),
+                  offer: s.offer.trim(),
                   prompt: s.prompt.trim(),
                   reasoning: s.reasoning.trim() || undefined,
+                  generated_at: s.generated_at ?? undefined,
                 })),
+                ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
                 // Back-compat for older readers: first slot as shared fields
                 ...(imageVariantSlots[0]?.use_cases?.length
                   ? { image_use_cases: imageVariantSlots[0].use_cases }
@@ -889,7 +934,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       <form
         id="brief-form"
         onSubmit={handleSubmit(onSubmit, onInvalid)}
-        className="max-w-[1440px] mx-auto p-6 md:p-8 grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-6"
+        className="w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4"
       >
         <div className="space-y-4">
           {!hasBrands && (
@@ -917,18 +962,16 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               error={errors.brand_id?.message}
               {...register('brand_id')}
             />
-            <div>
-              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Objective</p>
-              <PillRadio
-                options={catalog?.objectives ?? []}
-                value={objectiveId}
-                onChange={(id) => setValue('objective_id', id, { shouldValidate: true })}
-                disabled={!catalog}
-              />
-              {errors.objective_id && (
-                <p className="mt-1 text-xs text-red-500">{errors.objective_id.message}</p>
-              )}
-            </div>
+            <Select
+              label="Objective"
+              options={objectiveOptions}
+              placeholder="Select objective"
+              value={objectiveId || ''}
+              onChange={(e) =>
+                setValue('objective_id', e.target.value, { shouldValidate: true })
+              }
+              error={errors.objective_id?.message}
+            />
             <Input
               label="Target Variants"
               type="number"
@@ -1022,6 +1065,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               />
               {errors.formats && <p className="mt-1 text-xs text-red-500">{errors.formats.message}</p>}
             </div>
+
+            {/* ── Ad style / marketing approach (image mode) ── */}
+            {mediaType === 'image' && (
+              <div>
+                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
+                  Ad style / hook framework
+                </p>
+                <p className="text-[11px] text-mid mb-3">
+                  Choose how the ads should sell — Pattern Interrupt, UGC, Social Proof, etc.
+                  AI plans will follow these styles for hooks and scenes.
+                </p>
+                <ChipToggleGroup
+                  options={hookFrameworkOptions}
+                  selected={selectedFrameworks ?? []}
+                  onChange={(next) => setValue('hook_frameworks', next)}
+                />
+              </div>
+            )}
 
             {/* ── Image ratio picker (image mode only) ── */}
             {mediaType === 'image' && (
@@ -1373,10 +1434,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             <div>
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Hook Frameworks (optional)</p>
               <ChipToggleGroup
-                options={catalog?.hook_frameworks ?? []}
+                options={hookFrameworkOptions}
                 selected={selectedFrameworks ?? []}
                 onChange={(next) => setValue('hook_frameworks', next)}
-                disabled={!catalog}
               />
             </div>
           </BriefSection>
@@ -1444,7 +1504,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           {mediaType === 'image' && (
             <BriefSection title="Image Variants" step="5">
               <p className="text-[11px] text-mid -mt-1">
-                One creative direction per variant — unique use case, hook, on-image message, and prompt.
+                ICP-driven plans from your campaign name — unique use case, hook, headline, CTA, and prompt per variant.
               </p>
               <ImageVariantSlotsPanel
                 slots={imageVariantSlots}
@@ -1453,6 +1513,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 generatingAll={generatingAllSlots}
                 onGenerateSlot={(i) => void handleGenerateImageSlot(i)}
                 onGenerateAll={() => void handleGenerateAllImageSlots()}
+                campaignOffer={imageCampaignOffer}
+                onCampaignOfferChange={setImageCampaignOffer}
+                exportContext={{
+                  campaignName: formValues.title ?? '',
+                  brandName: selectedBrand?.name ?? '',
+                  objectiveId: formValues.objective_id ?? '',
+                  aspectRatio: imageRatioCustom.trim() || imageRatio,
+                  icpText: imageIcpText ?? undefined,
+                }}
               />
             </BriefSection>
           )}
@@ -1530,24 +1599,49 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           )}
 
           <BriefSection title="Call to Action" step="7">
-            <Input
-              label="CTA Text"
-              placeholder="e.g. Book Appointment, Shop Now, Learn More"
-              error={errors.cta?.message}
-              {...register('cta')}
-            />
+            {mediaType === 'image' ? (
+              <>
+                <Input
+                  label="Default CTA hint (optional)"
+                  placeholder="Optional — leave blank so AI picks a CTA per variant"
+                  error={errors.cta?.message}
+                  {...register('cta')}
+                />
+                <p className="mt-1 text-[11px] text-mid">
+                  For image ads, each variant has its own <strong>CTA on image</strong> in step 5.
+                  Generate AI for all fills those CTAs. This field is only a shared hint.
+                </p>
+              </>
+            ) : (
+              <Input
+                label="CTA Text"
+                placeholder="e.g. Book Appointment, Shop Now, Learn More"
+                error={errors.cta?.message}
+                {...register('cta')}
+              />
+            )}
           </BriefSection>
 
           {/* ── Model Selector — bottom of form after all inputs ─────── */}
           <BriefSection title="AI Models" step="9">
             <p className="text-xs text-mid -mt-1 mb-1">
-              Once you&apos;ve filled your campaign details above, click{' '}
-              <strong>Analyse &amp; suggest models</strong> to let the AI pick the best
-              image and video models — or choose manually from the dropdowns.
+              {mediaType === 'image' ? (
+                <>
+                  Copy model is set here. You&apos;ll choose the <strong>image model</strong>{' '}
+                  yourself on the brief page right before you generate variants.
+                </>
+              ) : (
+                <>
+                  Once you&apos;ve filled your campaign details above, click{' '}
+                  <strong>Analyse &amp; suggest models</strong> to let the AI pick the best
+                  image and video models — or choose manually from the dropdowns.
+                </>
+              )}
             </p>
             <ModelSelectorBlock
               catalog={catalog ?? undefined}
               wantsVideo={wantsVideo}
+              hideImageModel={mediaType === 'image'}
               genSettings={genSettings}
               setGenSettings={setGenSettings}
               imageModelSelect={imageModelSelect}
@@ -1569,90 +1663,48 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               })}
             />
           </BriefSection>
-        </div>
 
-        <aside className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-ink to-[#25262e] p-6 text-white shadow-card">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-accent mb-4">Summary</p>
-            <div className="space-y-2 text-xs text-subtle mb-4">
-              <p>
-                <span className="text-white font-semibold">Variants:</span> {targetVariantCount || 0}
-                {mediaType === 'image' ? (
-                  <span className="text-subtle"> · {imageVariantSlots.filter((s) => s.prompt.trim()).length}/{imageVariantSlots.length} prompts set</span>
-                ) : null}
-              </p>
-              <p>
-                <span className="text-white font-semibold">Formats:</span>{' '}
-                {(selectedFormats ?? []).join(', ') || '—'}
-              </p>
-              <p>
-                <span className="text-white font-semibold">Output:</span>{' '}
-                {wantsVideo
-                  ? `Image + ${genSettings.videoModel}`
-                  : wantsImageOnly
-                    ? `Image (${genSettings.imageModel})`
-                    : '—'}
-              </p>
-            </div>
-            <div className="border-t border-white/10 pt-4 mb-4">
-              <p className="text-[10px] uppercase tracking-wide text-lt font-bold">Total cost</p>
-              <p className="text-3xl font-extrabold text-accent">${estimate.cost.toFixed(2)}</p>
-            </div>
-            <div className="border-t border-white/10 pt-4 mb-4">
-              <p className="text-[10px] uppercase tracking-wide text-lt font-bold">Estimated delivery</p>
-              <p className="text-lg font-bold">~ {estimate.minutes} min</p>
-            </div>
-            <p className="text-[10px] text-lt">Next: generate variants on the brief detail page.</p>
-          </div>
+          {mediaType === 'video' && (
+            <StrategyPreviewPanel
+              canBuild={Boolean(catalog && hasBrands)}
+              onPreviewChange={setStrategyPreview}
+              getInputs={() => ({
+                campaign_name: formValues.title ?? '',
+                brand_name: selectedBrand?.name ?? '',
+                product_name: formValues.product_name ?? '',
+                offer: formValues.offer ?? '',
+                target_audience: [
+                  formValues.audience_type,
+                  formValues.geography,
+                  formValues.age_range,
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
+                ad_copy_tone: formValues.ad_copy_tone ?? '',
+                cta: formValues.cta ?? '',
+                target_seconds: genSettings.videoDurationSeconds,
+                hook_frameworks: selectedFrameworks ?? [],
+                objective: formValues.objective_id
+                  ? (catalog?.objectives.find((o) => o.id === formValues.objective_id)?.label ??
+                    formValues.objective_id)
+                  : '',
+                placements: selectedPlacements ?? [],
+                formats: selectedFormats ?? [],
+                website_url: isWebsiteScriptMode ? websiteUrl : undefined,
+              })}
+            />
+          )}
 
-          <div className="card-premium p-5">
-            <p className="label-ui mb-3">Brief Checklist</p>
-            <ul className="space-y-2 text-xs">
-              {checklist.map((item) => (
-                <li key={item.label} className={item.ok ? 'text-navy' : 'text-lt'}>
-                  {item.ok ? '✓' : '○'} {item.label}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <StrategyPreviewPanel
-            canBuild={Boolean(catalog && hasBrands)}
-            onPreviewChange={setStrategyPreview}
-            getInputs={() => ({
-              campaign_name: formValues.title ?? '',
-              brand_name: selectedBrand?.name ?? '',
-              product_name: formValues.product_name ?? '',
-              offer: formValues.offer ?? '',
-              target_audience: [
-                formValues.audience_type,
-                formValues.geography,
-                formValues.age_range,
-              ]
-                .filter(Boolean)
-                .join(' · '),
-              ad_copy_tone: formValues.ad_copy_tone ?? '',
-              cta: formValues.cta ?? '',
-              target_seconds: genSettings.videoDurationSeconds,
-              hook_frameworks: selectedFrameworks ?? [],
-              objective: formValues.objective_id
-                ? (catalog?.objectives.find((o) => o.id === formValues.objective_id)?.label ??
-                  formValues.objective_id)
-                : '',
-              placements: selectedPlacements ?? [],
-              formats: selectedFormats ?? [],
-              website_url: isWebsiteScriptMode ? websiteUrl : undefined,
-            })}
-          />
-
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 pt-2">
             <Button
               type="button"
               variant="outline"
               className="w-full"
               onClick={handleDownloadBriefExcel}
             >
-              Download brief Excel (Steps 1–9 + script)
+              {mediaType === 'image'
+                ? 'Download brief Excel (Image + ICP + Variants)'
+                : 'Download brief Excel (Steps 1–9 + script)'}
             </Button>
             {needsApprovedScript && (
               <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -1685,7 +1737,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </Button>
             </div>
           </div>
-        </aside>
+        </div>
       </form>
     </div>
   )

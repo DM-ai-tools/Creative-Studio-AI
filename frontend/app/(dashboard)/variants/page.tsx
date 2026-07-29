@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import Link from 'next/link'
 import toast from 'react-hot-toast'
 import Topbar from '@/components/layout/Topbar'
 import VariantGrid from '@/components/variant/VariantGrid'
@@ -22,19 +23,22 @@ export default function VariantsPage() {
   const [briefFilter, setBriefFilter] = useState('all')
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null)
 
-  const { data: catalog } = useApi(() => generationApi.getCatalog(true), [], {
-    cacheKey: 'generation/catalog-v4',
+  const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
+    cacheKey: 'generation/catalog-v5',
     ttlMs: API_CACHE_TTL.catalog,
   })
-  const { data: briefs } = useApi(() => briefsApi.list(), [], {
+  const { data: briefs } = useApi(() => briefsApi.list({ limit: 200 }), [], {
     cacheKey: 'briefs',
     ttlMs: API_CACHE_TTL.briefs,
   })
-  const { data: variants, isLoading, refetch } = useApi(
-    () => variantsApi.list({
-      ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
-    }),
-    [statusFilter]
+  const { data: variants, isLoading, error, refetch } = useApi(
+    () =>
+      variantsApi.list({
+        limit: 300,
+        ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
+      }),
+    [statusFilter],
+    { cacheKey: `variants-library/${statusFilter}`, ttlMs: API_CACHE_TTL.variants }
   )
 
   const formatOptions = useMemo(
@@ -63,6 +67,7 @@ export default function VariantsPage() {
   })
 
   const selectedBrief = briefs?.find((brief) => brief.id === briefFilter)
+  const readyBriefs = (briefs ?? []).filter((b) => (b.completed_variants ?? 0) > 0)
 
   const handleApprove = async (id: string) => {
     try {
@@ -92,6 +97,11 @@ export default function VariantsPage() {
     }
   }
 
+  const handleRefresh = () => {
+    void refetch()
+    toast.success('Refreshing variants…')
+  }
+
   return (
     <div>
       <Topbar
@@ -99,7 +109,9 @@ export default function VariantsPage() {
         subtitle={`${filtered.length} variant${filtered.length !== 1 ? 's' : ''}`}
         actions={
           <>
-            <Button variant="outline" size="sm">Filter</Button>
+            <Button variant="outline" size="sm" onClick={handleRefresh}>
+              Refresh
+            </Button>
             <Button variant="secondary" size="sm">Send to Compliance</Button>
             <Button variant="primary" size="sm">Export Selected</Button>
           </>
@@ -140,7 +152,38 @@ export default function VariantsPage() {
         ))}
       </div>
 
-      <div className="p-5">
+      <div className="p-5 space-y-4">
+        {error ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <p className="font-semibold">Could not load variants</p>
+            <p className="text-xs mt-1">{typeof error === 'string' ? error : 'Request failed'}</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={handleRefresh}>
+              Try again
+            </Button>
+          </div>
+        ) : null}
+
+        {!isLoading && !error && filtered.length === 0 && readyBriefs.length > 0 ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p className="font-semibold">Variants exist on briefs but aren’t showing here</p>
+            <p className="text-xs mt-1">
+              Open a brief below to view them, or click Refresh. Your latest brief has{' '}
+              {readyBriefs[0]?.completed_variants}/{readyBriefs[0]?.variant_count} variants.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {readyBriefs.slice(0, 5).map((b) => (
+                <Link
+                  key={b.id}
+                  href={`/briefs/${b.id}`}
+                  className="text-xs font-semibold text-accent underline"
+                >
+                  {b.title} ({b.completed_variants})
+                </Link>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <VariantGrid
           variants={filtered}
           isLoading={isLoading}

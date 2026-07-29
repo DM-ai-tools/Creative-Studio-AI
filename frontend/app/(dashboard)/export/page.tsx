@@ -8,6 +8,7 @@ import Input from '@/components/ui/Input'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import { useApi } from '@/hooks/useApi'
+import { API_CACHE_TTL } from '@/lib/apiCache'
 import { metaApi, variantsApi } from '@/lib/api'
 import type { Variant } from '@/types'
 import { assetUrl } from '@/lib/utils'
@@ -18,8 +19,16 @@ export default function ExportPage() {
   const [adSetName, setAdSetName] = useState('')
   const [isExporting, setIsExporting] = useState(false)
 
-  const { data: variants, isLoading } = useApi(() => variantsApi.list({ status: 'APPROVED' }), [])
-  const { data: metaStatus } = useApi(() => metaApi.getStatus(), [])
+  const { data: variants, isLoading } = useApi(
+    () => variantsApi.list({ status: 'APPROVED', limit: 300 }),
+    [],
+    { cacheKey: 'variants/approved', ttlMs: API_CACHE_TTL.variants }
+  )
+  const { data: metaStatus } = useApi(
+    () => metaApi.getStatus(),
+    [],
+    { cacheKey: 'meta/status', ttlMs: API_CACHE_TTL.stats }
+  )
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {

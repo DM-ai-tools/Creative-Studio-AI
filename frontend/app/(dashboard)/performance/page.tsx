@@ -6,6 +6,7 @@ import Card from '@/components/ui/Card'
 import MetricCard from '@/components/dashboard/MetricCard'
 import PerformanceChart from '@/components/charts/PerformanceChart'
 import { useApi } from '@/hooks/useApi'
+import { API_CACHE_TTL } from '@/lib/apiCache'
 import { performanceApi } from '@/lib/api'
 import { formatROAS, formatCurrency, formatNumber, timeAgo } from '@/lib/utils'
 import type { TopPerformer } from '@/types'
@@ -20,9 +21,21 @@ export default function PerformancePage() {
   const [days, setDays] = useState(30)
   const [chartMetric, setChartMetric] = useState<'roas' | 'ctr' | 'impressions' | 'spend'>('roas')
 
-  const { data: stats, isLoading: statsLoading } = useApi(() => performanceApi.getDashboardStats(), [])
-  const { data: topPerformers, isLoading: perfLoading } = useApi(() => performanceApi.getTopPerformers(10), [])
-  const { data: fatigueAlerts } = useApi(() => performanceApi.getFatigueAlerts(), [])
+  const { data: stats, isLoading: statsLoading } = useApi(
+    () => performanceApi.getDashboardStats(),
+    [],
+    { cacheKey: 'stats/dashboard', ttlMs: API_CACHE_TTL.stats }
+  )
+  const { data: topPerformers, isLoading: perfLoading } = useApi(
+    () => performanceApi.getTopPerformers(10),
+    [],
+    { cacheKey: 'performance/top-10', ttlMs: API_CACHE_TTL.stats }
+  )
+  const { data: fatigueAlerts } = useApi(
+    () => performanceApi.getFatigueAlerts(),
+    [],
+    { cacheKey: 'fatigue-alerts', ttlMs: API_CACHE_TTL.stats }
+  )
 
   return (
     <div>

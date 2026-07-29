@@ -416,10 +416,10 @@ async def select_and_build_image_plan(
         data = _parse_llm_plan(raw)
 
         if data:
-            # Clamp prompt length (Runway max 1000 chars)
+            # Keep long prompts available in the UI; downstream providers can still sanitize as needed.
             prompt = (data.get("prompt") or "").strip()
-            if len(prompt) > 950:
-                prompt = prompt[:947] + "…"
+            if len(prompt) > 4000:
+                prompt = prompt[:3999] + "…"
             use_cases = [
                 uc for uc in (data.get("use_cases") or [])
                 if uc in _USE_CASE_DESCRIPTIONS

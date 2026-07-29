@@ -46,8 +46,13 @@ export type ImageVariantSlot = {
   use_cases: string[]
   hook: string
   message: string
+  /** On-image CTA button text for this variant only. */
+  cta: string
+  offer: string
   prompt: string
   reasoning: string
+  /** ISO timestamp when AI plan was last generated for this variant. */
+  generated_at: string | null
 }
 
 export function emptyImageVariantSlot(): ImageVariantSlot {
@@ -55,8 +60,11 @@ export function emptyImageVariantSlot(): ImageVariantSlot {
     use_cases: [],
     hook: '',
     message: '',
+    cta: '',
+    offer: '',
     prompt: '',
     reasoning: '',
+    generated_at: null,
   }
 }
 

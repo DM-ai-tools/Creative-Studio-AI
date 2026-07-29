@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  Asset, AvatarScriptResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  Asset, AvatarScriptResult, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
   StatsImageExtractionResult, StrategyPreviewResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
   GenerationCatalog, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
@@ -164,7 +164,13 @@ export const briefsApi = {
 
 // ── Variants ──────────────────────────────────────────────────────────────────
 export const variantsApi = {
-  list: (params?: { brief_id?: string; status?: string; compliance_status?: string }) =>
+  list: (params?: {
+    brief_id?: string
+    status?: string
+    compliance_status?: string
+    limit?: number
+    offset?: number
+  }) =>
     api.get<Variant[]>('/variants/', { params, timeout: 60_000 }).then((r) => r.data),
 
   get: (id: string) => api.get<Variant>(`/variants/${id}`).then((r) => r.data),
@@ -396,6 +402,23 @@ export const generationApi = {
   }) =>
     api
       .post<{ use_cases: string[]; prompt: string; reasoning: string }>('/generation/preview-image-plan', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
+  previewIcpImagePlan: (data: {
+    campaign_name: string
+    brand_name?: string
+    industry?: string
+    objective_id?: string
+    cta?: string
+    offer?: string
+    image_aspect_ratio?: string
+    hook_frameworks?: string[]
+    variant_count?: number
+    existing_hooks?: string[]
+    existing_prompts?: string[]
+  }) =>
+    api
+      .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout: 120_000 })
       .then((r) => r.data),
 
   generateImagePrompt: (data: {

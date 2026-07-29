@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user
-from app.schemas.variant import VariantResponse, VariantUpdate
+from app.schemas.variant import VariantResponse, VariantUpdate, slim_generation_params_for_list
 from app.services.ai_service import ai_service
 from app.services.brand_prompt import enrich_brief_with_brand
 from app.services.brand_service import BrandService
@@ -14,6 +14,17 @@ from app.services.brief_service import BriefService
 from app.services.variant_service import VariantService
 
 router = APIRouter(prefix="/variants", tags=["variants"], redirect_slashes=False)
+
+
+def _to_variant_response(variant, *, slim: bool = False) -> VariantResponse:
+    data = VariantResponse.model_validate(variant)
+    if slim:
+        data.generation_params = slim_generation_params_for_list(data.generation_params)
+    if data.compliance_notes is None:
+        data.compliance_notes = {}
+    if data.hashtags is None:
+        data.hashtags = []
+    return data
 
 
 @router.get("/fatigue-alerts")
@@ -27,10 +38,22 @@ async def list_variants(
     brief_id: Optional[UUID] = Query(None),
     status: Optional[str] = Query(None),
     compliance_status: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await VariantService.list_variants(db, current_user.tenant_id, brief_id, status, compliance_status)
+    rows = await VariantService.list_variants(
+        db,
+        current_user.tenant_id,
+        brief_id,
+        status,
+        compliance_status,
+        limit,
+        offset,
+    )
+    # Slim payloads so Variant Library stays fast (full prompts stay on get-by-id).
+    return [_to_variant_response(v, slim=True) for v in rows]
 
 
 @router.get("/{variant_id}", response_model=VariantResponse)
@@ -39,7 +62,8 @@ async def get_variant(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return await VariantService.get_variant(db, variant_id, current_user.tenant_id)
+    variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
+    return _to_variant_response(variant, slim=False)
 
 
 @router.delete("/{variant_id}", status_code=204)

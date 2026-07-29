@@ -8,6 +8,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   other: 'Other',
 }
 
+function modelOptionLabel(m: GenerationModelOption): string {
+  if (typeof m.cost_usd !== 'number') return m.label
+  if (m.cost_unit === 'second') return `${m.label} · $${m.cost_usd.toFixed(2)}/s`
+  return `${m.label} · $${m.cost_usd.toFixed(2)}/img`
+}
+
 /** Group catalog models by provider for optgroup selects (Runway / HeyGen / Higgsfield). */
 export function buildModelSelectGroups(
   models: GenerationModelOption[] | undefined,
@@ -20,12 +26,12 @@ export function buildModelSelectGroups(
   for (const m of models) {
     const key = m.provider || 'other'
     const list = byProvider.get(key) ?? []
-    list.push({ value: m.id, label: m.label })
+    list.push({ value: m.id, label: modelOptionLabel(m) })
     byProvider.set(key, list)
   }
   if (byProvider.size <= 1) {
     return {
-      options: models.map((m) => ({ value: m.id, label: m.label })),
+      options: models.map((m) => ({ value: m.id, label: modelOptionLabel(m) })),
       groups: undefined,
     }
   }
@@ -33,5 +39,7 @@ export function buildModelSelectGroups(
     label: PROVIDER_LABELS[provider] ?? provider,
     options,
   }))
-  return { options: [], groups }
+  // Keep empty option from fallback if present (e.g. "Choose image model…")
+  const empty = fallback.find((o) => o.value === '')
+  return { options: empty ? [empty] : [], groups }
 }

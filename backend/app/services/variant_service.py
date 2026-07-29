@@ -19,6 +19,8 @@ class VariantService:
         brief_id: UUID | None = None,
         variant_status: str | None = None,
         compliance_status: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
     ) -> list[Variant]:
         q = select(Variant).where(Variant.tenant_id == tenant_id)
         if brief_id:
@@ -27,7 +29,7 @@ class VariantService:
             q = q.where(Variant.status == variant_status)
         if compliance_status:
             q = q.where(Variant.compliance_status == compliance_status)
-        q = q.order_by(Variant.created_at.desc())
+        q = q.order_by(Variant.created_at.desc()).limit(limit).offset(offset)
         result = await db.execute(q)
         return list(result.scalars().all())
 

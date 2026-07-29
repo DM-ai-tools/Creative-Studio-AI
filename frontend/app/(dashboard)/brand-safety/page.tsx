@@ -5,6 +5,7 @@ import Topbar from '@/components/layout/Topbar'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import { useApi } from '@/hooks/useApi'
+import { API_CACHE_TTL } from '@/lib/apiCache'
 import { performanceApi, variantsApi } from '@/lib/api'
 import type { Variant } from '@/types'
 import { timeAgo } from '@/lib/utils'
@@ -31,13 +32,19 @@ const stateIcon = (state: 'pass' | 'warn' | 'fail') => {
 }
 
 export default function BrandSafetyPage() {
-  const { data: stats } = useApi(() => performanceApi.getDashboardStats(), [])
-  const { data: failedVariants, isLoading } = useApi(
-    () => variantsApi.list({ compliance_status: 'FAILED' }), []
+  const { data: stats } = useApi(
+    () => performanceApi.getDashboardStats(),
+    [],
+    { cacheKey: 'stats/dashboard', ttlMs: API_CACHE_TTL.stats }
   )
-  const { data: warnVariants } = useApi(
-    () => variantsApi.list({ compliance_status: 'WARNING' }), []
+  const { data: allVariants, isLoading } = useApi(
+    () => variantsApi.list({ limit: 300 }),
+    [],
+    { cacheKey: 'variants/compliance', ttlMs: API_CACHE_TTL.variants }
   )
+
+  const failedVariants = (allVariants ?? []).filter((v) => v.compliance_status === 'FAILED')
+  const warnVariants = (allVariants ?? []).filter((v) => v.compliance_status === 'WARNING')
 
   const passRate = stats?.brand_safety_pass_rate ?? null
   const hasChecks = passRate != null
