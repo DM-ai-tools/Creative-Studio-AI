@@ -20,6 +20,7 @@ import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
 import {
   emptyImageVariantSlot,
+  relatedOnImageLines,
   resizeImageVariantSlots,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
@@ -34,6 +35,7 @@ import {
   type BriefGenerationSettings,
 } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
+import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { API_CACHE_TTL, clearApiCache, clearBriefListCaches } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
@@ -168,6 +170,8 @@ function PillRadio({
 
 export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const router = useRouter()
+  const { activeBrandId, setActiveBrandId } = useActiveBrand()
+  const preferredBrandId = defaultBrandId || activeBrandId || undefined
   const { data: brands, refetch: refetchBrands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
@@ -188,7 +192,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [imageCampaignOffer, setImageCampaignOffer] = useState('')
   const [suggestingAngles, setSuggestingAngles] = useState(false)
   const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
-  const anglesAutoSuggestedRef = useRef(false)
   const [websiteBrand, setWebsiteBrand] = useState<WebsiteBrandFetchResult | null>(null)
   const [fetchingWebsiteBrand, setFetchingWebsiteBrand] = useState(false)
   const [imageRatio, setImageRatio] = useState<string>('1:1')
@@ -240,7 +243,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   } = useForm<FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
-      brand_id: defaultBrandId ?? '',
+      brand_id: preferredBrandId ?? '',
       title: '',
       niche: '',
       brand_source: 'brand',
@@ -255,6 +258,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       objective_id: '',
     },
   })
+
+  useEffect(() => {
+    if (preferredBrandId) setValue('brand_id', preferredBrandId)
+  }, [preferredBrandId, setValue])
 
   useEffect(() => {
     if (!catalog) return
@@ -285,9 +292,12 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }))
   }, [catalog, setValue, watch])
 
+  // Keep sidebar ACTIVE BRAND in sync with the brand selected on this brief form.
+  const watchedBrandId = watch('brand_id')
   useEffect(() => {
-    if (defaultBrandId) setValue('brand_id', defaultBrandId)
-  }, [defaultBrandId, setValue])
+    const id = (watchedBrandId || '').trim()
+    if (id && id !== activeBrandId) setActiveBrandId(id)
+  }, [watchedBrandId, activeBrandId, setActiveBrandId])
 
   const selectedPlacements = watch('placements')
   const selectedFormats = watch('formats')
@@ -466,24 +476,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
 
   useEffect(() => {
     if (mediaType !== 'image') return
-    const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
-    if (
-      campaignName.length < 2 ||
-      (selectedFrameworks?.length ?? 0) > 0 ||
-      anglesAutoSuggestedRef.current
-    ) {
-      return
-    }
-    const timer = window.setTimeout(() => {
-      anglesAutoSuggestedRef.current = true
-      void handleSuggestAdAngles(true)
-    }, 1500)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [watch('title'), watch('niche'), mediaType, selectedFrameworks?.length, objectiveId])
-
-  useEffect(() => {
-    if (mediaType !== 'image') return
     setImageVariantSlots((prev) =>
       prev.map((slot, i) => ({
         ...slot,
@@ -537,6 +529,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       const imageFmts = fmts.filter((f) => !isVideoFormat(f))
       if (imageFmts.length === 0) {
         setValue('formats', ['static'], { shouldValidate: true })
+      } else if (imageFmts.length > 1) {
+        // Image mode is exclusive: Static XOR Carousel
+        setValue(
+          'formats',
+          [imageFmts.includes('carousel') ? 'carousel' : imageFmts[0]],
+          { shouldValidate: true }
+        )
       } else if (imageFmts.length !== fmts.length) {
         setValue('formats', imageFmts, { shouldValidate: true })
       }
@@ -733,6 +732,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           selectedBrand?.industry ||
           websiteBrand?.industry ||
           '',
+        niche: (d.niche ?? '').trim(),
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
@@ -741,6 +741,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         variant_count: 1,
         existing_hooks: siblingHooks,
         existing_prompts: siblingPrompts,
+        creative_format: (d.formats ?? []).includes('carousel') ? 'carousel' : 'static',
       })
       const variant = plan.variants[0]
       if (!variant) {
@@ -751,14 +752,20 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         setImageIcpText(plan.icp_text.trim())
       }
       const generatedAt = new Date().toISOString()
+      const hook = variant.hook || slot.hook
+      const message = variant.message || slot.message
+      const derived = relatedOnImageLines(hook, message)
       setImageVariantSlots((prev) =>
         prev.map((s, i) =>
           i === index
             ? {
                 ...s,
                 use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
-                hook: variant.hook || s.hook,
-                message: variant.message || s.message,
+                hook,
+                message,
+                image_hook: variant.image_hook || derived.image_hook || s.image_hook,
+                image_headline:
+                  variant.image_headline || derived.image_headline || s.image_headline,
                 cta: variant.cta || s.cta,
                 offer: variant.offer || imageCampaignOffer.trim() || s.offer,
                 prompt: variant.prompt || s.prompt,
@@ -794,12 +801,14 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           selectedBrand?.industry ||
           websiteBrand?.industry ||
           '',
+        niche: (d.niche ?? '').trim(),
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || undefined,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
         hook_frameworks: d.hook_frameworks ?? [],
         variant_count: imageVariantSlots.length,
+        creative_format: (d.formats ?? []).includes('carousel') ? 'carousel' : 'static',
       })
       if (plan.icp_text?.trim()) {
         setImageIcpText(plan.icp_text.trim())
@@ -809,11 +818,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         prev.map((s, i) => {
           const variant = plan.variants[i]
           if (!variant) return s
+          const hook = variant.hook || s.hook
+          const message = variant.message || s.message
+          const derived = relatedOnImageLines(hook, message)
           return {
             ...s,
             use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
-            hook: variant.hook || s.hook,
-            message: variant.message || s.message,
+            hook,
+            message,
+            image_hook: variant.image_hook || derived.image_hook || s.image_hook,
+            image_headline:
+              variant.image_headline || derived.image_headline || s.image_headline,
             cta: variant.cta || s.cta,
             offer: variant.offer || imageCampaignOffer.trim() || s.offer,
             prompt: variant.prompt || s.prompt,
@@ -1067,9 +1082,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             '',
           tone_text: (d.ad_copy_tone ?? '').trim(),
           copy_model: genSettings.copyModel,
-          ...(mediaType !== 'image' && genSettings.imageModel
-            ? { image_model: genSettings.imageModel }
-            : {}),
+          ...(genSettings.imageModel ? { image_model: genSettings.imageModel } : {}),
           media_type: mediaType,
           ...(mediaType === 'image'
             ? {
@@ -1078,6 +1091,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   use_cases: s.use_cases,
                   hook: s.hook.trim(),
                   message: s.message.trim(),
+                  image_hook: s.image_hook.trim(),
+                  image_headline: s.image_headline.trim(),
                   cta: s.cta.trim(),
                   offer: s.offer.trim(),
                   prompt: s.prompt.trim(),
@@ -1256,16 +1271,20 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           <BriefSection title="Industry & Brand" step="1">
             <Input
               label="Industry"
-              placeholder="e.g. Dental, Legal Services, Digital Marketing"
+              placeholder="e.g. Mortgage Broking, Dental, Digital Marketing"
               error={errors.title?.message}
               {...register('title')}
             />
             <Input
               label="Niche"
-              placeholder="e.g. New patient acquisition, Meta ads for SMBs"
+              placeholder="e.g. First home buyers, Refinance, Investment loans"
               error={errors.niche?.message}
               {...register('niche')}
             />
+            <p className="text-[10px] text-mid -mt-1">
+              Industry = what your brand is. Niche = who/what this campaign targets.
+              Objective drives the action (e.g. Conversions/Purchase → end customers, not other brokers).
+            </p>
 
             <div>
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
@@ -1408,9 +1427,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               <ChipToggleGroup
                 options={mediaType === 'image' ? formatOptions.filter((f) => !isVideoFormat(f.id)) : formatOptions}
                 selected={selectedFormats ?? []}
-                onChange={(next) => setValue('formats', next, { shouldValidate: true })}
+                exclusive={mediaType === 'image'}
+                onChange={(next) => {
+                  setValue('formats', next, { shouldValidate: true })
+                  // Meta carousel cards are square by default
+                  if (mediaType === 'image' && next.includes('carousel')) {
+                    setImageRatio('1:1')
+                    setImageRatioCustom('')
+                  }
+                }}
                 disabled={!catalog}
               />
+              {mediaType === 'image' && (selectedFormats ?? []).includes('carousel') && (
+                <p className="mt-2 text-[11px] text-mid">
+                  Carousel = one social swipe story. Card 1 problem → middle cards agitate/proof →
+                  last card solution + CTA. Each variant is one card; keep 2+ variants. Angles colour
+                  each beat but stay in the same story.
+                </p>
+              )}
               {errors.formats && <p className="mt-1 text-xs text-red-500">{errors.formats.message}</p>}
             </div>
 

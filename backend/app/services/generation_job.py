@@ -14,6 +14,11 @@ from app.services.brand_prompt import brand_snapshot, build_image_prompt, enrich
 from app.services.brand_service import BrandService
 from app.services.brief_service import BriefService
 from app.services.cta_defaults import resolve_campaign_cta
+from app.services.icp_image_plan_service import (
+    _billboard_words,
+    _related_image_lines,
+    enforce_on_image_copy_in_prompt,
+)
 from app.services.video_duration import (
     apply_video_settings_to_brief,
     requested_video_duration_seconds,
@@ -21,6 +26,42 @@ from app.services.video_duration import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _slot_has_saved_plan(slot: dict[str, Any] | None) -> bool:
+    """True when the brief stores user/AI variant fields that must drive generation."""
+    if not isinstance(slot, dict):
+        return False
+    return bool(
+        str(slot.get("prompt") or "").strip()
+        or str(slot.get("hook") or "").strip()
+        or str(slot.get("message") or "").strip()
+        or str(slot.get("offer") or "").strip()
+        or str(slot.get("image_hook") or "").strip()
+        or str(slot.get("image_headline") or "").strip()
+        or str(slot.get("cta") or "").strip()
+    )
+
+
+def _copy_from_image_slot(slot: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    """Build feed copy + on-image lines from a saved image_variants slot."""
+    hook = str(slot.get("hook") or "").strip()
+    message = str(slot.get("message") or "").strip()
+    offer = str(slot.get("offer") or "").strip()
+    cta = str(slot.get("cta") or "").strip()
+    image_hook = str(slot.get("image_hook") or "").strip()
+    image_headline = str(slot.get("image_headline") or "").strip()
+    derived_hook, derived_headline = _related_image_lines(hook, message)
+    on_image_hook = _billboard_words(image_hook, 6) or derived_hook
+    on_image_headline = _billboard_words(image_headline, 8) or derived_headline
+    copy = {
+        "hook": hook,
+        "headline": message,
+        "body_copy": offer,
+        "cta": cta,
+        "hashtags": [],
+    }
+    return copy, on_image_hook, on_image_headline
 
 
 async def run_brief_generation_job(
@@ -160,6 +201,15 @@ async def run_brief_generation_job(
             image_variants = kb_models.get("image_variants")
             if not isinstance(image_variants, list):
                 image_variants = []
+            # Filter to only dicts (drop corrupted entries).
+            image_variants = [v for v in image_variants if isinstance(v, dict)]
+
+            if image_variants and not target_count:
+                count_per_format = max(
+                    count_per_format,
+                    max(1, len(image_variants) // max(1, len(formats))),
+                )
+                brief.variant_count = len(formats) * count_per_format
 
             for fmt in formats:
                 for _ in range(count_per_format):
@@ -167,12 +217,21 @@ async def run_brief_generation_job(
                     brief.status = "RUNNING"
                     await db.commit()
 
-                    slot = (
-                        image_variants[variant_index]
-                        if variant_index < len(image_variants)
-                        and isinstance(image_variants[variant_index], dict)
-                        else None
-                    )
+                    if variant_index < len(image_variants):
+                        slot = image_variants[variant_index]
+                    elif image_variants:
+                        # More variants requested than saved slots: cycle through existing slots
+                        # so we never fall back to AI-generated copy for an unsaved variant.
+                        slot = image_variants[variant_index % len(image_variants)]
+                        logger.info(
+                            "Brief %s: variant_index=%s exceeds image_variants (%s) — cycling slot %s",
+                            brief_id,
+                            variant_index,
+                            len(image_variants),
+                            variant_index % len(image_variants),
+                        )
+                    else:
+                        slot = None
                     slot_use_cases = (
                         list(slot.get("use_cases") or [])
                         if isinstance(slot, dict)
@@ -191,22 +250,57 @@ async def run_brief_generation_job(
                         variant_index,
                         bool(slot),
                     )
-                    copy = await ai_service.generate_ad_copy(
-                        brand_voice=voice,
-                        forbidden_words=brand.forbidden_words or [],
-                        brief=brief_dict,
-                        format_type=fmt,
-                        model=data.ai_model,
-                    )
-                    # Per-variant on-image hook / message / CTA override (image mode).
-                    if slot_hook:
-                        copy["hook"] = slot_hook
-                    if slot_message:
-                        copy["headline"] = slot_message
-                    if slot_cta:
-                        copy["cta"] = slot_cta
-                    elif not str(copy.get("cta") or "").strip():
-                        copy["cta"] = resolve_campaign_cta(brief_dict)
+                    on_image_hook = ""
+                    on_image_message = ""
+                    if _slot_has_saved_plan(slot):
+                        copy, on_image_hook, on_image_message = _copy_from_image_slot(slot)
+                        if not str(copy.get("cta") or "").strip():
+                            copy["cta"] = resolve_campaign_cta(brief_dict)
+                        logger.info(
+                            "Brief %s: variant %s uses saved image_variants plan "
+                            "(hook=%r on_image_hook=%r prompt_len=%d)",
+                            brief_id,
+                            variant_index,
+                            (copy.get("hook") or "")[:60],
+                            on_image_hook,
+                            len(slot_prompt),
+                        )
+                    else:
+                        copy = await ai_service.generate_ad_copy(
+                            brand_voice=voice,
+                            forbidden_words=brand.forbidden_words or [],
+                            brief=brief_dict,
+                            format_type=fmt,
+                            model=data.ai_model,
+                        )
+                        # Full post hook/headline stay as-is from the variant slot when provided.
+                        if slot_hook:
+                            copy["hook"] = slot_hook
+                        if slot_message:
+                            copy["headline"] = slot_message
+                        # Catchy RELATED lines for the photo only (not a paste of full hook/headline).
+                        slot_image_hook = (
+                            str(slot.get("image_hook") or "").strip()
+                            if isinstance(slot, dict)
+                            else ""
+                        )
+                        slot_image_headline = (
+                            str(slot.get("image_headline") or "").strip()
+                            if isinstance(slot, dict)
+                            else ""
+                        )
+                        derived_image_hook, derived_image_headline = _related_image_lines(
+                            slot_hook or str(copy.get("hook") or ""),
+                            slot_message or str(copy.get("headline") or ""),
+                        )
+                        on_image_hook = _billboard_words(slot_image_hook, 6) or derived_image_hook
+                        on_image_message = (
+                            _billboard_words(slot_image_headline, 8) or derived_image_headline
+                        )
+                        if slot_cta:
+                            copy["cta"] = slot_cta
+                        elif not str(copy.get("cta") or "").strip():
+                            copy["cta"] = resolve_campaign_cta(brief_dict)
 
                     compliance = await ai_service.run_compliance_check(
                         copy,
@@ -268,55 +362,69 @@ async def run_brief_generation_job(
                                     or brief_dict.get("image_prompt_override")
                                     or kb_models.get("image_prompt_override")
                                     or "",
-                                    "image_aspect_ratio": brief_dict.get("image_aspect_ratio")
-                                    or kb_models.get("image_aspect_ratio")
-                                    or "1:1",
+                                    "image_aspect_ratio": (
+                                        "1:1"
+                                        if fmt == "carousel"
+                                        else (
+                                            brief_dict.get("image_aspect_ratio")
+                                            or kb_models.get("image_aspect_ratio")
+                                            or "1:1"
+                                        )
+                                    ),
                                 }
                                 if slot_prompt:
                                     # User (or AI-preview) already wrote the final prompt for this variant.
-                                    image_prompt = slot_prompt
-                                    # Ensure on-image hook/message are requested if user filled them separately.
-                                    bake_bits = []
-                                    if slot_hook and slot_hook.lower() not in image_prompt.lower():
-                                        bake_bits.append(
-                                            f'Large hook text on the ad must read exactly: "{slot_hook}".'
-                                        )
-                                    if slot_message and slot_message.lower() not in image_prompt.lower():
-                                        bake_bits.append(
-                                            f'Bold headline on the ad must read exactly: "{slot_message}".'
-                                        )
+                                    # Strip any invented on-image slogans and pin EXACT condensed lines.
                                     effective_cta = slot_cta or str(copy.get("cta") or "").strip()
-                                    if (
-                                        effective_cta
-                                        and effective_cta.lower() not in image_prompt.lower()
-                                    ):
-                                        bake_bits.append(
-                                            f'CTA button text on the ad must read exactly: "{effective_cta}".'
-                                        )
-                                    if bake_bits:
-                                        image_prompt = f"{image_prompt.rstrip()} {' '.join(bake_bits)}"
+                                    image_prompt = enforce_on_image_copy_in_prompt(
+                                        slot_prompt,
+                                        image_hook=on_image_hook,
+                                        image_headline=on_image_message,
+                                        cta=effective_cta,
+                                        full_hook=slot_hook or str(copy.get("hook") or ""),
+                                        full_headline=slot_message
+                                        or str(copy.get("headline") or ""),
+                                    )
                                     brief_dict["_image_plan_use_cases"] = slot_use_cases
                                     brief_dict["_image_plan_reasoning"] = (
                                         (slot.get("reasoning") if slot else "") or "per_variant_prompt"
                                     )
                                     logger.info(
-                                        "Image slot prompt used: index=%s use_cases=%s prompt_len=%d",
+                                        "Image slot prompt enforced: index=%s hook=%r headline=%r prompt_len=%d",
                                         variant_index,
-                                        slot_use_cases,
+                                        on_image_hook,
+                                        on_image_message,
                                         len(image_prompt),
                                     )
                                 else:
+                                    # Pass short on-image lines for burn-in; keep feed copy separate.
+                                    image_copy = {
+                                        **copy,
+                                        "hook": on_image_hook
+                                        or _billboard_words(str(copy.get("hook") or ""), 6),
+                                        "headline": on_image_message
+                                        or _billboard_words(str(copy.get("headline") or ""), 8),
+                                    }
                                     plan = await select_and_build_image_plan(
-                                        variant_brief, snap, copy=copy
+                                        variant_brief, snap, copy=image_copy
                                     )
-                                    image_prompt = plan.prompt
+                                    effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                    image_prompt = enforce_on_image_copy_in_prompt(
+                                        plan.prompt,
+                                        image_hook=on_image_hook or str(image_copy["hook"]),
+                                        image_headline=on_image_message
+                                        or str(image_copy["headline"]),
+                                        cta=effective_cta,
+                                        full_hook=slot_hook or str(copy.get("hook") or ""),
+                                        full_headline=slot_message
+                                        or str(copy.get("headline") or ""),
+                                    )
                                     brief_dict["_image_plan_use_cases"] = plan.use_cases
                                     brief_dict["_image_plan_reasoning"] = plan.reasoning
                                     logger.info(
-                                        "Image plan: index=%s use_cases=%s reasoning=%s prompt_len=%d",
+                                        "Image plan enforced: index=%s use_cases=%s prompt_len=%d",
                                         variant_index,
                                         plan.use_cases,
-                                        plan.reasoning,
                                         len(image_prompt),
                                     )
                             else:
@@ -335,6 +443,68 @@ async def run_brief_generation_job(
                                 copy=copy,
                                 format_type=fmt,
                             )
+
+                        # Meta carousel = one square card per variant (not a collage).
+                        if fmt == "carousel":
+                            from app.services.campaign_themes import (
+                                build_carousel_slides,
+                                parse_campaign_themes,
+                            )
+
+                            themes = parse_campaign_themes(
+                                brief.product_name
+                                or str(kb_models.get("niche") or "")
+                                or brief.title
+                                or "",
+                                brief_dict,
+                            )
+                            # Prefer per-slot themes when image variants exist
+                            if image_variants:
+                                slot_themes = []
+                                for sv in image_variants:
+                                    if not isinstance(sv, dict):
+                                        continue
+                                    t = (
+                                        str(sv.get("message") or sv.get("image_headline") or sv.get("hook") or "")
+                                        .strip()
+                                    )
+                                    if t:
+                                        slot_themes.append(t[:80])
+                                if slot_themes:
+                                    themes = slot_themes
+                            if not themes:
+                                themes = [brief.title or "Offer"]
+                            slides = build_carousel_slides(
+                                themes,
+                                offer=str(kb_models.get("offer") or copy.get("offer") or ""),
+                                cta=str(copy.get("cta") or brief.cta or "Learn More"),
+                                vertical_label=str(
+                                    kb_models.get("industry")
+                                    or brief_dict.get("target_industry_label")
+                                    or "brand"
+                                ),
+                            )
+                            copy["carousel_slides"] = slides
+                            card_i = variant_index % max(1, len(slides))
+                            slide = slides[card_i]
+                            theme = str(slide.get("theme") or slide.get("headline") or "Offer")
+                            image_prompt = (
+                                f"{image_prompt.rstrip()} "
+                                f"Meta CAROUSEL CARD {card_i + 1} of {len(slides)} in ONE swipe story — "
+                                f"generate ONE square 1:1 feed card only for theme \"{theme}\". "
+                                f"Story beat: "
+                                f"{'PROBLEM opener' if card_i == 0 else ('SOLUTION + CTA closer' if card_i == len(slides) - 1 else 'AGITATE / PROOF bridge')}. "
+                                "Do NOT render a multi-panel collage, strip, or row of cards in this image. "
+                                "This card must feel like the next swipe after the previous card in the same campaign."
+                            )
+                            logger.info(
+                                "Carousel card framed: brief=%s card=%s/%s theme=%r",
+                                brief_id,
+                                card_i + 1,
+                                len(slides),
+                                theme,
+                            )
+
                         burn_logo_on_still = fmt not in {"reel", "video"}
                         pipeline["image"] = await ai_service.generate_image_asset(
                             prompt=image_prompt,
@@ -431,6 +601,8 @@ async def run_brief_generation_job(
                                 "variant_index": variant_index,
                                 "hook": slot_hook or None,
                                 "message": slot_message or None,
+                                "image_hook": on_image_hook or None,
+                                "image_headline": on_image_message or None,
                                 "cta": slot_cta or copy.get("cta") or None,
                                 "prompt": slot_prompt or None,
                                 "ad_angle": slot_ad_angle or None,

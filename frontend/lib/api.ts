@@ -409,6 +409,7 @@ export const generationApi = {
     campaign_name: string
     brand_name?: string
     industry?: string
+    niche?: string
     objective_id?: string
     cta?: string
     offer?: string
@@ -417,6 +418,7 @@ export const generationApi = {
     variant_count?: number
     existing_hooks?: string[]
     existing_prompts?: string[]
+    creative_format?: 'static' | 'carousel' | string
   }) =>
     api
       .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout: 120_000 })

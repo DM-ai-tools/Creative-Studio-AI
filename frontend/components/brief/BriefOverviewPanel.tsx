@@ -10,6 +10,8 @@ type ImageVariantStored = {
   use_cases?: string[]
   hook?: string
   message?: string
+  image_hook?: string
+  image_headline?: string
   cta?: string
   offer?: string
   prompt?: string
@@ -185,8 +187,10 @@ export default function BriefOverviewPanel({ brief, brand, angleOptions }: Props
                   </div>
                 )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Field label="Hook" value={slot.hook} />
-                  <Field label="Message" value={slot.message} />
+                  <Field label="Hook (post)" value={slot.hook} />
+                  <Field label="Headline (post)" value={slot.message} />
+                  <Field label="On-image hook" value={slot.image_hook} />
+                  <Field label="On-image headline" value={slot.image_headline} />
                   <Field label="CTA on image" value={slot.cta} />
                   <Field label="Offer" value={slot.offer} />
                 </div>

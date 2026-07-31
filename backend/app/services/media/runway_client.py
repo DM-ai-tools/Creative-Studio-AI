@@ -14,7 +14,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 5
-POLL_MAX_ATTEMPTS = 120
+POLL_MAX_ATTEMPTS = 60  # 60 × 5s = 5 min max per attempt (3 retries → 15 min total)
 
 
 def runway_configured() -> bool:

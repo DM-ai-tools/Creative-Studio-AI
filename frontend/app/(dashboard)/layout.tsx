@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import Sidebar from '@/components/layout/Sidebar'
 import { PageLoader } from '@/components/ui/Loading'
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
+import { ActiveBrandProvider, useActiveBrand } from '@/hooks/useActiveBrand'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi } from '@/lib/api'
@@ -16,6 +17,7 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const { user, isLoading, logout } = useAuth()
+  const { activeBrandId, setActiveBrandId } = useActiveBrand()
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   const { data: brands } = useApi(() => brandsApi.list(), [], {
@@ -52,10 +54,21 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
     })
   }
 
+  // If stored brand was deleted, or nothing selected yet, fall back to first brand.
+  useEffect(() => {
+    if (!brands?.length) return
+    const stillExists = activeBrandId
+      ? brands.some((b) => b.id === activeBrandId)
+      : false
+    if (!stillExists) setActiveBrandId(brands[0].id)
+  }, [brands, activeBrandId, setActiveBrandId])
+
   if (isLoading && !user) return <PageLoader />
   if (!user) return null
 
-  const activeBrand = brands?.[0]
+  const activeBrand =
+    (activeBrandId ? brands?.find((b) => b.id === activeBrandId) : undefined) ??
+    brands?.[0]
   const brandSubtitle = activeBrand?.industry
     ? agencyIndustryLabel(activeBrand.industry)
     : undefined
@@ -96,7 +109,9 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
     <AuthProvider>
-      <DashboardShell>{children}</DashboardShell>
+      <ActiveBrandProvider>
+        <DashboardShell>{children}</DashboardShell>
+      </ActiveBrandProvider>
     </AuthProvider>
   )
 }

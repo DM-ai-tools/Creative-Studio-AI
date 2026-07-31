@@ -13,6 +13,7 @@ import Select from '@/components/ui/Select'
 import { PageLoader } from '@/components/ui/Loading'
 import { IconPalette, IconShield } from '@/components/ui/icons'
 import { brandsApi } from '@/lib/api'
+import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { AGENCY_INDUSTRY_OPTIONS } from '@/lib/industries'
 import { assetUrl, cn } from '@/lib/utils'
 import type { Brand, BrandKit } from '@/types'
@@ -163,6 +164,8 @@ function BrandListItem({
 export default function BrandKitPage() {
   const [brands, setBrands] = useState<Brand[]>([])
   const [activeBrandId, setActiveBrandId] = useState<string | null>(null)
+  const { activeBrandId: sidebarActiveBrandId, setActiveBrandId: setSidebarActiveBrandId } =
+    useActiveBrand()
   const [activeKit, setActiveKit] = useState<BrandKit | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -180,6 +183,7 @@ export default function BrandKitPage() {
   const loadBrand = useCallback(
     async (b: Brand) => {
       setActiveBrandId(b.id)
+      setSidebarActiveBrandId(b.id)
       setActiveKit(null)
       setIsCreatingNew(false)
       const voice = b.voice_rules as { description?: string }
@@ -206,7 +210,7 @@ export default function BrandKitPage() {
         /* no kit yet — that's fine */
       }
     },
-    [reset]
+    [reset, setSidebarActiveBrandId]
   )
 
   /** Initial load */
@@ -216,7 +220,16 @@ export default function BrandKitPage() {
         const list = await brandsApi.list()
         setBrands(list)
         if (list.length > 0) {
-          await loadBrand(list[0])
+          let preferredId = sidebarActiveBrandId
+          if (!preferredId && typeof window !== 'undefined') {
+            try {
+              preferredId = localStorage.getItem('cs-active-brand-id')
+            } catch {
+              preferredId = null
+            }
+          }
+          const preferred = list.find((b) => b.id === preferredId) ?? list[0]
+          await loadBrand(preferred)
         } else {
           // No brands — start in "create new" mode
           setIsCreatingNew(true)
@@ -238,8 +251,10 @@ export default function BrandKitPage() {
         setIsLoading(false)
       }
     }
-    load()
-  }, [loadBrand, reset])
+    void load()
+    // Mount only — switching brands is handled by loadBrand clicks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** Start creating a new brand */
   const handleNewBrand = () => {

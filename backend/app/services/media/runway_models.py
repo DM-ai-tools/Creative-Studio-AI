@@ -52,14 +52,14 @@ GEMINI_PIXEL_MODELS = {NANO_BANANA_2, NANO_BANANA, NANO_BANANA_PRO}
 GPT_IMAGE_2_MODELS = {"gpt_image_2"}
 GPT_IMAGE_2_RATIO_BY_FORMAT = {
     "static": "1920:1920",      # 1:1
-    "carousel": "1920:1088",    # ~16:9
+    "carousel": "1920:1920",    # Meta carousel card = square
     "reel": "1088:1920",        # ~9:16
     "video": "1920:1088",       # ~16:9
 }
 
 _PIXEL_RATIO_BY_FORMAT = {
     "static": "1024:1024",
-    "carousel": "1344:768",
+    "carousel": "1024:1024",  # Meta carousel card = square
     "reel": "768:1344",
     "video": "768:1344",
 }
@@ -104,7 +104,7 @@ def build_text_to_image_payload(*, model: str, prompt: str, format_type: str) ->
     if format_type in {"reel", "video"}:
         ratio = "1080:1920"
     elif format_type == "carousel":
-        ratio = "1920:1080"
+        ratio = "1080:1080"
     else:
         ratio = settings.RUNWAYML_IMAGE_RATIO or "1080:1080"
 

@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 # Runway text_to_image promptText max length (API validation).
 RUNWAY_IMAGE_PROMPT_MAX = 1000
 
+# GPT Image 2 on Runway uses OpenAI's model — no 1000-char restriction.
+# Gemini Image 3 Pro supports up to 5 500 chars (Runway April 2026 update).
+_RUNWAY_MODEL_PROMPT_LIMITS: dict[str, int] = {
+    "gpt_image_2": 32_000,
+    "gemini_image3_pro": 5_500,
+}
+
+
+def _runway_prompt_max(model: str | None) -> int:
+    """Return the effective promptText character limit for the given Runway model id."""
+    return _RUNWAY_MODEL_PROMPT_LIMITS.get((model or "").strip(), RUNWAY_IMAGE_PROMPT_MAX)
+
 
 def _clip(text: str, limit: int) -> str:
     text = " ".join(str(text or "").split())
@@ -23,9 +35,45 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def clamp_runway_image_prompt(prompt: str, max_len: int = RUNWAY_IMAGE_PROMPT_MAX) -> str:
-    """Ensure prompt fits Runway API limits."""
-    return _clip(prompt, max_len)
+def clamp_runway_image_prompt(
+    prompt: str,
+    max_len: int = RUNWAY_IMAGE_PROMPT_MAX,
+    *,
+    model: str | None = None,
+) -> str:
+    """Clamp to Runway's per-model promptText limit.
+
+    gpt_image_2 has no practical limit (32 000 chars); other models cap at 1 000.
+    Preserves the TEXT-ANCHOR prefix and ON-IMAGE COPY tail when truncating.
+    """
+    effective_max = _runway_prompt_max(model) if model else max_len
+    text = " ".join(str(prompt or "").split())
+    if len(text) <= effective_max:
+        return text
+
+    # Locate the tail block (everything from the first known marker onwards).
+    # TEXT-ANCHOR: is now appended AFTER the scene, so it anchors the text-rules block.
+    tail_markers = (
+        "TEXT-ANCHOR:",
+        "ON-IMAGE COPY (final authority)",
+        "AUTHORITATIVE ON-IMAGE COPY",
+        "VISUAL STORY (non-negotiable)",
+    )
+    tail_start = len(text)
+    for marker in tail_markers:
+        idx = text.find(marker)
+        if idx >= 0:
+            tail_start = min(tail_start, idx)
+
+    tail = text[tail_start:].strip() if tail_start < len(text) else ""
+    body_with_anchor = text[:tail_start].strip()
+
+    if tail:
+        budget = effective_max - len(tail) - 1
+        if budget > 80:
+            return f"{body_with_anchor[:budget].rstrip()} {tail}"
+
+    return text[: effective_max - 1].rstrip() + "…"
 
 
 def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, Any]:
@@ -125,26 +173,28 @@ def build_image_prompt(
         brief,
     )
     slides = copy.get("carousel_slides")
-    if format_type == "carousel" and isinstance(slides, list) and len(slides) > 1:
+    if format_type == "carousel" and isinstance(slides, list) and len(slides) >= 1:
         n = len(slides)
+        # Generation creates one image per card — describe a single card, not a collage.
         prompt += (
-            f"Meta carousel: {n} equal panels in a row as ONE continuous layout — "
-            "no mirrored or blurred side strips. Logo is added in a white strip in post. "
+            f"Meta carousel swipe card (1 of {n}) as ONE continuous square 1:1 photograph — "
+            "no multi-panel collage, no mirrored strips, no row of cards in one frame. "
+            "Logo is added in a white strip in post. "
         )
-        for i, slide in enumerate(slides[:5]):
-            if not isinstance(slide, dict):
-                continue
-            theme = _clip(str(slide.get("theme") or slide.get("headline") or ""), 50)
-            slide_hook = _clip(str(slide.get("hook") or offer), 60)
+        # Prefer the first slide theme when this template is used without a card index.
+        slide = slides[0] if isinstance(slides[0], dict) else {}
+        theme = _clip(str(slide.get("theme") or slide.get("headline") or ""), 50)
+        slide_hook = _clip(str(slide.get("hook") or offer), 60)
+        if theme:
             prompt += (
-                f'Panel {i + 1}: realistic photo of {theme}; '
-                f'headline text ONLY "{theme}" — do not mention other services on this panel. '
+                f'Realistic photo for theme "{theme}"; '
+                f'headline text ONLY "{theme}". '
             )
-            if slide_hook and not texts_duplicate(slide_hook, theme):
-                prompt += f'Subtext: "{slide_hook}". '
-        if offer:
-            prompt += f'Shared offer line (small): "{offer}". '
-        prompt += f'Shared CTA button: "{cta}". '
+        if slide_hook and not texts_duplicate(slide_hook, theme):
+            prompt += f'Subtext: "{slide_hook}". '
+        if offer and not texts_duplicate(offer, theme):
+            prompt += f'Small offer line: "{offer}". '
+        prompt += f'CTA button: "{cta}". '
     elif format_type in {"reel", "video"}:
         prompt += (
             "Vertical 9:16 full-bleed portrait — subject and scene fill the entire frame edge to edge. "

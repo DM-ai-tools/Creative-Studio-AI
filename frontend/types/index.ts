@@ -175,6 +175,10 @@ export interface IcpImageVariantPlan {
   use_cases: string[]
   hook: string
   message: string
+  /** Catchy related line burned onto the photo. */
+  image_hook?: string
+  /** Catchy related headline burned onto the photo. */
+  image_headline?: string
   cta?: string
   offer: string
   prompt: string

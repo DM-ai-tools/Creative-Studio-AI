@@ -44,8 +44,14 @@ export function labelForUseCase(id: string): string {
 /** One creative direction for a single image variant. */
 export type ImageVariantSlot = {
   use_cases: string[]
+  /** Full post hook (shown as-is on the variant / feed). */
   hook: string
+  /** Full post headline (shown as-is on the variant / feed). */
   message: string
+  /** Catchy related line burned onto the photo (max ~6 words). */
+  image_hook: string
+  /** Catchy related headline burned onto the photo (max ~8 words). */
+  image_headline: string
   /** On-image CTA button text for this variant only. */
   cta: string
   offer: string
@@ -62,12 +68,63 @@ export function emptyImageVariantSlot(): ImageVariantSlot {
     use_cases: [],
     hook: '',
     message: '',
+    image_hook: '',
+    image_headline: '',
     cta: '',
     offer: '',
     prompt: '',
     reasoning: '',
     ad_angle: '',
     generated_at: null,
+  }
+}
+
+/** Fallback catchy on-image lines when AI omits image_hook / image_headline.
+ * Same idea as the full hook/headline — never invent a new FOMO angle.
+ */
+export function relatedOnImageLines(hook: string, message: string): {
+  image_hook: string
+  image_headline: string
+} {
+  const clip = (text: string, max: number) => {
+    const words = text.trim().split(/\s+/).filter(Boolean)
+    if (!words.length) return ''
+    let out = words.slice(0, max).join(' ').replace(/[,;:-]+$/, '')
+    while (/\b(to|for|and|or|of|a|the|with)$/i.test(out)) {
+      const parts = out.split(/\s+/)
+      if (parts.length <= 1) break
+      out = parts.slice(0, -1).join(' ')
+    }
+    return out
+  }
+
+  const combined = `${hook} ${message}`.toLowerCase()
+  let image_hook = ''
+  let image_headline = ''
+
+  if (/big four|big bank|bank offer|bank rate/.test(combined)) {
+    image_hook = "Big banks aren't your only option"
+    image_headline = 'Access lower broker rates'
+  } else if (/broker/.test(combined) && /rate/.test(combined)) {
+    image_hook = 'Broker-only rates beat banks'
+    image_headline = 'See what you could save'
+  } else if (/rate/.test(combined) && /save|saving|lower|cheaper/.test(combined)) {
+    image_hook = 'Still overpaying on rates?'
+    image_headline = 'Lock a better home loan'
+  } else if (/first home|homebuyer|home buyer|home loan/.test(combined)) {
+    image_hook = 'Ready for a better loan?'
+    image_headline = 'Compare broker-only rates'
+  } else if (/refinance|refi/.test(combined)) {
+    image_hook = 'Refinance before rates move'
+    image_headline = 'Check your broker options'
+  } else {
+    image_hook = clip(hook, 6)
+    image_headline = clip(message, 8)
+  }
+
+  return {
+    image_hook: clip(image_hook, 7),
+    image_headline: clip(image_headline, 8),
   }
 }
 

@@ -310,6 +310,8 @@ class IcpImageVariantPlanItem(BaseModel):
     use_cases: list[str]
     hook: str
     message: str
+    image_hook: str = ""
+    image_headline: str = ""
     cta: str = ""
     offer: str = ""
     prompt: str
@@ -352,10 +354,11 @@ async def suggest_ad_angles_endpoint(
     return SuggestAdAnglesResponse(**result)
 
 class IcpImagePlanRequest(BaseModel):
-    """ICP-driven image plans from campaign name (+ brand / industry)."""
+    """ICP-driven image plans from industry + niche + objective + brand."""
     campaign_name: str = Field(..., min_length=3)
     brand_name: str = ""
     industry: str = ""
+    niche: str = ""
     objective_id: str = ""
     cta: str = ""
     offer: str = ""
@@ -364,6 +367,10 @@ class IcpImagePlanRequest(BaseModel):
     variant_count: int = Field(default=1, ge=1, le=20)
     existing_hooks: list[str] = Field(default_factory=list)
     existing_prompts: list[str] = Field(default_factory=list)
+    creative_format: str = Field(
+        default="static",
+        description="static | carousel — carousel cards form one swipe story",
+    )
 
 
 class IcpImagePlanResponse(BaseModel):
@@ -377,8 +384,8 @@ async def icp_image_plan(
     _current_user=Depends(get_current_user),
 ):
     """
-    Build ICP from campaign name, then return N distinct image variant plans
-    (use cases, hook, message, prompt) for Generate AI plan / Generate AI for all.
+    Build ICP from industry + niche + objective + brand, then return N distinct
+    image variant plans (hook/headline + catchy on-image lines + prompt).
     """
     from app.services.icp_image_plan_service import generate_icp_image_plan
 
@@ -386,6 +393,7 @@ async def icp_image_plan(
         campaign_name=data.campaign_name.strip(),
         brand_name=data.brand_name,
         industry=data.industry,
+        niche=data.niche,
         objective_id=data.objective_id,
         cta=data.cta,
         offer=data.offer,
@@ -394,6 +402,7 @@ async def icp_image_plan(
         variant_count=data.variant_count,
         existing_hooks=data.existing_hooks,
         existing_prompts=data.existing_prompts,
+        creative_format=data.creative_format,
     )
     return IcpImagePlanResponse(**result)
 

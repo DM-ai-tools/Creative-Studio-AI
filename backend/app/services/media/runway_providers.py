@@ -139,7 +139,7 @@ class RunwayImageProvider(ImageGenerationProvider):
         if not runway_configured():
             return {"status": "mock", "model": provider_model, "prompt": prompt, "url": None}
 
-        safe_prompt = clamp_runway_image_prompt(prompt)
+        safe_prompt = clamp_runway_image_prompt(prompt, model=provider_model)
         payload = build_text_to_image_payload(
             model=provider_model,
             prompt=safe_prompt,

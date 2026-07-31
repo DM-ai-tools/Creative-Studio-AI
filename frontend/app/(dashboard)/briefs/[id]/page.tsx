@@ -14,12 +14,17 @@ import BriefGenerationPanel, {
   VIDEO_DURATION_OPTIONS,
 } from '@/components/brief/BriefGenerationPanel'
 import BriefOverviewPanel from '@/components/brief/BriefOverviewPanel'
+import BriefImageVariantsEditor, {
+  serializeImageVariants,
+  slotsFromBrief,
+} from '@/components/brief/BriefImageVariantsEditor'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, heygenSettingsFromApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
 import { Spinner } from '@/components/ui/Loading'
 import { useApi } from '@/hooks/useApi'
+import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, variantsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
@@ -28,6 +33,7 @@ import { videoPreviewAspectClass, videoModalObjectFit } from '@/lib/creativeForm
 import { getPipelineNodeStates } from '@/lib/briefPipeline'
 import { cn, formatDate, timeAgo } from '@/lib/utils'
 import type { Brief, BriefStatus, GenerationCatalog, PerformanceStatsContext, Variant } from '@/types'
+import type { ImageVariantSlot } from '@/lib/imageUseCases'
 
 function defaultSettingsFromBrief(
   brief: Brief,
@@ -84,6 +90,7 @@ function PipelineNode({ label, state }: { label: string; state: 'done' | 'run' |
 export default function BriefDetailPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
+  const { setActiveBrandId } = useActiveBrand()
   const [isGenerating, setIsGenerating] = useState(false)
   const [showRegenerateModal, setShowRegenerateModal] = useState(false)
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null)
@@ -94,10 +101,14 @@ export default function BriefDetailPage() {
   const [pdfBusy, setPdfBusy] = useState(false)
   const [statsImageUrls, setStatsImageUrls] = useState<string[]>([])
   const [ocrStatsPerImage, setOcrStatsPerImage] = useState<PerformanceStatsContext[]>([])
+  const [imageVariantSlots, setImageVariantSlots] = useState<ImageVariantSlot[]>([])
   const hydratedBriefIdRef = useRef<string | null>(null)
+  const imageSlotsHydratedRef = useRef<string | null>(null)
   const runningStatusSyncRef = useRef(false)
   const generateButtonRef = useRef<HTMLDivElement | null>(null)
   const focusedFromCreateRef = useRef(false)
+  const pollStartedAtRef = useRef<number | null>(null)
+  const [pollTimedOut, setPollTimedOut] = useState(false)
 
   const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
     cacheKey: 'generation/catalog-v6',
@@ -118,6 +129,11 @@ export default function BriefDetailPage() {
     if (!brief?.brand_id) return null
     return brandsApi.get(brief.brand_id)
   }, [brief?.brand_id])
+
+  // Sidebar ACTIVE BRAND should follow the brand on this brief.
+  useEffect(() => {
+    if (brief?.brand_id) setActiveBrandId(brief.brand_id)
+  }, [brief?.brand_id, setActiveBrandId])
 
   useEffect(() => {
     if (!brief || !catalog) return
@@ -172,6 +188,8 @@ export default function BriefDetailPage() {
   // Poll quietly while a generation job is active — keep going until ALL target variants
   // are ready (do NOT stop after the first READY variant, or the UI looks stuck at 1/N).
   // Also keep polling PARTIAL when completed_variants < variant_count (mid-batch images).
+  // Stops automatically after POLL_TIMEOUT_MS to prevent infinite loops on stuck jobs.
+  const POLL_TIMEOUT_MS = 15 * 60 * 1000 // 15 minutes
   useEffect(() => {
     if (!brief) return
     const target = Math.max(1, Number(brief.variant_count) || 1)
@@ -188,7 +206,15 @@ export default function BriefDetailPage() {
 
     if (!shouldPoll) {
       runningStatusSyncRef.current = false
+      pollStartedAtRef.current = null
+      setPollTimedOut(false)
       return
+    }
+
+    // Record when we first started polling this run.
+    if (pollStartedAtRef.current === null) {
+      pollStartedAtRef.current = Date.now()
+      setPollTimedOut(false)
     }
 
     if (!incomplete) {
@@ -202,6 +228,11 @@ export default function BriefDetailPage() {
 
     const tick = () => {
       if (document.visibilityState === 'hidden') return
+      // Stop polling if we've exceeded the max wait time.
+      if (pollStartedAtRef.current && Date.now() - pollStartedAtRef.current > POLL_TIMEOUT_MS) {
+        setPollTimedOut(true)
+        return
+      }
       void refetchBrief({ background: true })
       void refetchVariants({ background: true })
     }
@@ -266,12 +297,20 @@ export default function BriefDetailPage() {
   const voiceLabel =
     catalog?.heygen_voice_options?.find((o) => o.id === genSettings?.heygenVoiceId)?.label ?? ''
 
+  useEffect(() => {
+    if (!brief || !wantsImageOnlyBrief) return
+    if (imageSlotsHydratedRef.current === brief.id) return
+    imageSlotsHydratedRef.current = brief.id
+    setImageVariantSlots(slotsFromBrief(brief))
+  }, [brief, wantsImageOnlyBrief])
+
   const handleResetStuckGeneration = async () => {
     if (!window.confirm('Stop waiting and reset this brief so you can click Generate again?')) return
     try {
       await briefsApi.update(id, { status: 'DRAFT' })
       toast.success('Generation reset — click Generate video when you are ready')
       hydratedBriefIdRef.current = null
+      imageSlotsHydratedRef.current = null
       void refetchBrief()
       void refetchVariants()
     } catch (err: unknown) {
@@ -294,18 +333,33 @@ export default function BriefDetailPage() {
 
     setIsGenerating(true)
     try {
+      let keyBenefitsToSave: Record<string, unknown> | null = null
+      if (wantsImageOnly && imageVariantSlots.length > 0) {
+        const serialized = serializeImageVariants(imageVariantSlots)
+        keyBenefitsToSave = {
+          ...kb,
+          image_variants: serialized,
+          ...(serialized[0]?.use_cases?.length
+            ? { image_use_cases: serialized[0].use_cases }
+            : {}),
+          ...(serialized[0]?.prompt
+            ? { image_prompt_override: serialized[0].prompt }
+            : {}),
+        }
+      }
       if (ocrStatsPerImage.length > 0 || statsImageUrls.length > 0) {
-        await briefsApi.update(id, {
-          key_benefits: {
-            ...kb,
-            ...(statsImageUrls.length > 0
-              ? { stats_image_url: statsImageUrls[0], stats_image_urls: statsImageUrls }
-              : {}),
-            ...(ocrStatsPerImage.length > 0
-              ? { performance_stats_per_image: ocrStatsPerImage }
-              : {}),
-          },
-        })
+        keyBenefitsToSave = {
+          ...(keyBenefitsToSave ?? kb),
+          ...(statsImageUrls.length > 0
+            ? { stats_image_url: statsImageUrls[0], stats_image_urls: statsImageUrls }
+            : {}),
+          ...(ocrStatsPerImage.length > 0
+            ? { performance_stats_per_image: ocrStatsPerImage }
+            : {}),
+        }
+      }
+      if (keyBenefitsToSave) {
+        await briefsApi.update(id, { key_benefits: keyBenefitsToSave })
       }
       const result = await briefsApi.generate(id, {
         formats: brief.formats,
@@ -520,7 +574,32 @@ export default function BriefDetailPage() {
           </span>
         </div>
 
-        {(brief.status === 'RUNNING' ||
+        {pollTimedOut && (
+          <div className="text-sm rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 space-y-2">
+            <p className="font-medium text-amber-800">
+              ⏱ The last variant is taking longer than expected — the Runway job may be stuck.
+            </p>
+            <p className="text-amber-700">
+              {brief.completed_variants} of {brief.variant_count} variants finished.
+              You can keep waiting or reset so you can regenerate the missing variant.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => { setPollTimedOut(false); pollStartedAtRef.current = Date.now() }}
+              >
+                Keep waiting
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => void handleResetStuckGeneration()}>
+                Reset &amp; try again
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {!pollTimedOut && (brief.status === 'RUNNING' ||
           (brief.status === 'PARTIAL' &&
             Number(brief.completed_variants || 0) < Math.max(1, brief.variant_count))) && (
           <div className="text-sm text-lt rounded-lg border border-mint/30 bg-mint/5 px-3 py-2 space-y-2">
@@ -536,7 +615,7 @@ export default function BriefDetailPage() {
                 Showing {variants?.length ?? 0} of {brief.variant_count} so far — keep this page open.
               </p>
             )}
-            {brief.completed_variants === 0 && (
+            {Number(brief.completed_variants || 0) < Math.max(1, brief.variant_count) && (
               <Button type="button" variant="outline" size="sm" onClick={() => void handleResetStuckGeneration()}>
                 Reset stuck generation
               </Button>
@@ -549,6 +628,19 @@ export default function BriefDetailPage() {
           brand={brand}
           angleOptions={catalog?.hook_frameworks}
         />
+
+        {wantsImageOnlyBrief && (
+          <BriefImageVariantsEditor
+            brief={brief}
+            slots={imageVariantSlots}
+            onChange={setImageVariantSlots}
+            angleOptions={catalog?.hook_frameworks}
+            onSaved={() => {
+              imageSlotsHydratedRef.current = null
+              void refetchBrief()
+            }}
+          />
+        )}
 
         <BriefGenerationPanel
           catalog={catalog ?? undefined}

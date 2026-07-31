@@ -387,6 +387,8 @@ async def suggest_ad_angles(
         campaign_name=icp_seed,
         brand_name=brand_name,
         industry=industry or niche,
+        niche=niche,
+        objective_id=objective_id,
     )
 
     fallback = suggest_ad_angles_rule_based(

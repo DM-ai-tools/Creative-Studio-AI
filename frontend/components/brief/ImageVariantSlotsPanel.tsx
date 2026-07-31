@@ -257,16 +257,30 @@ export default function ImageVariantSlotsPanel({
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Input
-                label="Hook on image"
-                placeholder="e.g. Is your Meta spend leaking?"
+                label="Hook (post — keep as is)"
+                placeholder="e.g. Your best clients are leaving for integrated solutions"
                 value={slot.hook}
                 onChange={(e) => updateSlot(index, { hook: e.target.value })}
               />
               <Input
-                label="Message / headline on image"
-                placeholder="e.g. Free Meta ads audit this week"
+                label="Headline (post — keep as is)"
+                placeholder="e.g. Don't lose assets to firms offering lending + wealth together"
                 value={slot.message}
                 onChange={(e) => updateSlot(index, { message: e.target.value })}
+              />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input
+                label="On-image hook (catchy, related)"
+                placeholder="e.g. Clients leaving for one-stop shops?"
+                value={slot.image_hook}
+                onChange={(e) => updateSlot(index, { image_hook: e.target.value })}
+              />
+              <Input
+                label="On-image headline (catchy, related)"
+                placeholder="e.g. Keep lending + wealth together"
+                value={slot.image_headline}
+                onChange={(e) => updateSlot(index, { image_headline: e.target.value })}
               />
             </div>
             <Input
@@ -276,12 +290,12 @@ export default function ImageVariantSlotsPanel({
               onChange={(e) => updateSlot(index, { cta: e.target.value })}
             />
             <p className="text-[10px] text-mid -mt-1">
-              Hook, headline, and CTA are burned into this variant&apos;s image only — each variant
-              should use a different CTA when it fits the angle.
+              Hook &amp; headline stay full for the post. On-image lines must be related to them but
+              shorter and catchier so the creative stops the scroll in ~3 seconds.
             </p>
 
             <Input
-              label="Offer (caption)"
+              label="Offer (caption / feed — not on image)"
               placeholder="e.g. I’m tired of guessing. I want proof that this actually works. Claim the free review and get next steps."
               value={slot.offer}
               onChange={(e) => updateSlot(index, { offer: e.target.value })}

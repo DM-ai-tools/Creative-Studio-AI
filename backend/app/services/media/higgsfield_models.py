@@ -31,7 +31,7 @@ HIGGSFIELD_IMAGE_SPECS: list[HiggsfieldModelSpec] = [
     ),
     HiggsfieldModelSpec(
         "gpt_image_2",
-        "GPT Image 2",
+        "Flux Pro Kontext Max",
         "flux-pro/kontext/max/text-to-image",
         "image",
     ),
@@ -256,7 +256,7 @@ def aspect_ratio_for_format(format_type: str) -> str:
     if ft in {"reel", "video", "stories"}:
         return "9:16"
     if ft == "carousel":
-        return "16:9"
+        return "1:1"  # Meta carousel swipe cards are square
     return "1:1"
 
 

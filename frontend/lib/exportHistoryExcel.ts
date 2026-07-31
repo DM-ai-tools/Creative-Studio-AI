@@ -94,6 +94,8 @@ export function buildHistoryDetailFields(row: HistoryRow): Array<[string, string
     ['Image aspect ratio', str(kb.image_aspect_ratio)],
     ['Hook', variant.hook || str(imagePlan.hook) || str(slot.hook)],
     ['Headline / message', variant.headline || str(imagePlan.message) || str(slot.message)],
+    ['On-image hook', str(imagePlan.image_hook || slot.image_hook)],
+    ['On-image headline', str(imagePlan.image_headline || slot.image_headline)],
     ['CTA', variant.cta || str(imagePlan.cta) || str(slot.cta)],
     ['Body copy', variant.body_copy || '—'],
     ['Hashtags', (variant.hashtags || []).join(' ') || '—'],

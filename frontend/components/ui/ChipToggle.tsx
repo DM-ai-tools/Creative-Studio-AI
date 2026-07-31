@@ -34,11 +34,23 @@ interface ChipToggleGroupProps {
   selected: string[]
   onChange(next: string[]): void
   disabled?: boolean
+  /** When true, exactly one option stays selected (radio-style). */
+  exclusive?: boolean
 }
 
-export function ChipToggleGroup({ options, selected, onChange, disabled }: ChipToggleGroupProps) {
+export function ChipToggleGroup({
+  options,
+  selected,
+  onChange,
+  disabled,
+  exclusive = false,
+}: ChipToggleGroupProps) {
   const toggle = (id: string) => {
     if (disabled) return
+    if (exclusive) {
+      onChange([id])
+      return
+    }
     onChange(selected.includes(id) ? selected.filter((value) => value !== id) : [...selected, id])
   }
 
