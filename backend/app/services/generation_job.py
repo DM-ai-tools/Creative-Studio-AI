@@ -17,8 +17,10 @@ from app.services.cta_defaults import resolve_campaign_cta
 from app.services.icp_image_plan_service import (
     _billboard_words,
     _related_image_lines,
+    enforce_no_spurious_circled_paper_prop,
     enforce_on_image_copy_in_prompt,
 )
+from app.services.variant_service import VariantService
 from app.services.video_duration import (
     apply_video_settings_to_brief,
     requested_video_duration_seconds,
@@ -372,6 +374,18 @@ async def run_brief_generation_job(
                                         )
                                     ),
                                 }
+                                _ind = str(
+                                    kb_models.get("industry")
+                                    or brief_dict.get("target_industry_label")
+                                    or brand.industry
+                                    or ""
+                                )
+                                _niche = str(
+                                    kb_models.get("niche")
+                                    or brief_dict.get("niche")
+                                    or brief.product_name
+                                    or ""
+                                )
                                 if slot_prompt:
                                     # User (or AI-preview) already wrote the final prompt for this variant.
                                     # Strip any invented on-image slogans and pin EXACT condensed lines.
@@ -384,6 +398,11 @@ async def run_brief_generation_job(
                                         full_hook=slot_hook or str(copy.get("hook") or ""),
                                         full_headline=slot_message
                                         or str(copy.get("headline") or ""),
+                                        industry=_ind,
+                                        niche=_niche,
+                                    )
+                                    image_prompt = enforce_no_spurious_circled_paper_prop(
+                                        image_prompt, industry=_ind, niche=_niche
                                     )
                                     brief_dict["_image_plan_use_cases"] = slot_use_cases
                                     brief_dict["_image_plan_reasoning"] = (
@@ -418,6 +437,11 @@ async def run_brief_generation_job(
                                         full_hook=slot_hook or str(copy.get("hook") or ""),
                                         full_headline=slot_message
                                         or str(copy.get("headline") or ""),
+                                        industry=_ind,
+                                        niche=_niche,
+                                    )
+                                    image_prompt = enforce_no_spurious_circled_paper_prop(
+                                        image_prompt, industry=_ind, niche=_niche
                                     )
                                     brief_dict["_image_plan_use_cases"] = plan.use_cases
                                     brief_dict["_image_plan_reasoning"] = plan.reasoning
@@ -567,7 +591,17 @@ async def run_brief_generation_job(
                         pipeline.get("video") if isinstance(pipeline.get("video"), dict) else {}
                     )
                     video_ok = video_step.get("status") == "done" and bool(video_step.get("url"))
+                    image_step = (
+                        pipeline.get("image") if isinstance(pipeline.get("image"), dict) else {}
+                    )
+                    image_failed = (
+                        not motion_format
+                        and image_step.get("status") == "failed"
+                    )
                     if motion_format and not video_ok:
+                        variant_status = "FAILED"
+                        any_failed_motion = True
+                    elif image_failed:
                         variant_status = "FAILED"
                         any_failed_motion = True
                     else:
@@ -652,3 +686,238 @@ async def run_brief_generation_job(
                 await db.commit()
             except Exception:
                 logger.exception("Could not mark brief %s failed after job error", brief_id)
+
+
+async def run_regenerate_variant_image(
+    *,
+    variant_id: UUID,
+    tenant_id: UUID,
+    image_model: str | None = None,
+) -> None:
+    """
+    Re-run ONLY the image step for one existing variant.
+    Keeps hook/headline/CTA/copy — does not recreate sibling variants.
+    """
+    async with AsyncSessionLocal() as db:
+        try:
+            from app.services.brand_logo import resolve_video_logo_urls
+
+            variant = await VariantService.get_variant(db, variant_id, tenant_id)
+            brief = await BriefService.get_brief(db, variant.brief_id, tenant_id)
+            brand = await BrandService.get_brand(db, variant.brand_id, tenant_id)
+            kit = None
+            try:
+                kit = await BrandService.get_brand_kit(db, brand.id, tenant_id)
+            except Exception:
+                kit = None
+
+            kb_models = dict(brief.key_benefits) if isinstance(brief.key_benefits, dict) else {}
+            brief_dict = enrich_brief_with_brand(
+                {
+                    "title": brief.title,
+                    "product_name": brief.product_name,
+                    "objective": brief.objective,
+                    "target_audience": brief.target_audience,
+                    "ad_copy_tone": brief.ad_copy_tone,
+                    "cta": brief.cta,
+                    "key_benefits": kb_models,
+                    "formats": brief.formats,
+                },
+                brand,
+                kit,
+            )
+            snap = brand_snapshot(brand, kit)
+
+            params = dict(variant.generation_params or {})
+            pipeline = dict(params.get("pipeline") or {})
+            models = dict(params.get("models") or {})
+            image_plan = dict(params.get("image_plan") or {})
+            fmt = variant.format or "static"
+            chosen_model = (
+                (image_model or "").strip()
+                or str(models.get("image") or "").strip()
+                or str(kb_models.get("image_model") or "").strip()
+                or "gen4_image"
+            )
+
+            # Prefer saved slot prompt → last failed prompt → rebuild from copy.
+            slot_prompt = str(image_plan.get("prompt") or "").strip()
+            prior_image = pipeline.get("image") if isinstance(pipeline.get("image"), dict) else {}
+            prior_prompt = str((prior_image or {}).get("prompt") or "").strip()
+
+            variant_index = int(image_plan.get("variant_index") or 0)
+            image_variants = kb_models.get("image_variants")
+            slot: dict[str, Any] | None = None
+            if isinstance(image_variants, list) and image_variants:
+                if variant_index < len(image_variants) and isinstance(image_variants[variant_index], dict):
+                    slot = image_variants[variant_index]
+                elif isinstance(image_variants[0], dict):
+                    # Match by hook when index drifted
+                    for sv in image_variants:
+                        if not isinstance(sv, dict):
+                            continue
+                        if str(sv.get("hook") or "").strip() == (variant.hook or "").strip():
+                            slot = sv
+                            break
+                    if slot is None and isinstance(image_variants[0], dict):
+                        slot = image_variants[0]
+
+            if slot and str(slot.get("prompt") or "").strip():
+                slot_prompt = str(slot.get("prompt") or "").strip()
+
+            on_image_hook = str(
+                image_plan.get("image_hook")
+                or (slot or {}).get("image_hook")
+                or ""
+            ).strip()
+            on_image_headline = str(
+                image_plan.get("image_headline")
+                or (slot or {}).get("image_headline")
+                or ""
+            ).strip()
+            if not on_image_hook or not on_image_headline:
+                derived_h, derived_m = _related_image_lines(
+                    variant.hook or "", variant.headline or ""
+                )
+                on_image_hook = on_image_hook or derived_h
+                on_image_headline = on_image_headline or derived_m
+
+            effective_cta = str(
+                image_plan.get("cta")
+                or (slot or {}).get("cta")
+                or variant.cta
+                or brief.cta
+                or ""
+            ).strip()
+
+            industry = str(
+                kb_models.get("industry")
+                or brief_dict.get("target_industry_label")
+                or brand.industry
+                or ""
+            )
+            niche = str(
+                kb_models.get("niche")
+                or brief_dict.get("niche")
+                or brief.product_name
+                or ""
+            )
+
+            base_prompt = slot_prompt or prior_prompt
+            if base_prompt:
+                image_prompt = enforce_on_image_copy_in_prompt(
+                    base_prompt,
+                    image_hook=on_image_hook,
+                    image_headline=on_image_headline,
+                    cta=effective_cta,
+                    full_hook=variant.hook or "",
+                    full_headline=variant.headline or "",
+                    industry=industry,
+                    niche=niche,
+                )
+                image_prompt = enforce_no_spurious_circled_paper_prop(
+                    image_prompt, industry=industry, niche=niche
+                )
+            else:
+                image_prompt = build_image_prompt(
+                    brand=snap,
+                    brief=brief_dict,
+                    copy={
+                        "hook": on_image_hook or variant.hook,
+                        "headline": on_image_headline or variant.headline,
+                        "cta": effective_cta,
+                        "body_copy": variant.body_copy or "",
+                    },
+                    format_type=fmt,
+                )
+                image_prompt = enforce_on_image_copy_in_prompt(
+                    image_prompt,
+                    image_hook=on_image_hook,
+                    image_headline=on_image_headline,
+                    cta=effective_cta,
+                    full_hook=variant.hook or "",
+                    full_headline=variant.headline or "",
+                    industry=industry,
+                    niche=niche,
+                )
+
+            img_logo, img_logo_light = resolve_video_logo_urls(brand=snap, brief=brief_dict)
+            burn_logo = fmt not in {"reel", "video"}
+
+            pipeline["image"] = {
+                "status": "generating",
+                "model": chosen_model,
+                "prompt": image_prompt[:500],
+            }
+            params["pipeline"] = pipeline
+            models["image"] = chosen_model
+            params["models"] = models
+            if slot_prompt:
+                image_plan["prompt"] = slot_prompt
+            image_plan["image_hook"] = on_image_hook
+            image_plan["image_headline"] = on_image_headline
+            params["image_plan"] = image_plan
+            variant.generation_params = params
+            variant.status = "GENERATING"
+            await db.commit()
+
+            logger.info(
+                "Regenerate image start variant=%s model=%s prompt_len=%d",
+                variant_id,
+                chosen_model,
+                len(image_prompt),
+            )
+
+            image_result = await ai_service.generate_image_asset(
+                prompt=image_prompt,
+                tenant_id=str(tenant_id),
+                model=chosen_model,
+                format_type=fmt,
+                logo_url=img_logo if burn_logo else None,
+                logo_on_light_url=img_logo_light if burn_logo else None,
+            )
+
+            # Re-load in case of concurrent edits
+            variant = await VariantService.get_variant(db, variant_id, tenant_id)
+            params = dict(variant.generation_params or {})
+            pipeline = dict(params.get("pipeline") or {})
+            pipeline["image"] = image_result
+            params["pipeline"] = pipeline
+            models = dict(params.get("models") or {})
+            models["image"] = chosen_model
+            params["models"] = models
+            variant.generation_params = params
+
+            ok = (
+                isinstance(image_result, dict)
+                and image_result.get("status") in {"done", "mock"}
+                and bool(image_result.get("url"))
+            )
+            variant.status = "READY" if ok else "FAILED"
+            await db.commit()
+            logger.info(
+                "Regenerate image done variant=%s status=%s image=%s",
+                variant_id,
+                variant.status,
+                image_result.get("status") if isinstance(image_result, dict) else "?",
+            )
+        except Exception:
+            logger.exception("Regenerate image failed variant=%s", variant_id)
+            try:
+                variant = await VariantService.get_variant(db, variant_id, tenant_id)
+                params = dict(variant.generation_params or {})
+                pipeline = dict(params.get("pipeline") or {})
+                prev = pipeline.get("image") if isinstance(pipeline.get("image"), dict) else {}
+                pipeline["image"] = {
+                    **(prev or {}),
+                    "status": "failed",
+                    "url": None,
+                    "error": "Image regeneration failed — check model settings / Runway credits, then retry.",
+                }
+                params["pipeline"] = pipeline
+                variant.generation_params = params
+                variant.status = "FAILED"
+                await db.commit()
+            except Exception:
+                logger.exception("Could not mark variant %s failed after regenerate error", variant_id)
+

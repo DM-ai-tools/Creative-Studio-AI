@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  Asset, AvatarScriptResult, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
   SuggestAdAnglesResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
@@ -184,6 +184,12 @@ export const variantsApi = {
   reject: (id: string) => api.post<Variant>(`/variants/${id}/reject`).then((r) => r.data),
 
   regenerate: (id: string) => api.post<Variant>(`/variants/${id}/regenerate`).then((r) => r.data),
+
+  /** Retry ONLY this variant's still image — does not regenerate siblings. */
+  regenerateImage: (id: string, data?: { image_model?: string }) =>
+    api
+      .post<Variant>(`/variants/${id}/regenerate-image`, data ?? {}, { timeout: 30_000 })
+      .then((r) => r.data),
 
   delete: (id: string) => api.delete(`/variants/${id}`),
 
@@ -413,6 +419,8 @@ export const generationApi = {
     objective_id?: string
     cta?: string
     offer?: string
+    geography?: string
+    brand_facts?: BrandFacts | null
     image_aspect_ratio?: string
     hook_frameworks?: string[]
     variant_count?: number

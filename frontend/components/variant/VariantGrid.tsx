@@ -9,8 +9,12 @@ interface VariantGridProps {
   onApprove(id: string): void
   onReject(id: string): void
   onDelete?(id: string): void
-  onRegenerate?(): void
+  /** Per-variant regenerate (e.g. retry failed image only). */
+  onRegenerate?(variantId: string): void
+  /** Opens the batch regenerate settings modal (all-new generation). */
+  onRegenerateBatch?(): void
   onView?(variant: Variant): void
+  regeneratingId?: string | null
 }
 
 function SkeletonTile() {
@@ -32,7 +36,9 @@ export default function VariantGrid({
   onReject,
   onDelete,
   onRegenerate,
+  onRegenerateBatch,
   onView,
+  regeneratingId,
 }: VariantGridProps) {
   if (isLoading) {
     return (
@@ -61,8 +67,10 @@ export default function VariantGrid({
           onApprove={onApprove}
           onReject={onReject}
           onDelete={onDelete}
-          onRegenerate={onRegenerate}
+          onRegenerate={onRegenerate ? () => onRegenerate(v.id) : undefined}
+          onRegenerateBatch={onRegenerateBatch}
           onView={onView ?? (() => {})}
+          isRegenerating={regeneratingId === v.id || v.status === 'GENERATING'}
         />
       ))}
     </div>

@@ -205,17 +205,27 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Nav */}
+      {/* Nav — Admin link only for admin role */}
       <nav className="flex-1 overflow-y-auto overflow-x-hidden py-2">
-        {collapsed ? (
-          <NavGroup title="" items={allNav} collapsed />
-        ) : (
-          <>
-            <NavGroup title="Workspace" items={workspaceNav} />
-            <NavGroup title="Analytics" items={performanceNav} />
-            <NavGroup title="Account" items={accountNav} />
-          </>
-        )}
+        {(() => {
+          const isAdmin = user.role === 'admin'
+          const accountItems = isAdmin ? accountNav : []
+          const collapsedItems = isAdmin
+            ? allNav
+            : [...workspaceNav, ...performanceNav]
+          if (collapsed) {
+            return <NavGroup title="" items={collapsedItems} collapsed />
+          }
+          return (
+            <>
+              <NavGroup title="Workspace" items={workspaceNav} />
+              <NavGroup title="Analytics" items={performanceNav} />
+              {accountItems.length > 0 && (
+                <NavGroup title="Account" items={accountItems} />
+              )}
+            </>
+          )
+        })()}
       </nav>
 
       {/* User */}

@@ -362,6 +362,14 @@ class IcpImagePlanRequest(BaseModel):
     objective_id: str = ""
     cta: str = ""
     offer: str = ""
+    geography: str = Field(
+        default="",
+        description="Service / audience location from the brief (e.g. North Brisbane). Used on-image — never invent Western Sydney/Brisbane from ICP archetypes.",
+    )
+    brand_facts: dict | None = Field(
+        default=None,
+        description="Verified facts scraped from the brand website (services, rates, reviews, locations). ACCC whitelist.",
+    )
     image_aspect_ratio: str = "1:1"
     hook_frameworks: list[str] = Field(default_factory=list)
     variant_count: int = Field(default=1, ge=1, le=20)
@@ -397,6 +405,8 @@ async def icp_image_plan(
         objective_id=data.objective_id,
         cta=data.cta,
         offer=data.offer,
+        geography=data.geography,
+        brand_facts=data.brand_facts,
         image_aspect_ratio=data.image_aspect_ratio,
         hook_frameworks=data.hook_frameworks,
         variant_count=data.variant_count,
@@ -423,6 +433,7 @@ class FetchBrandFromUrlResponse(BaseModel):
     description: str = ""
     provider: str = "firecrawl"
     warning: str | None = None
+    brand_facts: dict | None = None
 
 
 @router.post("/fetch-brand-from-url", response_model=FetchBrandFromUrlResponse)
@@ -430,7 +441,7 @@ async def fetch_brand_from_url(
     data: FetchBrandFromUrlRequest,
     _current_user=Depends(get_current_user),
 ):
-    """Scrape a website (Firecrawl) and return brand colors, logo, industry, niche."""
+    """Scrape a website (Firecrawl) and return brand identity + claimable business facts."""
     from app.services.firecrawl_brand_service import fetch_brand_from_website
 
     try:

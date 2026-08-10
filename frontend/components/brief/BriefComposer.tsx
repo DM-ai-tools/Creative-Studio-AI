@@ -52,7 +52,7 @@ import {
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
 import { assignAnglesToVariants } from '@/lib/adAngles'
-import type { AdFormat, CatalogOption, PerformanceStatsContext, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
+import type { AdFormat, BrandFacts, CatalogOption, PerformanceStatsContext, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
 
 const schema = z
   .object({
@@ -93,6 +93,29 @@ function campaignLabel(industry: string, niche?: string): string {
   return n ? `${i} — ${n}` : i
 }
 
+function brandFactsFromVoiceRules(voiceRules: unknown): BrandFacts | null {
+  if (!voiceRules || typeof voiceRules !== 'object') return null
+  const facts = (voiceRules as Record<string, unknown>).brand_facts
+  if (!facts || typeof facts !== 'object') return null
+  return facts as BrandFacts
+}
+
+function summarizeBrandFacts(facts: BrandFacts | null | undefined): string {
+  if (!facts) return ''
+  const bits: string[] = []
+  if (facts.services?.length) bits.push(`Services: ${facts.services.slice(0, 3).join(', ')}`)
+  if (facts.service_areas?.length) bits.push(`Areas: ${facts.service_areas.slice(0, 3).join(', ')}`)
+  const rating = facts.reviews?.rating
+  const count = facts.reviews?.count
+  if (rating != null || count != null) {
+    bits.push(`Reviews: ${rating != null ? `${rating}★` : ''}${count != null ? ` (${count})` : ''}`.trim())
+  }
+  if (facts.rates_or_pricing?.length) bits.push(`Rates: ${facts.rates_or_pricing.slice(0, 2).join(', ')}`)
+  if (facts.offers?.length) bits.push(`Offers: ${facts.offers.slice(0, 2).join(', ')}`)
+  if (facts.do_not_claim?.length) bits.push(`Won't invent: ${facts.do_not_claim.slice(0, 2).join(', ')}`)
+  return bits.join(' · ')
+}
+
 function websiteHost(url: string): string {
   try {
     const raw = url.trim()
@@ -102,6 +125,95 @@ function websiteHost(url: string): string {
     return url.trim().toLowerCase()
   }
 }
+
+// Australian geographic targeting options — states first, then major cities grouped by state.
+const AU_GEO_GROUPS = [
+  {
+    label: 'Whole State / Territory',
+    options: [
+      { value: 'NSW', label: 'New South Wales (NSW)' },
+      { value: 'VIC', label: 'Victoria (VIC)' },
+      { value: 'QLD', label: 'Queensland (QLD)' },
+      { value: 'WA', label: 'Western Australia (WA)' },
+      { value: 'SA', label: 'South Australia (SA)' },
+      { value: 'TAS', label: 'Tasmania (TAS)' },
+      { value: 'ACT', label: 'Australian Capital Territory (ACT)' },
+      { value: 'NT', label: 'Northern Territory (NT)' },
+    ],
+  },
+  {
+    label: 'NSW — Cities & Regions',
+    options: [
+      { value: 'Sydney NSW', label: 'Sydney' },
+      { value: 'Western Sydney NSW', label: 'Western Sydney' },
+      { value: 'North Shore Sydney NSW', label: 'North Shore' },
+      { value: 'Inner West Sydney NSW', label: 'Inner West' },
+      { value: 'Eastern Suburbs Sydney NSW', label: 'Eastern Suburbs' },
+      { value: 'South West Sydney NSW', label: 'South West Sydney' },
+      { value: 'Newcastle NSW', label: 'Newcastle' },
+      { value: 'Wollongong NSW', label: 'Wollongong' },
+      { value: 'Central Coast NSW', label: 'Central Coast' },
+      { value: 'Hunter Valley NSW', label: 'Hunter Valley' },
+    ],
+  },
+  {
+    label: 'VIC — Cities & Regions',
+    options: [
+      { value: 'Melbourne VIC', label: 'Melbourne' },
+      { value: 'Inner Melbourne VIC', label: 'Inner Melbourne' },
+      { value: 'South East Melbourne VIC', label: 'South East Melbourne' },
+      { value: 'Western Melbourne VIC', label: 'Western Melbourne' },
+      { value: 'Mornington Peninsula VIC', label: 'Mornington Peninsula' },
+      { value: 'Geelong VIC', label: 'Geelong' },
+      { value: 'Ballarat VIC', label: 'Ballarat' },
+      { value: 'Bendigo VIC', label: 'Bendigo' },
+    ],
+  },
+  {
+    label: 'QLD — Cities & Regions',
+    options: [
+      { value: 'Brisbane QLD', label: 'Brisbane' },
+      { value: 'Gold Coast QLD', label: 'Gold Coast' },
+      { value: 'Sunshine Coast QLD', label: 'Sunshine Coast' },
+      { value: 'Cairns QLD', label: 'Cairns' },
+      { value: 'Townsville QLD', label: 'Townsville' },
+      { value: 'Toowoomba QLD', label: 'Toowoomba' },
+    ],
+  },
+  {
+    label: 'WA — Cities & Regions',
+    options: [
+      { value: 'Perth WA', label: 'Perth' },
+      { value: 'South Perth WA', label: 'South Perth' },
+      { value: 'Northern Suburbs Perth WA', label: 'Northern Suburbs (Perth)' },
+      { value: 'Southern Suburbs Perth WA', label: 'Southern Suburbs (Perth)' },
+      { value: 'Fremantle WA', label: 'Fremantle' },
+      { value: 'Mandurah WA', label: 'Mandurah' },
+    ],
+  },
+  {
+    label: 'SA — Cities & Regions',
+    options: [
+      { value: 'Adelaide SA', label: 'Adelaide' },
+      { value: 'Northern Adelaide SA', label: 'Northern Adelaide' },
+      { value: 'Southern Adelaide SA', label: 'Southern Adelaide' },
+    ],
+  },
+  {
+    label: 'TAS — Cities & Regions',
+    options: [
+      { value: 'Hobart TAS', label: 'Hobart' },
+      { value: 'Launceston TAS', label: 'Launceston' },
+    ],
+  },
+  {
+    label: 'ACT & NT',
+    options: [
+      { value: 'Canberra ACT', label: 'Canberra' },
+      { value: 'Darwin NT', label: 'Darwin' },
+    ],
+  },
+]
 
 interface BriefComposerProps {
   defaultBrandId?: string
@@ -208,6 +320,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [heygenSettings, setHeygenSettings] = useState<HeyGenVideoSettings>(defaultHeyGenSettings())
   const [approvedAvatarScript, setApprovedAvatarScript] = useState<string | null>(null)
   const createVideoButtonRef = useRef<HTMLDivElement>(null)
+  /** Prevents double Create brief clicks while soft-nav is wedged / in-flight. */
+  const creatingBriefRef = useRef(false)
   const [generatingNotes, setGeneratingNotes] = useState(false)
   const [scriptBuildMode, setScriptBuildMode] = useState<'manual' | 'pdf' | 'custom' | 'website'>('manual')
   const [pdfFile, setPdfFile] = useState<File | null>(null)
@@ -340,6 +454,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const hasBrands = brandOptions.length > 0
   const selectedBrand = (brands ?? []).find((brand) => brand.id === watch('brand_id'))
 
+  const resolvedBrandFacts: BrandFacts | null = useMemo(() => {
+    if (websiteBrand?.brand_facts) return websiteBrand.brand_facts
+    return brandFactsFromVoiceRules(selectedBrand?.voice_rules)
+  }, [websiteBrand, selectedBrand])
+
   const handleSuggestAdAngles = async (silent = false) => {
     const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
     if (campaignName.length < 2) {
@@ -402,6 +521,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         website_url: result.source_url || url,
         scraped_from: 'firecrawl',
         scraped_at: new Date().toISOString(),
+        brand_facts: result.brand_facts || null,
       }
 
       let savedBrand
@@ -466,6 +586,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       setValue('brand_id', savedBrand.id, { shouldValidate: true })
       setValue('website_url', result.source_url || url)
 
+      // Business fill: prefer scraped niche / service location when fields are empty.
+      if (!(watch('niche') || '').trim() && result.niche) {
+        setValue('niche', result.niche, { shouldValidate: true })
+      }
+      if (!(watch('geography') || '').trim() && result.brand_facts) {
+        const areas = result.brand_facts.service_areas || result.brand_facts.locations || []
+        if (areas.length) {
+          setValue('geography', areas.slice(0, 2).join(', '), { shouldValidate: true })
+        }
+      }
+      if (!(watch('offer') || '').trim() && result.brand_facts?.offers?.length) {
+        setValue('offer', result.brand_facts.offers.slice(0, 2).join(' · '), { shouldValidate: true })
+      }
+
+      const factsSummary = summarizeBrandFacts(result.brand_facts)
+      if (factsSummary) {
+        toast.success(`Brand facts ready — ${factsSummary.slice(0, 120)}`)
+      }
       if (result.warning) toast(result.warning, { icon: '⚠️' })
     } catch (err) {
       toast.error(extractApiError(err) || 'Could not fetch brand from website')
@@ -736,6 +874,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
+        geography: (d.geography ?? '').trim() || undefined,
+        brand_facts: resolvedBrandFacts ?? undefined,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
         hook_frameworks: slotAngle ? [slotAngle] : (d.hook_frameworks ?? []),
         variant_count: 1,
@@ -805,6 +945,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         objective_id: d.objective_id ?? '',
         cta: d.cta ?? '',
         offer: imageCampaignOffer.trim() || undefined,
+        geography: (d.geography ?? '').trim() || undefined,
+        brand_facts: resolvedBrandFacts ?? undefined,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
         hook_frameworks: d.hook_frameworks ?? [],
         variant_count: imageVariantSlots.length,
@@ -902,6 +1044,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }
 
   const onSubmit = async (data: FormData) => {
+    if (creatingBriefRef.current) return
     if (!catalog) {
       toast.error('Still loading models — wait a moment and try again.')
       return
@@ -913,7 +1056,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     const isPdfMode = scriptBuildMode === 'pdf' && wantsVidOnSubmitEarly
     const isCustomMode = scriptBuildMode === 'custom' && wantsVidOnSubmitEarly
     const isWebsiteMode = scriptBuildMode === 'website' && wantsVidOnSubmitEarly
-    const isAlternateMode = isPdfMode || isCustomMode
+    const isAlternateMode = isPdfMode || isCustomMode || isWebsiteMode
 
     if (!isAlternateMode) {
       const manualError = validateManualFields(data)
@@ -963,6 +1106,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         return
       }
     }
+
+    creatingBriefRef.current = true
 
     const fill = (s: string | undefined, minLen: number, placeholder: string) => {
       const t = (s ?? '').trim()
@@ -1028,6 +1173,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             website_url: websiteBrand.source_url || d.website_url || '',
             scraped_from: 'firecrawl',
             scraped_at: new Date().toISOString(),
+            brand_facts: websiteBrand.brand_facts || null,
           },
         })
         brandId = created.id
@@ -1178,9 +1324,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           : 'Brief created — opening it now…'
       )
 
-      // Land on the new brief (Generate video is on that page). No list search / refresh needed.
-      router.push(`/briefs/${brief.id}?autogenerate=1`)
+      // Hard navigate: soft router.push can hang after create (sidebar Links also freeze).
+      // Full page load resets Next App Router transition state.
+      try {
+        document.body.style.overflow = ''
+      } catch {
+        /* ignore */
+      }
+      const dest = `/briefs/${brief.id}?autogenerate=1`
+      window.location.assign(dest)
     } catch (err: unknown) {
+      creatingBriefRef.current = false
       toast.error(extractApiError(err) || 'Failed to create brief')
     }
   }
@@ -1281,6 +1435,30 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               error={errors.niche?.message}
               {...register('niche')}
             />
+
+            {/* Service Location — AU state/city picker below Niche */}
+            <div>
+              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Service Location</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Select
+                  placeholder="— Pick an AU state or city —"
+                  groups={AU_GEO_GROUPS}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    if (val) setValue('geography', val, { shouldValidate: true })
+                  }}
+                />
+                <Input
+                  placeholder="Or type a suburb / region (e.g. Gold Coast QLD)"
+                  error={errors.geography?.message}
+                  {...register('geography')}
+                />
+              </div>
+              <p className="mt-1 text-[10px] text-mid">
+                Selecting a state or city sets the location for ad copy and image scenes. Override in the text field if needed.
+              </p>
+            </div>
+
             <p className="text-[10px] text-mid -mt-1">
               Industry = what your brand is. Niche = who/what this campaign targets.
               Objective drives the action (e.g. Conversions/Purchase → end customers, not other brokers).
@@ -1344,9 +1522,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                     </Button>
                   </div>
                   <p className="text-[11px] text-mid">
-                    Fetches colours &amp; logo with Firecrawl, then <strong>saves into Brand Kit</strong> so
-                    you can reuse it next time without fetching again. Industry and niche stay yours to type
-                    above.
+                    Fetches colours, logo, <strong>services, locations, reviews &amp; rates</strong> with Firecrawl,
+                    then <strong>saves into Brand Kit</strong> so ads can use verified facts only (ACCC-safe).
                   </p>
                   {websiteBrand && (
                     <div className="rounded-xl border border-accent/25 bg-accent/5 p-3 flex flex-wrap items-center gap-3">
@@ -1385,6 +1562,25 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 </div>
               )}
             </div>
+
+            {resolvedBrandFacts && summarizeBrandFacts(resolvedBrandFacts) && (
+              <div className="rounded-xl border border-border bg-surface-elevated/80 p-3 space-y-1.5">
+                <p className="text-xs font-bold text-navy uppercase tracking-wide">
+                  Verified brand facts
+                  {resolvedBrandFacts.confidence ? (
+                    <span className="ml-2 font-medium normal-case tracking-normal text-mid">
+                      · confidence {resolvedBrandFacts.confidence}
+                    </span>
+                  ) : null}
+                </p>
+                <p className="text-[11px] text-charcoal leading-relaxed">
+                  {summarizeBrandFacts(resolvedBrandFacts)}
+                </p>
+                <p className="text-[10px] text-mid">
+                  These facts feed ICP + image prompts. Missing items will not be invented in ad copy.
+                </p>
+              </div>
+            )}
 
             <Select
               label="Objective"
@@ -1789,7 +1985,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               {...register('audience_type')}
             />
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Input label="Geography" placeholder="United States" error={errors.geography?.message} {...register('geography')} />
+              <Input label="Geography" placeholder="e.g. Perth WA, Sydney NSW" error={errors.geography?.message} {...register('geography')} />
               <Input label="Age Range" placeholder="28 – 55" error={errors.age_range?.message} {...register('age_range')} />
               <Input label="Languages" placeholder="English" error={errors.languages?.message} {...register('languages')} />
             </div>

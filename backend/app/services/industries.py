@@ -8,7 +8,7 @@ CLIENT_INDUSTRY_LABELS: dict[str, str] = {
     "retail": "Retail & E-commerce",
     "dtc": "DTC E-commerce",
     "saas": "SaaS / B2B Tech",
-    "local": "Local / Trades",
+    "local": "Trade Services",
     "pro_services": "Professional Services",
     "automotive": "Automotive",
     "education": "Education",

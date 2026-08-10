@@ -56,6 +56,10 @@ def _guess_industry_from_text(text: str) -> str:
         ("plumbing", "trade"),
         ("electrician", "trade"),
         ("construction", "trade"),
+        ("hvac", "trade"),
+        ("tradie", "trade"),
+        ("trade services", "trade"),
+        ("hipages", "trade"),
         ("marketing", "digital_marketing"),
         ("agency", "digital_marketing"),
         ("retail", "retail"),
@@ -231,6 +235,21 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
     if not branding:
         logger.warning("Firecrawl returned no branding object for %s — check API key / plan", url)
 
+    brand_facts: dict[str, Any] = {}
+    try:
+        from app.services.brand_facts_service import extract_brand_facts
+
+        brand_facts = await extract_brand_facts(
+            markdown=markdown or str(personality.get("targetAudience") or ""),
+            brand_name=brand_name or urlparse(url).netloc,
+            page_title=page_title,
+            industry=industry or "",
+            niche=niche or "",
+        )
+    except Exception as exc:
+        logger.warning("Brand facts extraction failed for %s: %s", url, exc)
+        brand_facts = {}
+
     return {
         "source_url": url,
         "brand_name": brand_name or urlparse(url).netloc,
@@ -243,6 +262,7 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         "description": str(metadata.get("description") or metadata.get("ogDescription") or "")[:500],
         "provider": "firecrawl",
         "color_scheme": branding.get("colorScheme"),
+        "brand_facts": brand_facts,
     }
 
 
@@ -264,6 +284,20 @@ async def _fetch_via_fallback(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     favicon = f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
 
+    brand_facts: dict[str, Any] = {}
+    try:
+        from app.services.brand_facts_service import extract_brand_facts
+
+        brand_facts = await extract_brand_facts(
+            markdown=body,
+            brand_name=brand_name,
+            page_title=str(page.get("title") or ""),
+            industry=industry or "",
+            niche=niche or "",
+        )
+    except Exception as exc:
+        logger.warning("Brand facts extraction failed (fallback) for %s: %s", url, exc)
+
     return {
         "source_url": url,
         "brand_name": brand_name,
@@ -276,4 +310,5 @@ async def _fetch_via_fallback(url: str) -> dict[str, Any]:
         "description": str(page.get("description") or "")[:500],
         "provider": "fallback",
         "warning": "FIRECRAWL_API_KEY not set — colors/logo are estimated. Add Firecrawl for accurate brand extraction.",
+        "brand_facts": brand_facts,
     }

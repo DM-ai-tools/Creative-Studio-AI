@@ -10,8 +10,12 @@ interface VariantTileProps {
   onApprove(id: string): void
   onReject(id: string): void
   onDelete?(id: string): void
+  /** Retry this variant only (image). */
   onRegenerate?(): void
+  /** Open batch regenerate modal. */
+  onRegenerateBatch?(): void
   onView(variant: Variant): void
+  isRegenerating?: boolean
 }
 
 const complianceBadge: Record<ComplianceStatus, { variant: 'green' | 'red' | 'amber' | 'gray'; label: string }> = {
@@ -27,7 +31,9 @@ export default function VariantTile({
   onReject,
   onDelete,
   onRegenerate,
+  onRegenerateBatch,
   onView,
+  isRegenerating,
 }: VariantTileProps) {
   const cb = complianceBadge[variant.compliance_status as ComplianceStatus] ?? complianceBadge.PENDING
   const gradientClass = getFormatColor(variant.format)
@@ -62,6 +68,8 @@ export default function VariantTile({
 
   const failureMessage = isMotionVariant ? videoFailureMessage : imageFailureMessage
   const failureLabel = isMotionVariant ? 'Video failed' : 'Image failed'
+  const showImageRetry = !isMotionVariant && Boolean(imageFailureMessage) && Boolean(onRegenerate)
+  const busy = Boolean(isRegenerating)
 
   // Inline aspect classes so Tailwind scanner always includes them
   const aspectClass = isLandscape
@@ -99,9 +107,35 @@ export default function VariantTile({
             decoding="async"
           />
         ) : failureMessage ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-amber-950/90">
-            <span className="text-amber-200 text-[10px] font-bold uppercase tracking-wide mb-1">{failureLabel}</span>
-            <p className="text-white text-[10px] leading-snug">{failureMessage}</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center bg-amber-950/90">
+            {busy ? (
+              <>
+                <span className="text-amber-200 text-[10px] font-bold uppercase tracking-wide">Retrying image…</span>
+                <p className="text-white/80 text-[10px] leading-snug">This variant only — others stay as they are.</p>
+              </>
+            ) : (
+              <>
+                <span className="text-amber-200 text-[10px] font-bold uppercase tracking-wide mb-1">{failureLabel}</span>
+                <p className="text-white text-[10px] leading-snug">{failureMessage}</p>
+                {showImageRetry && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    className="mt-1"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onRegenerate?.()
+                    }}
+                  >
+                    Retry this image
+                  </Button>
+                )}
+              </>
+            )}
+          </div>
+        ) : busy ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-navy/80">
+            <span className="text-mint text-[10px] font-bold uppercase tracking-wide">Generating image…</span>
           </div>
         ) : (
           <span className="text-white text-4xl opacity-60">▶</span>
@@ -163,10 +197,26 @@ export default function VariantTile({
               size="sm"
               variant="outline"
               className="!text-white !border-white/60 hover:!bg-white/10"
-              onClick={(e) => { e.stopPropagation(); onRegenerate() }}
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation()
+                onRegenerate()
+              }}
             >
-              Regenerate…
+              {showImageRetry ? 'Retry this image' : 'Regenerate this…'}
             </Button>
+          )}
+          {onRegenerateBatch && (
+            <button
+              type="button"
+              className="text-[10px] text-white/70 hover:text-white underline"
+              onClick={(e) => {
+                e.stopPropagation()
+                onRegenerateBatch()
+              }}
+            >
+              Generate new variants…
+            </button>
           )}
         </div>
       </div>
@@ -193,8 +243,21 @@ export default function VariantTile({
       )}
 
       {!isMotionVariant && imageFailureMessage && (
-        <div className="px-3 py-1.5 border-t border-amber-200 bg-amber-50">
-          <p className="text-[9px] text-amber-900 leading-snug">{imageFailureMessage}</p>
+        <div className="px-3 py-1.5 border-t border-amber-200 bg-amber-50 flex items-start justify-between gap-2">
+          <p className="text-[9px] text-amber-900 leading-snug flex-1">{imageFailureMessage}</p>
+          {onRegenerate && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation()
+                onRegenerate()
+              }}
+              className="shrink-0 text-[9px] font-bold text-mint hover:underline disabled:opacity-50"
+            >
+              {busy ? 'Retrying…' : 'Retry image'}
+            </button>
+          )}
         </div>
       )}
 
@@ -211,16 +274,17 @@ export default function VariantTile({
               Delete
             </button>
           )}
-          {variant.status === 'REJECTED' && onRegenerate && (
+          {(variant.status === 'FAILED' || variant.status === 'REJECTED' || showImageRetry) && onRegenerate && (
             <button
               type="button"
+              disabled={busy}
               onClick={(e) => { e.stopPropagation(); onRegenerate() }}
-              className="text-[9px] font-bold text-mint hover:underline"
+              className="text-[9px] font-bold text-mint hover:underline disabled:opacity-50"
             >
-              Regenerate
+              {busy ? 'Retrying…' : showImageRetry ? 'Retry image' : 'Regenerate'}
             </button>
           )}
-          <span className="text-[9px] text-lt capitalize">{variant.status}</span>
+          <span className="text-[9px] text-lt capitalize">{busy ? 'generating' : variant.status}</span>
         </div>
       </div>
     </div>

@@ -49,10 +49,13 @@ class AIService:
         if not settings.OPENROUTER_API_KEY:
             return self._mock_ad_copy(brief, format_type)
 
-        system_prompt = f"""You are an expert Meta Ads copywriter. Generate ad creative copy that is:
+        system_prompt = f"""You are an expert Meta Ads copywriter for Australian brands. Generate ad creative copy that is:
+- Australian English only — Aussie spelling (organise, colour, centre) and natural Aussie phrasing
+- Catchy and scroll-stopping — not flat US corporate brochure speak
 - On-brand: {brand_voice or 'Engaging and professional'}
 - Format-optimized: {format_type} ad
 - Never uses these words: {', '.join(forbidden_words) if forbidden_words else 'none'}
+- Prefer CTAs like "Book free quote", "Ring us", "Find out more" over "Call Now" / "Learn More" when they fit
 
 Return ONLY valid JSON with these fields:
 {{
@@ -85,7 +88,13 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             raw = response.choices[0].message.content or ""
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
-                return json.loads(match.group())
+                from app.services.australian_copy import enforce_australian_english_copy
+
+                data = json.loads(match.group())
+                for key in ("hook", "headline", "body_copy", "cta"):
+                    if key in data and isinstance(data[key], str):
+                        data[key] = enforce_australian_english_copy(data[key])
+                return data
         except Exception:
             pass
 

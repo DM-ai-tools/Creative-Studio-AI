@@ -1,7 +1,8 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -11,9 +12,16 @@ from app.services.ai_service import ai_service
 from app.services.brand_prompt import enrich_brief_with_brand
 from app.services.brand_service import BrandService
 from app.services.brief_service import BriefService
+from app.services.generation_job import run_regenerate_variant_image
 from app.services.variant_service import VariantService
 
 router = APIRouter(prefix="/variants", tags=["variants"], redirect_slashes=False)
+
+
+class RegenerateImageRequest(BaseModel):
+    """Optional override — otherwise reuses the model stored on the variant / brief."""
+    image_model: str | None = Field(default=None, description="Image model id from catalog")
+
 
 
 def _to_variant_response(variant, *, slim: bool = False) -> VariantResponse:
@@ -145,6 +153,51 @@ async def fix_variant_portrait(
         current_user.tenant_id,
         VariantUpdate(generation_params=pipeline),
     )
+
+
+@router.post("/{variant_id}/regenerate-image", response_model=VariantResponse)
+async def regenerate_variant_image(
+    variant_id: UUID,
+    background_tasks: BackgroundTasks,
+    data: RegenerateImageRequest = RegenerateImageRequest(),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retry ONLY this variant's image — keeps copy/hook/CTA and does not touch other variants.
+    Runs in the background; poll the variant until status is READY or FAILED.
+    """
+    variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
+    if variant.format in {"reel", "video"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Use Generate video for reel/video variants. This endpoint retries still images only.",
+        )
+    if variant.status == "GENERATING":
+        return _to_variant_response(variant)
+
+    params = dict(variant.generation_params or {})
+    pipeline = dict(params.get("pipeline") or {})
+    prev_img = pipeline.get("image") if isinstance(pipeline.get("image"), dict) else {}
+    pipeline["image"] = {
+        **(prev_img or {}),
+        "status": "generating",
+        "url": None,
+        "error": None,
+    }
+    params["pipeline"] = pipeline
+    variant.generation_params = params
+    variant.status = "GENERATING"
+    await db.commit()
+    await db.refresh(variant)
+
+    background_tasks.add_task(
+        run_regenerate_variant_image,
+        variant_id=variant_id,
+        tenant_id=current_user.tenant_id,
+        image_model=data.image_model,
+    )
+    return _to_variant_response(variant)
 
 
 @router.post("/{variant_id}/regenerate", response_model=VariantResponse)

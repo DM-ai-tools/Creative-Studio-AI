@@ -16,7 +16,7 @@ INDUSTRY_DEFAULT_CTA: dict[str, str] = {
     "education": "Enroll Now",
     "beauty": "Book Appointment",
     "construction": "Get Free Quote",
-    "local": "Book Now",
+    "local": "Book Free Quote",
     "pro_services": "Book Consultation",
     "automotive": "Book Test Drive",
     "food_beverage": "Order Now",

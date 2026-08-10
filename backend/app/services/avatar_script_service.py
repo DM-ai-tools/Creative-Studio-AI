@@ -17,6 +17,7 @@ from app.schemas.avatar_script import (
 )
 
 from app.services.australian_copy import (
+    ACCC_COMPLIANCE_RULES,
     AUSTRALIAN_ENGLISH_BRIEF_RULES,
     AUSTRALIAN_ENGLISH_SCRIPT_RULES,
 )
@@ -614,7 +615,8 @@ Rules:
 - Never use: {', '.join(req.forbidden_words) if req.forbidden_words else 'none'}
 - Plain text in notes, no timestamps, no markdown
 - Return pure JSON only — no preamble, no explanation
-{AUSTRALIAN_ENGLISH_BRIEF_RULES}{stats_rule}"""
+{AUSTRALIAN_ENGLISH_BRIEF_RULES}{stats_rule}
+{ACCC_COMPLIANCE_RULES}"""
     elif req.purpose == "visual_cues":
         system = f"""You write visual cues and on-screen text directions for a {req.target_seconds}-second avatar video ad.
 Return ONLY valid JSON: {{ "notes": "single block of 3-6 lines" }}
@@ -734,6 +736,7 @@ Shot types you can use: Close-up | Medium shot | Wide shot | Over-shoulder | POV
             system = f"""You write spoken-word scripts for HeyGen avatar video ads.
 
 {AUSTRALIAN_ENGLISH_SCRIPT_RULES}
+{ACCC_COMPLIANCE_RULES}
 {source_rule}
 
 Output the script as plain text lines ONLY — no JSON, no markdown, no preamble.
@@ -757,6 +760,7 @@ Rules:
             system = f"""You write spoken-word scripts for HeyGen avatar video ads.
 
 {AUSTRALIAN_ENGLISH_SCRIPT_RULES}
+{ACCC_COMPLIANCE_RULES}
 {source_rule}
 
 Return ONLY valid JSON (no preamble, no markdown):

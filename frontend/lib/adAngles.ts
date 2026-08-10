@@ -9,19 +9,21 @@ export const OBJECTIVE_DEFAULT_ANGLES: Record<string, string[]> = {
   retention: ['social_proof', 'founder_led', 'testimonial'],
 }
 
-/** Rotate selected angles across N variants — one distinct angle per slot when possible. */
+/** Rotate selected angles across N variants — one distinct angle per slot when possible.
+ *  User selection wins 1:1 (2 variants + 2 angles → those exact two). */
 export function assignAnglesToVariants(
   selected: string[],
   variantCount: number,
   objectiveId?: string
 ): string[] {
   const n = Math.max(1, Math.min(20, variantCount || 1))
-  let pool = selected.filter(Boolean)
-  if (!pool.length) {
-    const defaults = OBJECTIVE_DEFAULT_ANGLES[objectiveId ?? ''] ?? OBJECTIVE_DEFAULT_ANGLES.conversions
-    pool = defaults.slice(0, Math.max(n, 2))
+  const pool = selected.filter(Boolean)
+  if (pool.length) {
+    return Array.from({ length: n }, (_, i) => pool[i % pool.length])
   }
-  return Array.from({ length: n }, (_, i) => pool[i % pool.length])
+  const defaults = OBJECTIVE_DEFAULT_ANGLES[objectiveId ?? ''] ?? OBJECTIVE_DEFAULT_ANGLES.conversions
+  const fallback = defaults.slice(0, Math.max(n, 2))
+  return Array.from({ length: n }, (_, i) => fallback[i % fallback.length])
 }
 
 export function labelForAngle(id: string, options?: { id: string; label: string }[]): string {

@@ -16,7 +16,7 @@ const STEPS = ['Brand', 'Connect', 'First Brief']
 const INDUSTRY_OPTIONS = [
   { value: 'dtc', label: 'DTC E-commerce' },
   { value: 'saas', label: 'SaaS / B2B' },
-  { value: 'local', label: 'Local / Trades' },
+  { value: 'local', label: 'Trade Services' },
   { value: 'pro_services', label: 'Pro Services' },
   { value: 'digital_marketing', label: 'Digital Marketing' },
   { value: 'general', label: 'General' },

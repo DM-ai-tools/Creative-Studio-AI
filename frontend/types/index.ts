@@ -193,6 +193,28 @@ export interface SuggestAdAnglesResult {
   source?: 'ai' | 'rules' | string
 }
 
+export interface BrandFacts {
+  services?: string[]
+  service_areas?: string[]
+  locations?: string[]
+  offers?: string[]
+  rates_or_pricing?: string[]
+  reviews?: {
+    rating?: number | null
+    count?: number | null
+    source?: string | null
+    highlights?: string[]
+  }
+  credentials?: string[]
+  years_in_business?: string | null
+  phone?: string | null
+  cta_phrases?: string[]
+  unique_selling_points?: string[]
+  do_not_claim?: string[]
+  source_summary?: string
+  confidence?: string
+}
+
 export interface WebsiteBrandFetchResult {
   source_url: string
   brand_name: string
@@ -205,6 +227,7 @@ export interface WebsiteBrandFetchResult {
   description?: string
   provider?: string
   warning?: string | null
+  brand_facts?: BrandFacts | null
 }
 
 export interface IcpImagePlanResult {

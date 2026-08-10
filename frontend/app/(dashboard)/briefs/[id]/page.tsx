@@ -88,7 +88,9 @@ function PipelineNode({ label, state }: { label: string; state: 'done' | 'run' |
 }
 
 export default function BriefDetailPage() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams()
+  const idRaw = params?.id
+  const id = Array.isArray(idRaw) ? idRaw[0] : String(idRaw || '')
   const router = useRouter()
   const { setActiveBrandId } = useActiveBrand()
   const [isGenerating, setIsGenerating] = useState(false)
@@ -115,14 +117,20 @@ export default function BriefDetailPage() {
     ttlMs: API_CACHE_TTL.catalog,
   })
   const { data: brief, isLoading: briefLoading, refetch: refetchBrief } = useApi(
-    () => briefsApi.get(id),
+    () => {
+      if (!id) return Promise.reject(new Error('Missing brief id'))
+      return briefsApi.get(id)
+    },
     [id],
-    { cacheKey: `brief/${id}`, ttlMs: API_CACHE_TTL.briefs }
+    { cacheKey: id ? `brief/${id}` : undefined, ttlMs: API_CACHE_TTL.briefs }
   )
   const { data: variants, isLoading: variantsLoading, refetch: refetchVariants } = useApi(
-    () => variantsApi.list({ brief_id: id }),
+    () => {
+      if (!id) return Promise.resolve([] as Variant[])
+      return variantsApi.list({ brief_id: id })
+    },
     [id],
-    { cacheKey: `variants/brief/${id}`, ttlMs: API_CACHE_TTL.variants }
+    { cacheKey: id ? `variants/brief/${id}` : undefined, ttlMs: API_CACHE_TTL.variants }
   )
 
   const { data: brand } = useApi(async () => {
@@ -450,6 +458,51 @@ export default function BriefDetailPage() {
       toast.error('Failed to delete')
     }
   }
+
+  const [retryingVariantId, setRetryingVariantId] = useState<string | null>(null)
+
+  const handleRetryVariantImage = async (variantId: string) => {
+    if (!genSettings?.imageModel && !(brief?.key_benefits as Record<string, unknown> | undefined)?.image_model) {
+      // Still allow — backend falls back to model stored on the variant
+    }
+    setRetryingVariantId(variantId)
+    try {
+      await variantsApi.regenerateImage(variantId, {
+        image_model: genSettings?.imageModel || undefined,
+      })
+      toast.success('Retrying this image only — other variants stay as they are')
+      void refetchVariants()
+    } catch (err: unknown) {
+      setRetryingVariantId(null)
+      toast.error(extractApiError(err) || 'Could not retry image')
+    }
+  }
+
+  // Poll while any single-variant image retry is in flight.
+  useEffect(() => {
+    const generating = (variants ?? []).some((v) => v.status === 'GENERATING')
+    if (!generating && !retryingVariantId) return
+    const tick = () => {
+      void refetchVariants({ background: true })
+    }
+    tick()
+    const timer = window.setInterval(tick, 3_000)
+    return () => window.clearInterval(timer)
+  }, [variants, retryingVariantId, refetchVariants])
+
+  useEffect(() => {
+    if (!retryingVariantId || !variants) return
+    const v = variants.find((x) => x.id === retryingVariantId)
+    if (!v) return
+    if (v.status === 'READY' || v.status === 'FAILED' || v.status === 'APPROVED') {
+      setRetryingVariantId(null)
+      if (v.status === 'READY' || v.status === 'APPROVED') {
+        toast.success('Image ready for this variant')
+      } else if (v.status === 'FAILED') {
+        toast.error('Image retry failed — check model / credits, then try again')
+      }
+    }
+  }, [variants, retryingVariantId])
 
   const handleReplaceScriptPdf = async () => {
     if (!replacePdfFile) {
@@ -824,7 +877,9 @@ export default function BriefDetailPage() {
             onApprove={handleApprove}
             onReject={handleReject}
             onDelete={handleDeleteVariant}
-            onRegenerate={() => setShowRegenerateModal(true)}
+            onRegenerate={(variantId) => void handleRetryVariantImage(variantId)}
+            onRegenerateBatch={() => setShowRegenerateModal(true)}
+            regeneratingId={retryingVariantId}
             onView={setSelectedVariant}
           />
         </div>
@@ -886,8 +941,9 @@ export default function BriefDetailPage() {
             }}
             onDelete={() => handleDeleteVariant(selectedVariant.id)}
             onRegenerate={() => {
+              const vid = selectedVariant.id
               setSelectedVariant(null)
-              setShowRegenerateModal(true)
+              void handleRetryVariantImage(vid)
             }}
           />
         </Modal>
@@ -1060,7 +1116,7 @@ function VariantDetailBody({
           onClick={onRegenerate}
           className="flex-1 min-w-[90px] border border-mint text-navy text-sm font-bold py-2 rounded-lg hover:bg-[rgba(0,194,168,0.08)]"
         >
-          Regenerate with new settings…
+          Retry this image
         </button>
         <button
           type="button"

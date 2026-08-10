@@ -47,8 +47,8 @@ export default function RegisterPage() {
 
   return (
     <>
-      <h2 className="text-xl font-bold text-navy mb-1">Create your workspace</h2>
-      <p className="text-xs text-lt mb-5">Start generating AI-powered Meta Ads</p>
+      <h2 className="text-xl font-bold text-navy mb-1">Create your account</h2>
+      <p className="text-xs text-lt mb-5">Join as a user and start generating AI-powered Meta Ads</p>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
         <Input label="Full name" placeholder="Jane Smith" error={errors.full_name?.message} {...register('full_name')} />

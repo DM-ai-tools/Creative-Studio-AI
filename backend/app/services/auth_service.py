@@ -1,4 +1,3 @@
-import re
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -10,11 +9,6 @@ from app.core.security import create_access_token, create_refresh_token, decode_
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
-
-
-def _make_slug(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug[:80]
 
 
 async def _build_token_response(user: User) -> TokenResponse:
@@ -36,31 +30,39 @@ def _resolve_login_email(identifier: str) -> str:
 
 class AuthService:
     @staticmethod
+    async def _default_workspace(db: AsyncSession) -> Tenant:
+        """Shared workspace owned by the platform admin — all self-serve signups join here."""
+        result = await db.execute(select(Tenant).where(Tenant.slug == "admin"))
+        tenant = result.scalar_one_or_none()
+        if tenant:
+            return tenant
+        tenant = Tenant(name="CreativeStudio Workspace", slug="admin")
+        db.add(tenant)
+        await db.flush()
+        return tenant
+
+    @staticmethod
     async def register(db: AsyncSession, data: RegisterRequest) -> TokenResponse:
-        existing = await db.execute(select(User).where(User.email == data.email))
+        email = data.email.strip().lower()
+        existing = await db.execute(select(User).where(User.email == email))
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
-        slug = _make_slug(data.tenant_name)
-        suffix = 0
-        base_slug = slug
-        while True:
-            res = await db.execute(select(Tenant).where(Tenant.slug == slug))
-            if not res.scalar_one_or_none():
-                break
-            suffix += 1
-            slug = f"{base_slug}-{suffix}"
+        # Never auto-create a second admin. Self-serve signup = member in the shared workspace.
+        # The only admin is the bootstrap account (settings.ADMIN_EMAIL).
+        if email == settings.ADMIN_EMAIL.strip().lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This email is reserved for the platform admin. Please sign in instead.",
+            )
 
-        tenant = Tenant(name=data.tenant_name, slug=slug)
-        db.add(tenant)
-        await db.flush()
-
+        tenant = await AuthService._default_workspace(db)
         user = User(
             tenant_id=tenant.id,
-            email=data.email,
+            email=email,
             hashed_password=hash_password(data.password),
             full_name=data.full_name,
-            role="admin",
+            role="member",
         )
         db.add(user)
         await db.flush()

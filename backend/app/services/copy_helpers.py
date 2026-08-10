@@ -19,7 +19,7 @@ VERTICAL_HOOK_TEMPLATES: dict[str, str] = {
     "education": "Learn with confidence",
     "food_beverage": "Taste the difference today",
     "automotive": "Drive away happy",
-    "local": "Trusted by your neighborhood",
+    "local": "Get the phone ringing with better jobs",
     "saas": "Work smarter, not harder",
     "pro_services": "Results you can measure",
     "construction": "Quality work, done right",
