@@ -79,6 +79,9 @@ async def run_brief_generation_job(
     until variants are saved.
     """
     data = GenerationRequest.model_validate(request_data)
+    from app.services.usage_tracker import set_usage_context
+
+    set_usage_context(tenant_id=str(tenant_id), operation="generation_job")
     async with AsyncSessionLocal() as db:
         try:
             brief = await BriefService.get_brief(db, brief_id, tenant_id)
@@ -698,6 +701,9 @@ async def run_regenerate_variant_image(
     Re-run ONLY the image step for one existing variant.
     Keeps hook/headline/CTA/copy — does not recreate sibling variants.
     """
+    from app.services.usage_tracker import set_usage_context
+
+    set_usage_context(tenant_id=str(tenant_id), operation="regenerate_variant_image")
     async with AsyncSessionLocal() as db:
         try:
             from app.services.brand_logo import resolve_video_logo_urls

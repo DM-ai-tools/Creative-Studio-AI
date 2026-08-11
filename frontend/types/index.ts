@@ -4,10 +4,81 @@ export interface User {
   full_name: string
   role: 'admin' | 'member' | 'viewer'
   tenant_id: string | null
+  tenant_name?: string | null
   is_active: boolean
   is_verified: boolean
   avatar_url?: string | null
+  last_login_at?: string | null
   created_at: string
+  brief_count?: number | null
+  variant_count?: number | null
+}
+
+export interface AdminStats {
+  is_platform_admin: boolean
+  clients: number
+  users: number
+  users_today: number
+  users_this_week: number
+  briefs: number
+  variants: number
+  brands: number
+  storage_bytes: number
+  storage_mb: number
+}
+
+export interface AdminClient {
+  id: string
+  name: string
+  slug: string
+  plan: string
+  is_active: boolean
+  user_count: number
+  brand_count: number
+  brief_count: number
+  variant_count: number
+  created_at: string
+  last_activity_at?: string | null
+}
+
+export interface UsageBucket {
+  name: string
+  calls: number
+  tokens: number
+  credits: number
+  cost_usd: number
+  failed: number
+}
+
+export interface UsageEventRow {
+  id: string
+  provider: string
+  model: string
+  operation: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  credits: number
+  cost_usd: number
+  success: boolean
+  error?: string | null
+  client?: string | null
+  created_at?: string | null
+}
+
+export interface AdminUsage {
+  totals: {
+    calls: number
+    failed_calls: number
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    credits: number
+    cost_usd: number
+  }
+  by_provider: UsageBucket[]
+  by_model: UsageBucket[]
+  recent: UsageEventRow[]
 }
 
 export interface Tenant {

@@ -32,9 +32,35 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 upload_dir = Path(settings.UPLOAD_DIR).resolve()
 
 
+@app.middleware("http")
+async def usage_context_middleware(request: Request, call_next):
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        try:
+            from jose import jwt
+            from app.services.usage_tracker import set_usage_context
+
+            payload = jwt.decode(
+                auth.split(" ", 1)[1],
+                settings.SECRET_KEY,
+                algorithms=[settings.ALGORITHM],
+            )
+            set_usage_context(
+                user_id=payload.get("sub"),
+                tenant_id=payload.get("tenant_id"),
+                operation=request.url.path,
+            )
+        except Exception:
+            pass
+    return await call_next(request)
+
+
 @app.on_event("startup")
 async def on_startup():
     from app.services.ffmpeg_util import ffmpeg_executable
+    from app.services.usage_tracker import install_openai_tracking
+
+    install_openai_tracking()
 
     upload_path = Path(settings.UPLOAD_DIR)
     upload_path.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
   SuggestAdAnglesResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
@@ -502,12 +502,16 @@ export const metaApi = {
 export const adminApi = {
   listUsers: () => api.get<User[]>('/admin/users').then((r) => r.data),
 
+  listClients: () => api.get<AdminClient[]>('/admin/clients').then((r) => r.data),
+
   updateRole: (userId: string, role: string) =>
     api.put<User>(`/admin/users/${userId}/role`, null, { params: { role } }).then((r) => r.data),
 
   deactivateUser: (userId: string) => api.delete(`/admin/users/${userId}`),
 
-  getStats: () => api.get('/admin/stats').then((r) => r.data),
+  getStats: () => api.get<AdminStats>('/admin/stats').then((r) => r.data),
+
+  getUsage: () => api.get<AdminUsage>('/admin/usage').then((r) => r.data),
 }
 
 export default api

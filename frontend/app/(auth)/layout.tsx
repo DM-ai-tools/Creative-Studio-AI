@@ -1,6 +1,6 @@
 import React from 'react'
+import { BrandMark } from '@/components/brand/BrandMark'
 import { AuthProvider } from '@/hooks/useAuth'
-import { IconSparkles } from '@/components/ui/icons'
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -21,13 +21,13 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
 
         <div className="relative w-full max-w-[420px] animate-slide-up">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-accent-gradient shadow-glow mb-4">
-              <IconSparkles className="w-7 h-7 text-white" />
+            <div className="inline-flex items-center justify-center mb-4">
+              <BrandMark size={56} className="rounded-2xl shadow-glow" />
             </div>
             <h1 className="text-2xl font-bold text-white tracking-tight">
-              Creative<span className="text-accent">Studio</span> AI
+              Creative<span className="text-accent">Studio</span>
             </h1>
-            <p className="text-subtle text-sm mt-2 font-medium">Premium AI creative engine for Meta Ads</p>
+            <p className="text-subtle text-sm mt-2 font-medium">AI Creative Engine</p>
           </div>
           <div className="glass-panel rounded-3xl p-8 md:p-10 border border-white/20 shadow-card">
             {children}

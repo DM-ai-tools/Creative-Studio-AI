@@ -1,3 +1,5 @@
+import re
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -11,12 +13,29 @@ from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 
 
-async def _build_token_response(user: User) -> TokenResponse:
+def _slugify_company(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:80]
+    return slug or "workspace"
+
+
+async def _user_response(db: AsyncSession, user: User, **extra) -> UserResponse:
+    if "tenant_name" in extra:
+        tenant_name = extra.pop("tenant_name")
+    elif user.tenant_id:
+        result = await db.execute(select(Tenant.name).where(Tenant.id == user.tenant_id))
+        tenant_name = result.scalar_one_or_none()
+    else:
+        tenant_name = None
+    data = UserResponse.model_validate(user)
+    return data.model_copy(update={"tenant_name": tenant_name, **extra})
+
+
+async def _build_token_response(db: AsyncSession, user: User) -> TokenResponse:
     payload = {"sub": str(user.id), "tenant_id": str(user.tenant_id), "role": user.role}
     return TokenResponse(
         access_token=create_access_token(payload),
         refresh_token=create_refresh_token(payload),
-        user=UserResponse.model_validate(user),
+        user=await _user_response(db, user),
     )
 
 
@@ -31,12 +50,39 @@ def _resolve_login_email(identifier: str) -> str:
 class AuthService:
     @staticmethod
     async def _default_workspace(db: AsyncSession) -> Tenant:
-        """Shared workspace owned by the platform admin — all self-serve signups join here."""
+        """Platform admin workspace only — not used for self-serve client signups."""
         result = await db.execute(select(Tenant).where(Tenant.slug == "admin"))
         tenant = result.scalar_one_or_none()
         if tenant:
             return tenant
         tenant = Tenant(name="CreativeStudio Workspace", slug="admin")
+        db.add(tenant)
+        await db.flush()
+        return tenant
+
+    @staticmethod
+    async def _workspace_for_company(db: AsyncSession, company_name: str) -> Tenant:
+        """Each client company gets its own tenant. Same company name joins the same workspace."""
+        name = (company_name or "").strip() or "New workspace"
+        base = _slugify_company(name)
+        if base == "admin":
+            base = "client-admin"
+
+        result = await db.execute(select(Tenant).where(Tenant.slug == base))
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+
+        slug = base
+        n = 2
+        while True:
+            taken = await db.execute(select(Tenant.id).where(Tenant.slug == slug))
+            if taken.scalar_one_or_none() is None:
+                break
+            slug = f"{base}-{n}"
+            n += 1
+
+        tenant = Tenant(name=name, slug=slug)
         db.add(tenant)
         await db.flush()
         return tenant
@@ -48,15 +94,13 @@ class AuthService:
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
-        # Never auto-create a second admin. Self-serve signup = member in the shared workspace.
-        # The only admin is the bootstrap account (settings.ADMIN_EMAIL).
         if email == settings.ADMIN_EMAIL.strip().lower():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This email is reserved for the platform admin. Please sign in instead.",
             )
 
-        tenant = await AuthService._default_workspace(db)
+        tenant = await AuthService._workspace_for_company(db, data.tenant_name)
         user = User(
             tenant_id=tenant.id,
             email=email,
@@ -67,7 +111,7 @@ class AuthService:
         db.add(user)
         await db.flush()
         await db.refresh(user)
-        return await _build_token_response(user)
+        return await _build_token_response(db, user)
 
     @staticmethod
     async def login(db: AsyncSession, data: LoginRequest) -> TokenResponse:
@@ -78,7 +122,9 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
         if not user.is_active:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account deactivated")
-        return await _build_token_response(user)
+        user.last_login_at = datetime.now(timezone.utc)
+        await db.flush()
+        return await _build_token_response(db, user)
 
     @staticmethod
     async def refresh(db: AsyncSession, refresh_token: str) -> TokenResponse:
@@ -89,7 +135,7 @@ class AuthService:
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-        return await _build_token_response(user)
+        return await _build_token_response(db, user)
 
     @staticmethod
     async def get_me(db: AsyncSession, user_id: UUID) -> UserResponse:
@@ -97,4 +143,4 @@ class AuthService:
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        return UserResponse.model_validate(user)
+        return await _user_response(db, user)

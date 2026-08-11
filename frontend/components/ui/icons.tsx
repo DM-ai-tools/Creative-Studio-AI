@@ -97,6 +97,15 @@ export function IconSparkles({ className }: IconProps) {
   )
 }
 
+export function IconUsage({ className }: IconProps) {
+  return (
+    <svg className={cn(base, className)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <path d="M4 19V5M4 19h16" strokeLinecap="round" />
+      <path d="M8 16v-5M12 16V8M16 16v-3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 export function IconHistory({ className }: IconProps) {
   return (
     <svg className={cn(base, className)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">

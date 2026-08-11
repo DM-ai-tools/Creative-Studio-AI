@@ -6,12 +6,11 @@ import Topbar from '@/components/layout/Topbar'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
-import Select from '@/components/ui/Select'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { timeAgo, formatFileSize } from '@/lib/utils'
-import type { User } from '@/types'
+import type { AdminClient, AdminStats, User } from '@/types'
 import { useRouter } from 'next/navigation'
 
 const ROLE_OPTIONS = [
@@ -29,6 +28,7 @@ export default function AdminPage() {
     () => adminApi.listUsers(), []
   )
   const { data: stats, isLoading: statsLoading } = useApi(() => adminApi.getStats(), [])
+  const { data: clients, isLoading: clientsLoading } = useApi(() => adminApi.listClients(), [])
 
   if (user?.role !== 'admin') {
     return (
@@ -63,74 +63,134 @@ export default function AdminPage() {
     }
   }
 
+  const s: AdminStats | null = stats
+  const clientRows: AdminClient[] = clients ?? []
+
   return (
     <div>
-      <Topbar title="Admin Dashboard" subtitle="Manage users, roles, and workspace settings" />
+      <Topbar
+        title="Admin Dashboard"
+        subtitle={s?.is_platform_admin
+          ? 'Track every client workspace, account, and what they are generating'
+          : 'Manage users and activity in this workspace'}
+      />
 
       <div className="p-5 space-y-4">
-        {/* Stats */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-3">
           {[
-            { label: 'Users', value: statsLoading ? '—' : stats?.users },
-            { label: 'Briefs', value: statsLoading ? '—' : stats?.briefs },
-            { label: 'Variants', value: statsLoading ? '—' : stats?.variants },
-            { label: 'Storage', value: statsLoading ? '—' : formatFileSize(stats?.storage_bytes ?? 0) },
-          ].map((s) => (
-            <Card key={s.label}>
-              <div className="text-xs font-bold text-lt uppercase tracking-wide mb-1">{s.label}</div>
-              <div className="text-2xl font-extrabold text-navy">{s.value}</div>
+            { label: 'Clients', value: statsLoading ? '—' : s?.clients },
+            { label: 'Accounts', value: statsLoading ? '—' : s?.users },
+            { label: 'New today', value: statsLoading ? '—' : s?.users_today },
+            { label: 'New this week', value: statsLoading ? '—' : s?.users_this_week },
+            { label: 'Brands', value: statsLoading ? '—' : s?.brands },
+            { label: 'Briefs', value: statsLoading ? '—' : s?.briefs },
+            { label: 'Variants', value: statsLoading ? '—' : s?.variants },
+            { label: 'Storage', value: statsLoading ? '—' : formatFileSize(s?.storage_bytes ?? 0) },
+          ].map((item) => (
+            <Card key={item.label}>
+              <div className="text-xs font-bold text-lt uppercase tracking-wide mb-1">{item.label}</div>
+              <div className="text-2xl font-extrabold text-navy">{item.value}</div>
             </Card>
           ))}
         </div>
 
-        {/* Users table */}
-        <Card title="Team Members" padding={false}>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="bg-light">
-                {['Name', 'Email', 'Role', 'Status', 'Joined', 'Actions'].map((h) => (
-                  <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {usersLoading
-                ? [...Array(3)].map((_, i) => (
-                    <tr key={i}><td colSpan={6} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
-                  ))
-                : (users ?? []).map((u: User) => (
-                    <tr key={u.id} className="border-b border-border hover:bg-light/50">
-                      <td className="px-4 py-2.5 font-semibold text-navy">{u.full_name}</td>
-                      <td className="px-4 py-2.5 text-mid">{u.email}</td>
-                      <td className="px-4 py-2.5">
-                        {u.id === user?.id ? (
-                          <Badge variant="blue">{u.role}</Badge>
-                        ) : (
-                          <select
-                            value={u.role}
-                            onChange={(e) => handleRoleChange(u.id, e.target.value)}
-                            disabled={updatingRole === u.id}
-                            className="text-xs border border-border rounded px-1.5 py-1 text-navy bg-white"
-                          >
-                            {ROLE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                          </select>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <Badge variant={u.is_active ? 'green' : 'red'}>{u.is_active ? 'Active' : 'Inactive'}</Badge>
-                      </td>
-                      <td className="px-4 py-2.5 text-lt whitespace-nowrap">{timeAgo(u.created_at)}</td>
-                      <td className="px-4 py-2.5">
-                        {u.id !== user?.id && u.is_active && (
-                          <Button size="sm" variant="danger" onClick={() => handleDeactivate(u.id)}>
-                            Deactivate
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
+        <Card title="Client workspaces" padding={false}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-light">
+                  {['Company', 'Users', 'Brands', 'Briefs', 'Variants', 'Last activity', 'Joined'].map((h) => (
+                    <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
                   ))}
-            </tbody>
-          </table>
+                </tr>
+              </thead>
+              <tbody>
+                {clientsLoading
+                  ? [...Array(3)].map((_, i) => (
+                      <tr key={i}><td colSpan={7} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
+                    ))
+                  : clientRows.length === 0
+                    ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-6 text-center text-mid">No client workspaces yet.</td>
+                      </tr>
+                    )
+                    : clientRows.map((c) => (
+                      <tr key={c.id} className="border-b border-border hover:bg-light/50">
+                        <td className="px-4 py-2.5">
+                          <div className="font-semibold text-navy">{c.name}</div>
+                          <div className="text-[10px] text-lt">{c.slug}</div>
+                        </td>
+                        <td className="px-4 py-2.5 text-navy font-semibold">{c.user_count}</td>
+                        <td className="px-4 py-2.5 text-mid">{c.brand_count}</td>
+                        <td className="px-4 py-2.5 text-mid">{c.brief_count}</td>
+                        <td className="px-4 py-2.5 text-mid">{c.variant_count}</td>
+                        <td className="px-4 py-2.5 text-lt whitespace-nowrap">
+                          {c.last_activity_at ? timeAgo(c.last_activity_at) : '—'}
+                        </td>
+                        <td className="px-4 py-2.5 text-lt whitespace-nowrap">{timeAgo(c.created_at)}</td>
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card title="User accounts" padding={false}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-light">
+                  {['Name', 'Email', 'Client', 'Role', 'Status', 'Briefs', 'Variants', 'Last login', 'Joined', 'Actions'].map((h) => (
+                    <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {usersLoading
+                  ? [...Array(3)].map((_, i) => (
+                      <tr key={i}><td colSpan={10} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
+                    ))
+                  : (users ?? []).map((u: User) => (
+                      <tr key={u.id} className="border-b border-border hover:bg-light/50">
+                        <td className="px-4 py-2.5 font-semibold text-navy">{u.full_name}</td>
+                        <td className="px-4 py-2.5 text-mid">{u.email}</td>
+                        <td className="px-4 py-2.5 text-navy">{u.tenant_name || '—'}</td>
+                        <td className="px-4 py-2.5">
+                          {u.id === user?.id ? (
+                            <Badge variant="blue">{u.role}</Badge>
+                          ) : (
+                            <select
+                              value={u.role}
+                              onChange={(e) => handleRoleChange(u.id, e.target.value)}
+                              disabled={updatingRole === u.id}
+                              className="text-xs border border-border rounded px-1.5 py-1 text-navy bg-white"
+                            >
+                              {ROLE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                            </select>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <Badge variant={u.is_active ? 'green' : 'red'}>{u.is_active ? 'Active' : 'Inactive'}</Badge>
+                        </td>
+                        <td className="px-4 py-2.5 text-mid">{u.brief_count ?? 0}</td>
+                        <td className="px-4 py-2.5 text-mid">{u.variant_count ?? 0}</td>
+                        <td className="px-4 py-2.5 text-lt whitespace-nowrap">
+                          {u.last_login_at ? timeAgo(u.last_login_at) : 'Never'}
+                        </td>
+                        <td className="px-4 py-2.5 text-lt whitespace-nowrap">{timeAgo(u.created_at)}</td>
+                        <td className="px-4 py-2.5">
+                          {u.id !== user?.id && u.is_active && (
+                            <Button size="sm" variant="danger" onClick={() => handleDeactivate(u.id)}>
+                              Deactivate
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
       </div>
     </div>

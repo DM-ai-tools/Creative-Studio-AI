@@ -31,6 +31,13 @@ async def export_to_meta(
       ad_set_name=data.ad_set_name.strip() if data.ad_set_name else None,
     )
   except RuntimeError as exc:
+    from app.services.usage_tracker import record_meta_export
+
+    record_meta_export(success=False, variant_count=len(data.variant_ids), error=str(exc))
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+  from app.services.usage_tracker import record_meta_export
+
+  record_meta_export(success=True, variant_count=len(data.variant_ids))
 
   return MetaExportResponse(**result)

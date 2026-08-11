@@ -8,6 +8,8 @@ from app.services.media.higgsfield_providers import (
     HiggsfieldImageProvider,
     HiggsfieldVideoProvider,
 )
+from app.services.media.openai_image_catalog import is_openai_image_model
+from app.services.media.openai_image_provider import OpenAIImageProvider
 from app.services.media.runway_providers import RunwayImageProvider, RunwayVideoProvider
 
 _image_providers: dict[str, ImageGenerationProvider] = {}
@@ -15,6 +17,10 @@ _video_providers: dict[str, VideoGenerationProvider] = {}
 
 
 def get_image_provider(model: str | None = None) -> ImageGenerationProvider:
+    if is_openai_image_model(model):
+        if "openai" not in _image_providers:
+            _image_providers["openai"] = OpenAIImageProvider()
+        return _image_providers["openai"]
     if is_higgsfield_image_model(model):
         if "higgsfield" not in _image_providers:
             _image_providers["higgsfield"] = HiggsfieldImageProvider()

@@ -6,7 +6,7 @@ class GenerationModelOption(BaseModel):
     label: str
     provider_model: str
     modality: str
-    provider: str | None = None  # runway | heygen | higgsfield — for grouped UI selects
+    provider: str | None = None  # openai | runway | heygen | higgsfield — for grouped UI selects
     # Estimated USD per generation unit (image = per still; video = per second when set).
     cost_usd: float | None = None
     # Optional: when video, cost is cost_usd * duration seconds.

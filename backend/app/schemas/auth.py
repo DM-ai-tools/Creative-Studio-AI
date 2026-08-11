@@ -27,10 +27,14 @@ class UserResponse(BaseModel):
     full_name: str
     role: str
     tenant_id: Optional[UUID]
+    tenant_name: Optional[str] = None
     is_active: bool
     is_verified: bool
     avatar_url: Optional[str]
+    last_login_at: Optional[datetime] = None
     created_at: datetime
+    brief_count: Optional[int] = None
+    variant_count: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

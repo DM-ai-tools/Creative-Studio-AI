@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     IMAGE_GENERATION_PROVIDER: str = "nano-banana-2"
     VIDEO_GENERATION_PROVIDER: str = "veo-3.1"
 
+    # Official OpenAI Images API (direct — not via Runway / Higgsfield / OpenRouter)
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+
     HEYGEN_API_KEY: str = ""
     HEYGEN_BASE_URL: str = "https://api.heygen.com"
     # v3 = Video Agent (dynamic scenes/backgrounds). v2 = flat-color talking head only.

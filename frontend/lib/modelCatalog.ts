@@ -2,11 +2,14 @@ import type { SelectOption, SelectOptionGroup } from '@/components/ui/Select'
 import type { GenerationModelOption } from '@/types'
 
 const PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI',
   runway: 'Runway',
   heygen: 'HeyGen',
   higgsfield: 'Higgsfield',
   other: 'Other',
 }
+
+const PROVIDER_ORDER = ['openai', 'runway', 'higgsfield', 'heygen', 'other']
 
 function modelOptionLabel(m: GenerationModelOption): string {
   if (typeof m.cost_usd !== 'number') return m.label
@@ -14,7 +17,7 @@ function modelOptionLabel(m: GenerationModelOption): string {
   return `${m.label} · $${m.cost_usd.toFixed(2)}/img`
 }
 
-/** Group catalog models by provider for optgroup selects (Runway / HeyGen / Higgsfield). */
+/** Group catalog models by provider for optgroup selects (OpenAI / Runway / HeyGen / Higgsfield). */
 export function buildModelSelectGroups(
   models: GenerationModelOption[] | undefined,
   fallback: SelectOption[]
@@ -35,10 +38,16 @@ export function buildModelSelectGroups(
       groups: undefined,
     }
   }
-  const groups: SelectOptionGroup[] = Array.from(byProvider.entries()).map(([provider, options]) => ({
-    label: PROVIDER_LABELS[provider] ?? provider,
-    options,
-  }))
+  const groups: SelectOptionGroup[] = Array.from(byProvider.entries())
+    .sort(([a], [b]) => {
+      const ia = PROVIDER_ORDER.indexOf(a)
+      const ib = PROVIDER_ORDER.indexOf(b)
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib)
+    })
+    .map(([provider, options]) => ({
+      label: PROVIDER_LABELS[provider] ?? provider,
+      options,
+    }))
   // Keep empty option from fallback if present (e.g. "Choose image model…")
   const empty = fallback.find((o) => o.value === '')
   return { options: empty ? [empty] : [], groups }

@@ -111,14 +111,42 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
         logo_on_light_url: str | None = None,
     ) -> dict:
         provider = get_image_provider(model)
-        return await provider.generate(
-            prompt=prompt,
-            tenant_id=tenant_id,
+        try:
+            result = await provider.generate(
+                prompt=prompt,
+                tenant_id=tenant_id,
+                model=model,
+                format_type=format_type,
+                logo_url=logo_url,
+                logo_on_light_url=logo_on_light_url,
+            )
+        except Exception as exc:
+            from app.services.usage_tracker import record_media_generation
+
+            record_media_generation(
+                provider=getattr(provider, "provider_id", None) or getattr(provider, "name", "image"),
+                model=model,
+                operation="generate_image",
+                success=False,
+                error=str(exc)[:2000],
+                tenant_id=tenant_id,
+            )
+            raise
+        from app.services.usage_tracker import record_media_generation
+
+        ok = (result or {}).get("status") in {"done", "ready", "ok", None} and not (result or {}).get("error")
+        if (result or {}).get("status") == "failed":
+            ok = False
+        record_media_generation(
+            provider=str((result or {}).get("provider") or getattr(provider, "provider_id", "image")),
             model=model,
-            format_type=format_type,
-            logo_url=logo_url,
-            logo_on_light_url=logo_on_light_url,
+            operation="generate_image",
+            success=ok,
+            error=str((result or {}).get("error") or "")[:2000] or None,
+            extra={"format": format_type},
+            tenant_id=tenant_id,
         )
+        return result
 
     async def generate_video_storyboard(
         self,
@@ -226,6 +254,31 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             source_image_url=source_image_url,
             duration_seconds=duration_seconds,
         )
+        try:
+            from app.services.usage_tracker import record_media_generation
+
+            vid_provider = str((result or {}).get("provider") or "")
+            ml = (model or "").lower()
+            if not vid_provider:
+                if "heygen" in ml:
+                    vid_provider = "heygen"
+                elif ml.startswith("hf-") or "higgsfield" in ml:
+                    vid_provider = "higgsfield"
+                else:
+                    vid_provider = "runway"
+            ok = (result or {}).get("status") == "done"
+            record_media_generation(
+                provider=vid_provider,
+                model=model,
+                operation="generate_video",
+                success=ok,
+                duration_seconds=float(duration or duration_seconds or 0),
+                error=str((result or {}).get("error") or "")[:2000] or None,
+                extra={"format": format_type},
+                tenant_id=tenant_id,
+            )
+        except Exception:
+            logger.debug("video usage record skipped", exc_info=True)
         from app.services.video_portrait import normalize_video_file, should_normalize_format
 
         # ── Step 1: Normalize frame BEFORE logo/stats so they render on a full-frame canvas ──

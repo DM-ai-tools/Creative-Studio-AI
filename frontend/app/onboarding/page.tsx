@@ -9,6 +9,7 @@ import TextArea from '@/components/ui/TextArea'
 import Select from '@/components/ui/Select'
 import { AuthProvider } from '@/hooks/useAuth'
 import { useApi } from '@/hooks/useApi'
+import { BrandMark } from '@/components/brand/BrandMark'
 import { brandsApi, briefsApi, metaApi } from '@/lib/api'
 
 const STEPS = ['Brand', 'Connect', 'First Brief']
@@ -116,8 +117,11 @@ function OnboardingContent() {
     <div className="min-h-screen bg-light flex items-center justify-center p-6">
       <div className="w-full max-w-xl">
         <div className="text-center mb-6">
-          <h1 className="text-2xl font-extrabold text-navy">Creative<span className="text-mint">Studio</span> AI</h1>
-          <p className="text-xs text-lt mt-1">Let's set up your workspace in 3 quick steps</p>
+          <div className="flex justify-center mb-3">
+            <BrandMark size={48} className="rounded-xl" />
+          </div>
+          <h1 className="text-2xl font-extrabold text-navy">Creative<span className="text-mint">Studio</span></h1>
+          <p className="text-xs text-lt mt-1">AI Creative Engine — set up your workspace in 3 steps</p>
         </div>
 
         <div className="bg-white rounded-2xl p-8 shadow-lg border border-border">

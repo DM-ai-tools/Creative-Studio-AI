@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import type { User } from '@/types'
+import { BrandMark } from '@/components/brand/BrandMark'
 import {
   IconDashboard,
   IconPalette,
@@ -15,8 +16,8 @@ import {
   IconRocket,
   IconSettings,
   IconLogOut,
-  IconSparkles,
   IconHistory,
+  IconUsage,
 } from '@/components/ui/icons'
 
 interface NavItem {
@@ -41,6 +42,7 @@ const performanceNav: NavItem[] = [
 
 const accountNav: NavItem[] = [
   { href: '/admin', icon: <IconSettings />, label: 'Admin' },
+  { href: '/usage', icon: <IconUsage />, label: 'Usage' },
 ]
 
 const allNav = [...workspaceNav, ...performanceNav, ...accountNav]
@@ -124,14 +126,7 @@ export default function Sidebar({
       {/* Header — logo + collapse (Linear-style) */}
       <div className={cn('flex items-center border-b border-white/[0.06]', collapsed ? 'justify-center px-1.5 py-3' : 'justify-between px-3 py-3')}>
         <div className={cn('flex items-center min-w-0', collapsed ? 'justify-center' : 'gap-2.5')}>
-          <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-            style={{
-              background: 'linear-gradient(135deg, #a3d16b 0%, #8bb85a 100%)',
-            }}
-          >
-            <IconSparkles className="w-3.5 h-3.5 text-white" />
-          </div>
+          <BrandMark size={28} className="rounded-[7px]" />
           {!collapsed && (
             <div className="min-w-0">
               <div className="text-[13px] font-semibold text-white tracking-tight leading-none truncate">

@@ -20,6 +20,7 @@ from app.services.media.higgsfield_catalog import (
     higgsfield_video_catalog_options,
 )
 from app.services.ad_angle_library import catalog_options as ad_angle_catalog_options
+from app.services.media.openai_image_catalog import openai_image_catalog_options
 from app.services.media.runway_catalog import (
     runway_image_catalog_options,
     runway_video_catalog_options,
@@ -48,6 +49,7 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
             return _CATALOG_CACHE[1]
 
     image_models: list[GenerationModelOption] = []
+    image_models.extend(openai_image_catalog_options())
     image_models.extend(runway_image_catalog_options())
     image_models.extend(higgsfield_image_catalog_options())
 

@@ -250,6 +250,9 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         logger.warning("Brand facts extraction failed for %s: %s", url, exc)
         brand_facts = {}
 
+    from app.services.usage_tracker import record_firecrawl
+
+    record_firecrawl(success=True, url=url)
     return {
         "source_url": url,
         "brand_name": brand_name or urlparse(url).netloc,

@@ -447,8 +447,14 @@ async def fetch_brand_from_url(
     try:
         result = await fetch_brand_from_website(data.url)
     except ValueError as exc:
+        from app.services.usage_tracker import record_firecrawl
+
+        record_firecrawl(success=False, url=data.url, error=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        from app.services.usage_tracker import record_firecrawl
+
+        record_firecrawl(success=False, url=data.url, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Could not fetch brand from URL: {exc}") from exc
     return FetchBrandFromUrlResponse(**result)
 
