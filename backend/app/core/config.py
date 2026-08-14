@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL_CLAUDE: str = "anthropic/claude-haiku-4.5"
     OPENROUTER_MODEL_CLAUDE_SCRIPT: str = "anthropic/claude-sonnet-4.6"
     OPENROUTER_MODEL_VISION: str = "google/gemini-2.5-flash"
+    # Strategy MD parsing — long docs with many creatives (Gemini 3.x via OpenRouter)
+    OPENROUTER_MODEL_STRATEGY_PARSE: str = "google/gemini-2.5-flash"
     OPENROUTER_MODEL_OPENAI: str = "openai/gpt-4o-mini"
     OPENROUTER_MODEL_IMAGE: str = "google/gemini-3.1-flash-image-preview"
     OPENROUTER_MODEL_VIDEO: str = "google/veo-3.1"
@@ -136,6 +138,7 @@ class Settings(BaseSettings):
         "OPENROUTER_MODEL_CLAUDE",
         "OPENROUTER_MODEL_CLAUDE_SCRIPT",
         "OPENROUTER_MODEL_VISION",
+        "OPENROUTER_MODEL_STRATEGY_PARSE",
         mode="before",
     )
     @classmethod

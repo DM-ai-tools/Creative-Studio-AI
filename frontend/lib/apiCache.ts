@@ -14,6 +14,13 @@ export function setApiCache<T>(key: string, data: T): void {
   store.set(key, { data, ts: Date.now() })
 }
 
+/** Merge into cached list data without clearing — avoids UI flicker during background refetch. */
+export function patchApiCache<T>(key: string, patch: (current: T | null) => T): void {
+  const hit = store.get(key)
+  const current = hit ? (hit.data as T) : null
+  setApiCache(key, patch(current))
+}
+
 export function clearApiCache(key?: string): void {
   if (key) store.delete(key)
   else store.clear()

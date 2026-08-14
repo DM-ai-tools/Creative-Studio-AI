@@ -110,12 +110,12 @@ _INDUSTRY_SCENE_POOLS: dict[str, list[str]] = {
         "Content desk: UGC / product hero shoot setup feeding paid creative pipeline",
     ],
     "jewellery": [
-        "UGC unboxing: hands open a jewellery pouch revealing a gold necklace / ring on soft tissue, phone-shot framing",
-        "Mirror try-on: person fastening earrings or necklace, close-up sparkle, bathroom/bedroom natural light",
-        "Jewellery flat-lay: rings, bracelet, chain on marble with soft shadows — product is the hero",
-        "Gift moment: recipient opens a small jewellery box, genuine reaction, Sydney apartment setting",
-        "Stacking rings on hand in daylight by a window — intimate product detail, not furniture or home décor",
-        "Checkout / cart moment: phone showing jewellery product page beside the physical piece on the table",
+        "Macro engagement ring on a hand — stone fills the frame, jeweller and boutique softly behind",
+        "Tight necklace on collarbone: pendant razor-sharp and large, face and room recede out of focus",
+        "Ear close-up of diamond studs catching light; person and interior stay in the shot but smaller",
+        "Jewellery box opening: the ring is the hero in the velvet, hands and smile supporting behind",
+        "Stacking rings filling the foreground on fingers by a window — lifestyle scene is background only",
+        "Bracelet on a wrist in boutique light — metal and stones dominate, consultant softly behind",
     ],
     "dental": [
         "Dental consultation room: patient winces while pointing at one molar on x-ray monitor",
@@ -357,11 +357,12 @@ _NICHE_PROCEDURE_HINTS: list[tuple[tuple[str, ...], str]] = [
             "jewellery", "jewelry", "jeweller", "jeweler", "necklace", "earrings",
             "bracelet", "pendant", "fine jewellery", "costume jewellery",
         ),
-        """JEWELLERY NICHE — product lock is mandatory (niche beats other brand categories):
-- Stranger test: with text removed, viewer must say "jewellery / necklace / rings / earrings" — NOT furniture, home décor, or outdoor goods.
-- Hero props: necklace, ring, earrings, bracelet, chain, jewellery box / pouch, try-on at a mirror, unboxing sparkle.
-- Copy (hook, headline, offer, on-image, CTA story) must sell JEWELLERY only — even if VERIFIED BRAND FACTS or the brand kit also list furniture, outdoor, or home accessories.
-- BANNED: sofas, furniture collections, "home refresh", outdoor goods, home décor staging, multi-category "curated furniture" offers.""",
+        """JEWELLERY NICHE — the PRODUCT is the main subject (people/scene stay, but smaller):
+- First name the specific piece (engagement ring, pendant necklace, diamond studs, tennis bracelet).
+- That piece fills ~40–70% of the frame: macro / tight close-up, gem facets and metal razor-sharp.
+- People, boutique, hands, and lifestyle MAY remain as supporting story (softer focus, behind or beside) — do not delete them.
+- Stranger test: viewer must name the JEWELLERY PIECE first — not the person, not the room.
+- BANNED: wide lifestyle where the ring is a tiny speck; group portraits with jewellery as an afterthought; furniture/home décor heroes.""",
     ),
     (
         (
@@ -607,9 +608,10 @@ _NICHE_PROOF_APPEND: dict[str, str] = {
         "After-only lifestyle paradise FAILS."
     ),
     "jewellery": (
-        "NICHE PROOF (weave into THIS scene — do not replace setting): show REAL jewellery as the hero "
-        "(necklace, ring, earrings, bracelet, chain, jewellery box / pouch). "
-        "BANNED: furniture, sofas, outdoor goods, home décor collections, 'home refresh' staging."
+        "NICHE PROOF: name the specific jewellery piece and ZOOM it as the hero "
+        "(fills most of the frame, sharp macro on metal/stones). People and setting stay in the shot "
+        "as supporting background — softer, smaller, never the main subject. "
+        "BANNED: wide scenes where the piece is a speck; furniture/home décor heroes."
     ),
     "home_improvement": (
         "NICHE PROOF (weave into THIS scene — do not replace setting): include a visible physical "
@@ -658,6 +660,121 @@ _JEWELLERY_PRODUCT_LOCK_FIX = (
     " home refresh staging."
 )
 
+_JEWELLERY_PRODUCT_HERO_LOCK = (
+    " JEWELLERY PRODUCT HERO: first decide WHICH piece this frame sells "
+    "(engagement ring / pendant necklace / diamond earrings / tennis bracelet / etc.). "
+    "That piece is the MAIN subject — occupy about 40–70% of the frame, macro or tight 50–85mm close-up, "
+    "gem facets and metal in razor-sharp focus with catchlights. "
+    "People, hands, boutique, and lifestyle MAY stay as supporting story (softer focus, smaller, behind or beside) — "
+    "do not remove them if the scene needs them. "
+    "NEVER let faces, the room, or a crowd dominate. "
+    "If someone is wearing the piece, crop tight on jewellery on skin/hand/neck/ear so the product is what the eye hits first. "
+    "BANNED: wide lifestyle where the jewel is a tiny speck; group shots with jewellery as an afterthought."
+)
+
+
+_BRAND_VISUAL_SENTINEL = "BRAND VISUAL LOCK:"
+
+
+def _clean_brand_font(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "null", "undefined"}:
+        return ""
+    return raw.split(",")[0].strip().strip("'\"")[:80]
+
+
+def _clean_brand_hex(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith("#"):
+        raw = f"#{raw}"
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", raw):
+        return raw.upper()
+    return ""
+
+
+def _brand_visual_lock(
+    *,
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
+) -> str:
+    """Pin website / Brand Kit colours + fonts so image models don't invent random type."""
+    primary = _clean_brand_hex(primary_color)
+    secondary = _clean_brand_hex(secondary_color)
+    heading_font = _clean_brand_font(font_heading)
+    body_font = _clean_brand_font(font_body)
+    if not any((primary, secondary, heading_font, body_font)):
+        return ""
+    parts = [f" {_BRAND_VISUAL_SENTINEL} Use ONLY this brand's website/Brand Kit palette and typography —"]
+    if primary:
+        parts.append(f" primary {primary} (CTA pill + key accent)")
+    if secondary:
+        parts.append(f" secondary {secondary} (subline accent / highlight)")
+    if heading_font:
+        parts.append(f' headline font "{heading_font}"')
+    if body_font and body_font.lower() != (heading_font or "").lower():
+        parts.append(f' body/subline font "{body_font}"')
+    parts.append(
+        " Do NOT invent random gold foil, neon, or off-brand fonts unless the brand palette above uses them."
+    )
+    return " ".join(parts)
+
+
+def _jewellery_type_lock(
+    *,
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
+) -> str:
+    """Jewellery typography — prefer scraped brand colours/fonts over generic champagne gold."""
+    primary = _clean_brand_hex(primary_color)
+    secondary = _clean_brand_hex(secondary_color)
+    heading_font = _clean_brand_font(font_heading)
+    body_font = _clean_brand_font(font_body)
+    type_color = primary or secondary or "#D4AF37"
+    headline_font = heading_font or "elegant luxury serif matching the brand website"
+    sub_font = body_font or "thin elegant sans-serif matching the brand website"
+    colour_note = (
+        f"metallic or solid brand colour {type_color} (from website — reflective foil OK if brand uses gold)"
+        if primary or secondary
+        else "metallic champagne-gold (#D4AF37 to burnished bronze-gold, reflective foil look)"
+    )
+    return (
+        " JEWELLERY TYPE LOCK: all on-image lettering uses "
+        f"{colour_note}. "
+        f"Hero headline: {headline_font} in Title Case or sentence case — NEVER ALL CAPS. "
+        f"Supporting line: {sub_font}, sentence case (not shouting caps). "
+        "Romantic line (engagement, forever, ceremony, love): flowing SCRIPT calligraphy "
+        "in natural sentence case. "
+        "Never use cheap white Impact, neon, generic black sans, or full-uppercase billboard shouting. "
+        "Place type on a dark romantic third of the frame with enough contrast to read. "
+        "Do NOT invent a jeweller wordmark or store name — brand lettering is locked from the Brand Kit."
+    )
+
+# Image models love hallucinating luxury jeweller houses when asked for gold serif type.
+_FAKE_JEWELLER_BRAND_RE = re.compile(
+    r"(?i)\b(?:"
+    r"lusso(?:\s+(?:diamonds?|jewels?|jewellery|jewelry))?|"
+    r"shop\s+dimad|"
+    r"she\s+diamonds?|"
+    r"dimad|"
+    r"brilliant\s+earth|"
+    r"blue\s+nile|"
+    r"james\s+allen|"
+    r"kay\s+jewelers?|"
+    r"tiffany(?:\s*[&+]?\s*co\.?)?|"
+    r"cartier|"
+    r"graff|"
+    r"harry\s+winston|"
+    r"boucheron|"
+    r"van\s+cleef(?:\s*[&+]?\s*arpels)?"
+    r")\b"
+)
+
 
 def _is_jewellery_niche(*, niche: str = "", industry: str = "", text: str = "") -> bool:
     if _resolve_niche_category(niche=niche, industry=industry) == "jewellery":
@@ -667,6 +784,379 @@ def _is_jewellery_niche(*, niche: str = "", industry: str = "", text: str = "") 
         k in hay
         for k in ("jewellery", "jewelry", "jeweller", "jeweler", "necklace", "earrings")
     )
+
+
+_FASHION_RETAIL_KW = (
+    "fashion",
+    "apparel",
+    "clothing",
+    "wardrobe",
+    "arrivals",
+    "runway",
+    "boutique",
+    "knitwear",
+    "editorial fashion",
+    "new season",
+)
+
+
+def _is_fashion_retail_niche(
+    *,
+    niche: str = "",
+    industry: str = "",
+    campaign_name: str = "",
+    brand_name: str = "",
+    text: str = "",
+) -> bool:
+    hay = f"{niche} {industry} {campaign_name} {brand_name} {text}".lower()
+    return any(k in hay for k in _FASHION_RETAIL_KW)
+
+
+def _seed_is_photo_only(seed: dict | None) -> bool:
+    return isinstance(seed, dict) and bool(seed.get("photo_only"))
+
+
+def _seed_is_retail_promo(seed: dict | None) -> bool:
+    return isinstance(seed, dict) and bool(seed.get("retail_promo"))
+
+
+def _normalize_product_focus(raw: str) -> str:
+    v = (raw or "").strip().lower().replace("-", "_")
+    if v in {"product_only", "product_alone", "product_hero", "catalog", "solo"}:
+        return "product_only"
+    if v in {"with_person", "with_model", "with_people", "lifestyle_person", "person"}:
+        return "with_person"
+    return ""
+
+
+def _seed_product_focus(seed: dict | None) -> str:
+    if not isinstance(seed, dict):
+        return ""
+    return _normalize_product_focus(str(seed.get("product_focus") or ""))
+
+
+def _seed_product_model(seed: dict | None) -> str:
+    if not isinstance(seed, dict):
+        return ""
+    return str(seed.get("product_model") or "").strip()[:120]
+
+
+def enforce_product_focus_in_prompt(
+    prompt: str,
+    *,
+    product_focus: str = "",
+    product_model: str = "",
+    industry: str = "",
+    niche: str = "",
+) -> str:
+    """Retail product shots — catalog hero (no people) vs with-person usage."""
+    focus = _normalize_product_focus(product_focus)
+    model = (product_model or "").strip()
+    cleaned = (prompt or "").strip()
+    if not focus:
+        return cleaned
+    if focus == "product_only":
+        lock = (
+            "PRODUCT-ONLY RETAIL SHOT (mandatory): Premium ecommerce/catalog hero — "
+            "the product fills 60–80% of frame on a clean studio background with subtle brand-colour "
+            "geometric accents (diagonal colour block OK). Professional product lighting, sharp detail. "
+            "NO people, NO faces, NO hands, NO models, NO riders — product alone is the entire hero. "
+            "Layout like a simple catalog ad: stacked bold headline in brand colours, product model name "
+            "on a lower label bar, optional offer/CTA pill — NOT a pain-led story or lifestyle scene."
+        )
+        if model:
+            lock += (
+                f" Show ONLY this exact product/model: {model}. "
+                "Match real branding, colour, and model name markings on the product if visible on the real item."
+            )
+        elif niche or industry:
+            lock += f" Product category: {niche or industry}."
+        return f"{lock} {cleaned}".strip()
+    lock = (
+        "WITH-PERSON SHOT (mandatory): Real person naturally using, wearing, riding, or holding the product — "
+        "sharp visible face, authentic emotion, shallow depth of field. Product must remain clearly readable."
+    )
+    if model:
+        lock += (
+            f" They must interact with THIS specific product/model: {model} — "
+            "correct shape, colour, branding, and model name on the product."
+        )
+    return f"{lock} {cleaned}".strip()
+
+
+_VALID_ON_IMAGE_STYLES = frozenset({
+    "auto",
+    "retail_modern",
+    "jewellery_luxury",
+    "fashion_editorial",
+    "high_contrast",
+})
+
+_ON_IMAGE_STYLE_SENTINEL = "ON-IMAGE TYPE STYLE:"
+
+
+def resolve_on_image_style(
+    style: str,
+    *,
+    niche: str = "",
+    industry: str = "",
+    fashion_retail_promo: bool = False,
+) -> str:
+    """Campaign-level typography — auto picks by niche unless user overrides."""
+    raw = (style or "auto").strip().lower().replace("-", "_")
+    if raw and raw != "auto" and raw in _VALID_ON_IMAGE_STYLES:
+        return raw
+    if _is_jewellery_niche(niche=niche, industry=industry):
+        return "jewellery_luxury"
+    if fashion_retail_promo or _is_fashion_retail_niche(niche=niche, industry=industry):
+        return "fashion_editorial"
+    return "retail_modern"
+
+
+def on_image_style_lock(
+    resolved_style: str,
+    *,
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
+) -> str:
+    """Typography + colour rules appended to image prompts."""
+    primary = _clean_brand_hex(primary_color) or "brand primary colour from Brand Kit"
+    secondary = _clean_brand_hex(secondary_color) or "brand secondary colour"
+    heading_font = _clean_brand_font(font_heading)
+    body_font = _clean_brand_font(font_body)
+    brand_visual = _brand_visual_lock(
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        font_heading=font_heading,
+        font_body=font_body,
+    )
+    if resolved_style == "jewellery_luxury":
+        return f"{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)}{brand_visual}"
+    headline_type = (
+        f'"{heading_font}" serif or sans matching the brand site'
+        if heading_font
+        else "white elegant SERIF"
+    )
+    sub_type = (
+        f'"{body_font}" sans-serif'
+        if body_font
+        else "white sans-serif"
+    )
+    if resolved_style == "fashion_editorial":
+        return (
+            f" {_ON_IMAGE_STYLE_SENTINEL} Fashion retail promo typography — headline in {headline_type} "
+            "ALL CAPS with a thin white horizontal rule beneath. Offer/subline in white sans-serif "
+            "caps. Promo code in a contrasting pill/banner when provided. Full-width CTA bar at bottom "
+            f"using {primary}. "
+            "NO champagne gold jeweller foil, NO script calligraphy unless engagement/romantic line only."
+            f"{brand_visual}"
+        )
+    if resolved_style == "high_contrast":
+        return (
+            f" {_ON_IMAGE_STYLE_SENTINEL} Bold performance ad typography — white ALL CAPS sans-serif "
+            "headline with strong drop shadow for scroll-stop contrast. Subline in white sans-serif "
+            f"sentence case. CTA pill in solid {primary} with white bold sans. "
+            "NO gold serif, NO luxury jeweller script."
+            f"{brand_visual}"
+        )
+    # retail_modern (default for bike shop, general retail, services)
+    headline_rule = (
+        f'headline in clean white {sub_type} (Title Case or sentence case)'
+        if body_font
+        else "headline in clean white sans-serif (Title Case or sentence case)"
+    )
+    return (
+        f" {_ON_IMAGE_STYLE_SENTINEL} Modern retail ad typography — {headline_rule}. "
+        f"Subline in lighter white {sub_type if body_font else 'sans-serif'}. Dark charcoal gradient "
+        f"lower-third behind text blocks. CTA pill uses {primary} with white bold sans-serif. "
+        "NO champagne gold serif, NO luxury jeweller script, NO gold foil lettering."
+        f"{brand_visual}"
+    )
+
+
+def enforce_on_image_style_in_prompt(
+    prompt: str,
+    *,
+    on_image_style: str = "auto",
+    niche: str = "",
+    industry: str = "",
+    fashion_retail_promo: bool = False,
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
+) -> str:
+    """Apply campaign-level on-image typography (idempotent)."""
+    cleaned = (prompt or "").strip()
+    if not cleaned:
+        return cleaned
+    if _ON_IMAGE_STYLE_SENTINEL in cleaned or "JEWELLERY TYPE LOCK:" in cleaned or _BRAND_VISUAL_SENTINEL in cleaned:
+        cleaned = re.sub(
+            r"\s*ON-IMAGE TYPE STYLE:.*?(?=\s*(?:TEXT-ANCHOR:|BRAND IDENTITY LOCK:|JEWELLERY TYPE LOCK:|BRAND VISUAL LOCK:|$))",
+            " ",
+            cleaned,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\s*JEWELLERY TYPE LOCK:.*?(?=\s*(?:BRAND IDENTITY LOCK:|BRAND VISUAL LOCK:|ON-IMAGE TYPE STYLE:|$))", " ", cleaned)
+        cleaned = re.sub(r"\s*BRAND VISUAL LOCK:.*?(?=\s*(?:BRAND IDENTITY LOCK:|TEXT-ANCHOR:|$))", " ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    resolved = resolve_on_image_style(
+        on_image_style,
+        niche=niche,
+        industry=industry,
+        fashion_retail_promo=fashion_retail_promo,
+    )
+    lock = on_image_style_lock(
+        resolved,
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        font_heading=font_heading,
+        font_body=font_body,
+    )
+    return f"{cleaned.rstrip()}{lock}".strip()
+
+
+def _campaign_is_fashion_retail_photo(
+    *,
+    niche: str = "",
+    industry: str = "",
+    campaign_name: str = "",
+    brand_name: str = "",
+    strategy_seeds: list[dict] | None = None,
+) -> bool:
+    """Photo-only fashion ads — only when a seed explicitly requests it."""
+    if strategy_seeds and any(_seed_is_retail_promo(s) for s in strategy_seeds if isinstance(s, dict)):
+        return False
+    if strategy_seeds and any(_seed_is_photo_only(s) for s in strategy_seeds if isinstance(s, dict)):
+        return True
+    return False
+
+
+def _strip_fashion_photo_only_lock(prompt: str) -> str:
+    """Remove legacy photo-only lock text so promo copy can be burned."""
+    cleaned = (prompt or "").strip()
+    if _FASHION_RETAIL_PHOTO_SENTINEL in cleaned:
+        idx = cleaned.find(_FASHION_RETAIL_PHOTO_SENTINEL)
+        cleaned = cleaned[:idx].strip()
+    cleaned = re.sub(
+        r"(?i)NO text overlay[^.]*\.?",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)Sale/offer copy lives in the ad caption[^.]*\.?",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)Photo only — no text[^.]*\.?",
+        " ",
+        cleaned,
+    )
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _fashion_retail_promo_on_image_lines(
+    *,
+    seed: dict | None,
+    hook: str,
+    message: str,
+    offer: str,
+    cta: str,
+) -> tuple[str, str, str]:
+    """Map MD / ICP copy → burned hook, headline (offer), CTA button."""
+    seed = seed if isinstance(seed, dict) else {}
+    img_hook = str(seed.get("image_hook") or seed.get("client_hook") or seed.get("hook") or hook or "").strip()
+    img_headline = str(seed.get("image_headline") or "").strip()
+    offer_raw = str(seed.get("offer") or offer or "").strip()
+    if not img_headline and offer_raw:
+        lines = [ln.strip() for ln in offer_raw.replace(" · ", "\n").splitlines() if ln.strip()]
+        img_headline = lines[0][:100] if lines else offer_raw[:100]
+    if not img_hook:
+        img_hook = str(hook or message or "").strip()
+    img_hook = _billboard_words(img_hook, 6)
+    img_headline = _billboard_words(img_headline, 10)
+    cta_line = str(seed.get("cta") or cta or "").strip() or "Shop Now"
+    return img_hook, img_headline, cta_line
+
+
+def _campaign_is_fashion_retail_promo(
+    *,
+    niche: str = "",
+    industry: str = "",
+    campaign_name: str = "",
+    brand_name: str = "",
+    strategy_seeds: list[dict] | None = None,
+) -> bool:
+    if strategy_seeds and any(_seed_is_retail_promo(s) for s in strategy_seeds if isinstance(s, dict)):
+        return True
+    if strategy_seeds and any(_seed_is_photo_only(s) for s in strategy_seeds if isinstance(s, dict)):
+        return False
+    return _is_fashion_retail_niche(
+        niche=niche,
+        industry=industry,
+        campaign_name=campaign_name,
+        brand_name=brand_name,
+    )
+
+
+_FASHION_RETAIL_PHOTO_SENTINEL = "FASHION RETAIL AD (mandatory)"
+_FASHION_RETAIL_PROMO_SENTINEL = "FASHION RETAIL PROMO (mandatory)"
+
+
+def enforce_fashion_retail_photo_in_prompt(
+    prompt: str,
+    *,
+    aspect_ratio: str = "4:3",
+) -> str:
+    """Fashion/clothing retail: model + outfit hero, no burned-in ad copy."""
+    cleaned = strip_burned_in_copy_from_prompt((prompt or "").strip(), allow_cta=False)
+    if _FASHION_RETAIL_PHOTO_SENTINEL in cleaned:
+        return cleaned
+    lock = (
+        f"{_FASHION_RETAIL_PHOTO_SENTINEL}: {aspect_ratio} portrait composition. "
+        "Full-length or three-quarter fashion model wearing the outfit — person AND clothes are the entire hero. "
+        "Premium realistic boutique or editorial studio background. "
+        "NO text overlay, NO slogans, NO CTA button, NO offer badges burned into the photo — photo only. "
+        "Sale/offer copy lives in the ad caption, not on the image."
+    )
+    return f"{lock} {cleaned}".strip()
+
+
+def enforce_fashion_retail_promo_in_prompt(
+    prompt: str,
+    *,
+    aspect_ratio: str = "1:1",
+) -> str:
+    """Client-style fashion retail promo — models + clothes + room for burned headline/offer."""
+    cleaned = _strip_fashion_photo_only_lock((prompt or "").strip())
+    if _FASHION_RETAIL_PROMO_SENTINEL in cleaned:
+        return cleaned
+    ratio = (aspect_ratio or "1:1").strip()
+    lock = (
+        f"{_FASHION_RETAIL_PROMO_SENTINEL}: {ratio} premium fashion retail Meta ad. "
+        "Photoreal editorial campaign — models wearing the clothes are the hero; sharp garment detail "
+        "(denim, knitwear, jackets, etc.). Clean urban street or boutique background, bright natural light. "
+    )
+    if ratio == "1:1":
+        lock += (
+            "Square feed layout: side-by-side model lineup when multiple styles are shown; "
+            "lower third kept clean for headline, offer, promo code pill, and CTA bar. "
+        )
+    elif ratio == "9:16":
+        lock += (
+            "Vertical Reels/Stories layout: full-length or three-quarter models; "
+            "lower third reserved for headline + offer overlay. "
+        )
+    else:
+        lock += f"{ratio} portrait — lower third clear for promo text overlay. "
+    lock += (
+        "Brand Kit logo is composited top-right in post — do not draw a fake wordmark. "
+        "Fashion-first, promotion-second."
+    )
+    return f"{lock} {cleaned}".strip()
 
 
 def enforce_niche_product_focus_copy(
@@ -701,28 +1191,124 @@ def enforce_niche_product_focus_copy(
     return out
 
 
+def _canonical_brand_lettering(brand_name: str) -> str:
+    return " ".join((brand_name or "").strip().split())
+
+
+def enforce_brand_identity_in_prompt(
+    prompt: str,
+    *,
+    brand_name: str,
+    on_image_style: str = "",
+    niche: str = "",
+    industry: str = "",
+) -> str:
+    """
+    Pin the Brand Kit / website company name. Image models otherwise invent
+    lookalike jeweller houses (Lusso Diamonds, Shop Dimad) or treat a nav
+    label like 'Shop Diamonds' as the store name.
+    """
+    name = _canonical_brand_lettering(brand_name)
+    cleaned = (prompt or "").strip()
+    if not name:
+        return cleaned
+
+    name_l = name.lower()
+
+    def _keep_or_replace(match: re.Match[str]) -> str:
+        found = match.group(0)
+        found_l = found.lower()
+        if found_l in name_l or name_l in found_l:
+            return found
+        return name
+
+    cleaned = _FAKE_JEWELLER_BRAND_RE.sub(_keep_or_replace, cleaned)
+    # Category nav must never be treated as a store wordmark.
+    if "shop diamonds" not in name_l:
+        cleaned = re.sub(
+            r"(?i)\bshop\s+diamonds?\b",
+            "diamonds",
+            cleaned,
+        )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    if "BRAND IDENTITY LOCK:" in cleaned:
+        cleaned = re.sub(r"\s*BRAND IDENTITY LOCK:.*$", "", cleaned).strip()
+    resolved_style = resolve_on_image_style(on_image_style, niche=niche, industry=industry)
+    type_hint = (
+        "luxury gold serif is fine for on-image type"
+        if resolved_style == "jewellery_luxury"
+        else "match the ON-IMAGE TYPE STYLE rules — do not default to gold serif"
+    )
+    lock = (
+        f' BRAND IDENTITY LOCK: the ONLY allowed brand name on this image is "{name}". '
+        f'If any brand wordmark appears it must read exactly "{name}" letter-for-letter '
+        f"({type_hint}). "
+        "Do NOT invent or render any other jeweller/store name — especially not Lusso, "
+        "Lusso Diamonds, Shop Dimad, She Diamond, Shop Diamonds (website category, not the brand), "
+        "Tiffany, Cartier, or any lookalike luxury house. "
+        "The real Brand Kit logo is composited in post — do not draw a second fake logo. "
+        "Collection names and nav labels must never appear as the store name."
+    )
+    return f"{cleaned}{lock}"
+
+
 def enforce_niche_product_focus_in_prompt(
     prompt: str,
     *,
     niche: str,
     industry: str,
+    brand_name: str = "",
+    on_image_style: str = "auto",
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
 ) -> str:
-    """Keep jewellery-niche image prompts from drifting into furniture/home staging."""
+    """Keep jewellery-niche image prompts product-hero (zoom the jewel; people/scene supporting)."""
     text = (prompt or "").strip()
     if not text or not _is_jewellery_niche(niche=niche, industry=industry, text=""):
-        return text
-    if "NICHE PRODUCT LOCK" in text and not _FURNITURE_HOME_DRIFT_RE.search(text):
+        if brand_name:
+            return enforce_brand_identity_in_prompt(
+                text, brand_name=brand_name, on_image_style=on_image_style, niche=niche, industry=industry
+            )
         return text
 
-    cleaned = _FURNITURE_HOME_DRIFT_RE.sub("jewellery piece", text)
-    cleaned = re.sub(
-        r"(?i)\b(?:sofa(?:s)?|couch(?:es)?|coffee\s+table|dining\s+table|wardrobe)\b",
-        "jewellery display",
-        cleaned,
-    )
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = text
+    if _FURNITURE_HOME_DRIFT_RE.search(cleaned):
+        cleaned = _FURNITURE_HOME_DRIFT_RE.sub("jewellery piece", cleaned)
+        cleaned = re.sub(
+            r"(?i)\b(?:sofa(?:s)?|couch(?:es)?|coffee\s+table|dining\s+table|wardrobe)\b",
+            "jewellery display",
+            cleaned,
+        )
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     if "NICHE PRODUCT LOCK" not in cleaned:
         cleaned = f"{cleaned}{_JEWELLERY_PRODUCT_LOCK_FIX}"
+    resolved = resolve_on_image_style(on_image_style, niche=niche, industry=industry)
+    if resolved == "jewellery_luxury":
+        cleaned = re.sub(
+            r"\s*JEWELLERY TYPE LOCK:.*?(?=\s*(?:JEWELLERY PRODUCT HERO|BRAND IDENTITY LOCK:|ON-IMAGE TYPE STYLE:|$))",
+            " ",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"(?i)\b(?:luxury\s+)?(?:serif|sans[- ]?serif)\s+all[- ]caps\b",
+            "elegant serif Title Case",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"(?i)\b(?:thin\s+tracked\s+)?sans[- ]?serif\s+all[- ]caps\b",
+            "thin tracked sans-serif sentence case",
+            cleaned,
+        )
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        cleaned = f"{cleaned}{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)}"
+    if "JEWELLERY PRODUCT HERO" not in cleaned:
+        cleaned = f"{cleaned}{_JEWELLERY_PRODUCT_HERO_LOCK}"
+    if brand_name:
+        cleaned = enforce_brand_identity_in_prompt(
+            cleaned, brand_name=brand_name, on_image_style=on_image_style, niche=niche, industry=industry
+        )
     return cleaned
 
 
@@ -1921,12 +2507,16 @@ not from a memorised example:
    - NICHE PRODUCT LOCK (critical): when NICHE names a product category, EVERY hook, headline,
      offer, CTA story, and image prompt MUST sell THAT niche only. Ignore other product lines in
      VERIFIED BRAND FACTS / brand kit for this campaign. Jewellery niche → jewellery only.
+   - BRAND NAME LOCK: on-image store name / wordmark must be EXACTLY the BRAND field (Brand Kit /
+     website company, e.g. Adoria Jewellery). NEVER invent Lusso Diamonds, Shop Dimad, She Diamond,
+     or treat a nav label like "Shop Diamonds" as the brand. Logo is composited in post.
    - Pain-led angles must show the EXACT physical problem for THAT procedure (jaw/tooth wince,
      x-ray, sensitivity, swollen cheek) — never ambiguous office sadness that could mean anything.
    - Stranger test must name the PROCEDURE / PRODUCT CATEGORY from visuals alone before reading text.
    - If you cannot ground the scene in the niche, move to a dental clinic or home bathroom/kitchen
      moment with unmistakable dental props — do NOT default to corporate office desks.
-     For jewellery: mirror try-on, unboxing pouch, flat-lay rings — never sofa / furniture staging.
+     For jewellery: zoom the named piece (ring/necklace/earrings) as the hero; people and boutique
+     may stay as softer background — never sofa / furniture staging, never wide shots where the jewel is a speck.
 - The prompt must read like an art-directed ad brief: subject, action, story props, emotion on
   faces, lighting, camera angle — all serving the single_message.
 
@@ -2001,6 +2591,12 @@ Rules:
 - ON-IMAGE COPY: industry/niche vocabulary, speaks to the ICP's fear or desire, Australian English
   (catchy Aussie billboard — not flat US corporate), never the persona's first name.
   Applies to EVERY industry — wholesale, retail, ecommerce, trade, dental, HVAC, finance, etc.
+- JEWELLERY TYPE (when niche is jewellery / jeweller / rings / diamonds): on-image text MUST be
+  metallic gold (#D4AF37 champagne-gold). Luxury serif headline in Title Case / sentence case
+  (NEVER ALL CAPS); supporting line in thin tracked sans-serif sentence case;
+  romantic/engagement line in flowing gold script. No white Impact type, no shouting uppercase.
+- JEWELLERY PRODUCT HERO: the named piece (ring/necklace/earrings/bracelet) is the MAIN subject —
+  zoomed, large in frame, sharp. People and scene stay as supporting background, not the hero.
 - LOCATION ON-IMAGE: use ONLY the campaign SERVICE LOCATION when naming a place. Never invent Western Sydney, Brisbane, Melbourne, or other archetype cities from reference ICPs.
 - CTA RULES (critical):
   - Every variant MUST include its own `cta` field, matched to the objective's action (e.g. Book Consultation, Get Free Audit, Claim Free Review, Book Free Quote).
@@ -2027,23 +2623,109 @@ UNIQUENESS (critical):
 """.strip()  # end _VARIANTS_SYSTEM
 
 
-def _carousel_story_roles(count: int, angle_assignments: list[str]) -> str:
+def _lock_angles_to_carousel_groups(
+    angle_assignments: list[str],
+    strategy_seeds: list[dict],
+    count: int,
+    *,
+    frameworks: list[str],
+) -> list[str]:
+    """One ad angle per carousel creative group — all swipe cards in a group share it."""
+    n = max(1, count)
+    pool = [a for a in (frameworks or []) if a]
+    if not pool and angle_assignments:
+        pool = list(dict.fromkeys(angle_assignments))
+    out = list(angle_assignments[:n])
+    while len(out) < n:
+        out.append(pool[len(out) % len(pool)] if pool else "")
+
+    group_order: list[str] = []
+    group_to_angle: dict[str, str] = {}
+
+    def _infer_group(seed: dict, index: int) -> str:
+        explicit = str(seed.get("carousel_group") or "").strip()
+        if explicit:
+            return explicit
+        try:
+            card_i = int(seed.get("carousel_index") or 0)
+        except (TypeError, ValueError):
+            card_i = 0
+        if card_i == 1:
+            return f"inferred-{index}"
+        if index > 0 and index - 1 < len(strategy_seeds):
+            prev = strategy_seeds[index - 1]
+            if isinstance(prev, dict):
+                return _infer_group(prev, index - 1)
+        return f"inferred-{index}"
+
+    for i, seed in enumerate(strategy_seeds[:n]):
+        if not isinstance(seed, dict):
+            continue
+        fmt_s = str(seed.get("format") or "").strip().lower()
+        has_carousel_meta = bool(seed.get("carousel_index") and seed.get("carousel_total"))
+        if fmt_s != "carousel" and not has_carousel_meta:
+            continue
+        group = _infer_group(seed, i)
+        if group not in group_to_angle:
+            group_idx = len(group_order)
+            group_order.append(group)
+            if pool:
+                group_to_angle[group] = pool[group_idx % len(pool)]
+            elif group_idx < len(out) and out[group_idx]:
+                group_to_angle[group] = out[group_idx]
+            else:
+                group_to_angle[group] = out[i] if i < len(out) else ""
+        if i < len(out):
+            out[i] = group_to_angle[group]
+
+    return out
+
+
+def _carousel_story_roles(
+    count: int,
+    angle_assignments: list[str],
+    strategy_seeds: list[dict] | None = None,
+) -> str:
     """Build a swipe-story brief so carousel cards read as one social post sequence."""
     n = max(1, count)
+    seeds = [s for s in (strategy_seeds or []) if isinstance(s, dict)]
     lines = [
         "CAROUSEL SWIPE STORY (mandatory — this is ONE Meta/LinkedIn carousel post):",
         f"- Produce exactly {n} cards that form ONE continuous narrative a viewer swipes through.",
         "- Same ICP, same campaign, same brand offer — do NOT invent unrelated mini-campaigns.",
-        "- Card 1 = PROBLEM (stop the scroll, name the pain).",
-        "- Middle card(s) = AGITATE / PROOF / MYTH (deepen stakes, social proof, bust objections).",
-        "- Final card = SOLUTION + clear CTA (calm control, broker/brand path forward).",
-        "- Hooks/headlines must ADVANCE the story — card N should feel like the next beat after card N-1.",
-        "- On-image lines stay short, but must match THAT card's beat (not a random new angle).",
+        "- Campaign-level: campaign_hook, campaign_headline, campaign_cta, offer (once for the ad).",
+        "- Each CARD is NOT a static ad. Card fields: short card headline + short description + visual prompt.",
+        "- Cards 1..N-1 of EACH creative: NO CTA button, but DO burn image_hook + image_headline onto the photo.",
+        "- LAST card of EACH creative ONLY: burn the pill CTA button using campaign_cta (and also burn image_hook + image_headline).",
+        "- Multiple CREATIVES in one brief = multiple separate carousels (each has its own closer).",
+        "- Within EACH creative group, ALL cards share the SAME assigned ad angle — do NOT rotate angles inside one carousel.",
+        "- Card 1 = PROBLEM visual. Middle = AGITATE / PROOF. Final = SOLUTION visual + CTA button.",
+        "- Card headlines must ADVANCE the story — card N is the next beat after card N-1.",
         "- Visual continuity: related colour grade / setting family is fine; each card still a distinct photo.",
-        "- Last card CTA should be the strongest action CTA; earlier cards may tease or use softer CTAs.",
         "",
-        "PER-CARD STORY BEAT + AD ANGLE:",
+        "CREATIVE GROUP AD ANGLES (mandatory):",
     ]
+    seen_groups: set[str] = set()
+    for i, seed in enumerate(seeds[:n]):
+        group = str(seed.get("carousel_group") or "").strip()
+        if not group:
+            try:
+                if int(seed.get("carousel_index") or 0) == 1:
+                    group = f"creative-{len(seen_groups) + 1}"
+            except (TypeError, ValueError):
+                group = ""
+        if not group or group in seen_groups:
+            continue
+        seen_groups.add(group)
+        angle = angle_assignments[i] if i < len(angle_assignments) else ""
+        if angle:
+            lines.append(f"- {group}: ALL cards in this carousel use ad angle {angle} only.")
+    if len(seen_groups) <= 1:
+        lines.append(
+            "- If multiple creative groups exist, each group gets its own angle from VARIANT AD ANGLE ASSIGNMENTS."
+        )
+    lines.append("")
+    lines.append("PER-CARD STORY BEAT (angle is fixed per creative group above — do NOT change per card):")
     for i in range(n):
         if n == 1:
             role = "FULL story in one card (problem → hint of solution)"
@@ -2055,9 +2737,7 @@ def _carousel_story_roles(count: int, angle_assignments: list[str]) -> str:
             role = "AGITATE — make the cost of inaction feel real"
         else:
             role = "PROOF / DEPTH — evidence, myth-bust, or social proof that bridges to the solution"
-        angle = angle_assignments[i] if i < len(angle_assignments) else ""
-        angle_bit = f" | ad angle: {angle}" if angle else ""
-        lines.append(f"- Card {i + 1}/{n}: {role}{angle_bit}")
+        lines.append(f"- Card {i + 1}/{n}: {role}")
     return "\n".join(lines)
 
 
@@ -2116,8 +2796,17 @@ def _related_image_lines(
         image_hook = "Refinance before rates move"
         image_headline = "Check your broker options"
     elif any(k in combined for k in ("jewell", "jewelr", "necklace", "earring", "bracelet", "pendant")):
-        image_hook = "Jewellery that actually feels you"
-        image_headline = "Shop pieces under $200"
+        # Keep THIS variant's idea — never collapse every jewellery ad to one canned pair.
+        if hook.strip() and len(hook.split()) <= 10:
+            image_hook = hook.strip()
+            image_headline = (
+                _billboard_words(message, 8)
+                if message.strip() and message.strip().lower() != hook.strip().lower()
+                else "Pieces you'll actually wear"
+            )
+        else:
+            image_hook = _billboard_words(hook, 8) or "Jewellery that actually feels you"
+            image_headline = _billboard_words(message, 8) or "Pieces you'll actually wear"
     elif any(k in combined for k in ("air con", "aircon", "hvac", "split system", "ducted")) and "turf" not in combined:
         image_hook = "AC packing it in?"
         image_headline = "Book a local install quote"
@@ -2444,6 +3133,7 @@ def enforce_on_image_copy_in_prompt(
     full_headline: str = "",
     industry: str = "",
     niche: str = "",
+    primary_color: str = "",
 ) -> str:
     """
     Pin EXACT on-image text so image models don't invent alternate slogans.
@@ -2476,22 +3166,21 @@ def enforce_on_image_copy_in_prompt(
     hook = (image_hook or "").strip()
     headline = (image_headline or "").strip()
     button = (cta or "").strip()
-    if not hook and not headline:
+    if not hook and not headline and not button:
         return cleaned
 
-    # Build concise quoted copy list.
-    parts: list[str] = [f'"{hook}"']
-    if headline:
-        parts.append(f'"{headline}"')
     if button:
-        parts.append(f'"{button}"')
-    copy_list = " / ".join(parts)
-
-    # CTA pill button visual instruction.
-    cta_desc = (
-        f' lower-third pill-shaped button, solid brand-colour background, "{button}" in white bold text.'
-        if button else ""
-    )
+        cleaned = re.sub(
+            r"(?i)\s*No text overlay[^.]*\.",
+            " ",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"(?i)\s*No CTA button on this (?:card|photograph)[^.]*\.",
+            " ",
+            cleaned,
+        )
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
 
     finance = _is_finance_rate_niche(
         industry=industry, niche=niche, text=f"{cleaned} {full_hook} {full_headline}"
@@ -2508,6 +3197,33 @@ def enforce_on_image_copy_in_prompt(
             "seals, or highlighted amounts — no decorative circled-document props."
         )
 
+    cta_colour = _clean_brand_hex(primary_color) or "brand primary colour from Brand Kit"
+
+    # Carousel closer: CTA pill only — no hook/headline overlay.
+    if not hook and not headline and button:
+        text_rules = (
+            f" {_ANCHOR_SENTINEL} LAST CARD: burn a lower-third pill-shaped CTA button, "
+            f'solid {cta_colour} background, white bold text reading exactly "{button}". '
+            "No other text, slogans, headlines, or labels anywhere on the photograph. "
+            "CTA must look like a clickable pill button with background colour, not plain floating text."
+            + prop_rule
+        )
+        return _clamp_prompt(f"{cleaned.rstrip()}{text_rules}")
+
+    # Build concise quoted copy list.
+    parts: list[str] = [f'"{hook}"']
+    if headline:
+        parts.append(f'"{headline}"')
+    if button:
+        parts.append(f'"{button}"')
+    copy_list = " / ".join(parts)
+
+    # CTA pill button visual instruction.
+    cta_desc = (
+        f' lower-third pill-shaped button, solid {cta_colour} background, "{button}" in white bold text.'
+        if button else ""
+    )
+
     # TEXT-ANCHOR sentinel stays so idempotency check works on re-runs,
     # but the visual scene now comes FIRST so the model builds the scene before
     # processing text overlay rules — better scene fidelity with fewer artefacts.
@@ -2518,6 +3234,7 @@ def enforce_on_image_copy_in_prompt(
         + " No other text, slogans, signs, labels, or rate stickers anywhere — including laptop lids, "
         "device backs, calculators, sticky notes, and background posters."
         + f" ON-IMAGE COPY (final authority): render EXACTLY — {copy_list}."
+        + " Keep the quoted casing exactly (Title Case / sentence case) — do NOT convert to ALL CAPS."
         + (" CTA must look like a pill button with background colour, not plain text." if button else "")
         + " Discard any other marketing words."
         + prop_rule
@@ -2525,6 +3242,26 @@ def enforce_on_image_copy_in_prompt(
 
     # Structure: [visual scene FIRST] → [text rules LAST]
     return _clamp_prompt(f"{cleaned.rstrip()}{text_rules}")
+
+
+def strip_burned_in_copy_from_prompt(prompt: str, *, allow_cta: bool = False) -> str:
+    """Strip burned-in slogans. Earlier carousel cards stay photo-only; last card may keep a CTA."""
+    cleaned = (prompt or "").strip()
+    if _ANCHOR_SENTINEL in cleaned:
+        cleaned = cleaned[: cleaned.find(_ANCHOR_SENTINEL)].strip()
+    for pat in _ON_IMAGE_TEXT_PATTERNS:
+        cleaned = pat.sub(" ", cleaned)
+    cleaned = re.sub(r"(?i)\bcta button\b[^.]*\.?", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    if allow_cta:
+        return cleaned
+    note = (
+        " No text overlay, no slogans, no CTA button on this photograph — "
+        "captions and the ad CTA live in the carousel UI, not burned into the image."
+    )
+    if "no text overlay" in cleaned.lower():
+        return cleaned
+    return _clamp_prompt(f"{cleaned.rstrip()}{note}")
 
 
 
@@ -3064,6 +3801,211 @@ def _fallback_cta_options(*, industry: str, cta_hint: str) -> list[str]:
     return out
 
 
+def _copy_too_similar(a: str, b: str) -> bool:
+    def norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+    na, nb = norm(a), norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    wa, wb = na.split(), nb.split()
+    if len(wa) >= 4 and wa[:4] == wb[:4]:
+        return True
+    sa, sb = set(wa), set(wb)
+    overlap = len(sa & sb) / max(1, min(len(sa), len(sb)))
+    return overlap >= 0.78
+
+
+def _distinct_ad_copy(
+    *,
+    index: int,
+    angle: str,
+    brand: str,
+    niche: str,
+    industry: str,
+    existing_hooks: list[str],
+) -> tuple[str, str, str, str]:
+    """Return a unique hook/message/on-image pair for this slot — never clone slot 1."""
+    jewellery = _is_jewellery_niche(niche=niche, industry=industry)
+    if jewellery:
+        bank = [
+            (
+                "She cried when she saw it",
+                "A ring designed around her — not picked off a tray. Book a free consult.",
+                "She cried when she saw it",
+                "Designed around her",
+            ),
+            (
+                "482 Melbourne couples. One jeweller.",
+                "Mine-to-market diamonds, handcrafted settings, zero retail markup.",
+                "482 Melbourne couples",
+                "One jeweller. Zero markup.",
+            ),
+            (
+                "What actually happens at a consultation?",
+                "Meet the jeweller, see the stones, leave with a clear design plan.",
+                "What happens in consult?",
+                "Four steps to your ring",
+            ),
+            (
+                "Stop paying high-street markup on love",
+                "Bespoke engagement rings without the retail tax. Free design session.",
+                "Skip the retail markup",
+                "Bespoke. Mine-to-market.",
+            ),
+            (
+                "Your ring shouldn't look like hers",
+                "One-of-one settings cut for how she actually wears it every day.",
+                "Not another catalogue ring",
+                "Made for how she wears it",
+            ),
+            (
+                "Five stars. Real tears. Real rings.",
+                "Melbourne reviews from couples who sat at the bench — then said yes.",
+                "Real couples. Real rings.",
+                "See why they booked",
+            ),
+            (
+                "200,000 diamonds. One conversation.",
+                "Explore the stones in person — not a filtered grid on your phone.",
+                "200,000+ diamonds",
+                "Explore them in person",
+            ),
+            (
+                "Handcrafted in Melbourne, not mass-made",
+                "Bench-made settings you can watch take shape before the big day.",
+                "Bench-made in Melbourne",
+                "Watch it take shape",
+            ),
+            (
+                "The moment the box opened",
+                "A proposal still they replay — because the ring felt unmistakably hers.",
+                "The moment the box opened",
+                "A ring she still talks about",
+            ),
+            (
+                "Date is set. Ring isn't?",
+                "Free design consultation — walk out knowing the next step.",
+                "Date set. Ring isn't?",
+                "Book a free design consult",
+            ),
+        ]
+    else:
+        noun = (niche or industry or "this").split(",")[0].strip()[:36] or "this"
+        house = brand or "us"
+        bank = [
+            (
+                f"Still putting off {noun}?",
+                f"{house} makes the next step simple — book a time this week.",
+                f"Still putting off {noun}?",
+                "Take the next step",
+            ),
+            (
+                f"What {noun} actually looks like",
+                f"See the process, the proof, and the offer — then decide.",
+                f"See {noun} up close",
+                "Proof before you book",
+            ),
+            (
+                f"Tired of the same {noun} pitch?",
+                f"A clearer offer from {house} — built for people ready to act.",
+                "Tired of the same pitch?",
+                f"A clearer {noun} offer",
+            ),
+            (
+                f"The {noun} moment that changes it",
+                f"One decision this week beats another month of guessing.",
+                f"One {noun} decision",
+                "Stop guessing this week",
+            ),
+            (
+                f"Real people. Real {noun} results.",
+                f"Social proof you can check — then book with {house}.",
+                "Real people. Real results.",
+                "See why they switched",
+            ),
+            (
+                f"Don't wait until {noun} gets harder",
+                f"Book now while the path is still simple.",
+                "Don't wait it out",
+                "Book while it's simple",
+            ),
+            (
+                f"There's a better way to do {noun}",
+                f"{house} shows the difference in one conversation.",
+                f"A better way to {noun}",
+                "See it in one conversation",
+            ),
+            (
+                f"Ready for {noun} that actually fits?",
+                f"Skip the generic option. Get a plan built around you.",
+                f"{noun} that actually fits",
+                "Get a plan around you",
+            ),
+        ]
+    used = {re.sub(r"[^a-z0-9]+", " ", h.lower()).strip() for h in existing_hooks if h}
+    for offset in range(len(bank)):
+        hook, message, ih, ihead = bank[(index + offset) % len(bank)]
+        key = re.sub(r"[^a-z0-9]+", " ", hook.lower()).strip()
+        if key not in used and not any(_copy_too_similar(hook, h) for h in existing_hooks):
+            return hook, message, ih, ihead
+    hook, message, ih, ihead = bank[index % len(bank)]
+    return f"{hook} ({index + 1})", message, ih, ihead
+
+
+def _ensure_unique_variant_copy(
+    variants: list[IcpImageVariantPlan],
+    *,
+    brand: str,
+    niche: str,
+    industry: str,
+    cta_hint: str,
+) -> list[IcpImageVariantPlan]:
+    """Rewrite cloned hook/headline pairs so Generate-all never repeats slot 1."""
+    out: list[IcpImageVariantPlan] = []
+    for i, v in enumerate(variants):
+        clash = any(
+            _copy_too_similar(v.hook, prev.hook) or _copy_too_similar(v.message, prev.message)
+            for prev in out
+        )
+        if clash or not (v.hook or "").strip():
+            hook, message, ih, ihead = _distinct_ad_copy(
+                index=i,
+                angle=v.ad_angle or "",
+                brand=brand,
+                niche=niche,
+                industry=industry,
+                existing_hooks=[p.hook for p in out],
+            )
+            cta_line = (v.cta or cta_hint or "").strip()
+            prompt = enforce_on_image_copy_in_prompt(
+                v.prompt or "",
+                image_hook=ih,
+                image_headline=ihead,
+                cta=cta_line,
+                full_hook=hook,
+                full_headline=message,
+                industry=industry,
+                niche=niche,
+            )
+            v = IcpImageVariantPlan(
+                use_cases=v.use_cases,
+                hook=hook,
+                message=message,
+                cta=cta_line,
+                offer=v.offer,
+                prompt=prompt,
+                reasoning=(v.reasoning or "") + " Unique copy enforced.",
+                ad_angle=v.ad_angle,
+                image_hook=ih,
+                image_headline=ihead,
+            )
+        out.append(v)
+    return out
+
+
 def _fallback_variants(
     *,
     campaign_name: str,
@@ -3091,45 +4033,50 @@ def _fallback_variants(
         niche=niche,
     )
 
+    used_hooks = list(existing_hooks)
     for i in range(variant_count):
         scene = mandates[i % len(mandates)]
-        niche_word = (industry or campaign_name or "leads").split()[0][:18]
-        hook = f"Your best {niche_word} results are slipping away to competitors who package the whole offer"
-        if hook in existing_hooks:
-            hook = f"Still chasing cold {niche_word} while bigger players win the relationship?"
-        message = f"{brand} helps you keep clients with a clearer, integrated next step this week"
-        image_hook, image_headline = _related_image_lines(
-            hook,
-            message,
-            ad_angle=(angle_assignments[i] if angle_assignments and i < len(angle_assignments) else ""),
+        angle = angle_assignments[i] if angle_assignments and i < len(angle_assignments) else ""
+        hook, message, image_hook, image_headline = _distinct_ad_copy(
+            index=i,
+            angle=angle,
+            brand=brand,
             niche=niche,
+            industry=industry,
+            existing_hooks=used_hooks,
         )
+        used_hooks.append(hook)
         cta_text = cta_options[i % len(cta_options)]
         offer = (
             f"{offer_base}. "
             f"You get clarity without the guesswork, so you can act with confidence — claim the next step now."
         )
-        prompt = enforce_niche_visual_proof_in_prompt(
-            enforce_no_spurious_circled_paper_prop(
-                enforce_on_image_copy_in_prompt(
-                    _clamp_prompt(
-                        f"Photoreal Australian commercial ad, {image_aspect_ratio}. "
-                        f"SCENE MANDATE: {scene}. Subject matches buyer for campaign '{campaign_name}'. "
-                        f"Documentary commercial lighting, authentic non-stock feel, sharp visible faces."
+        prompt = enforce_niche_product_focus_in_prompt(
+            enforce_niche_visual_proof_in_prompt(
+                enforce_no_spurious_circled_paper_prop(
+                    enforce_on_image_copy_in_prompt(
+                        _clamp_prompt(
+                            f"Photoreal Australian commercial ad, {image_aspect_ratio}. "
+                            f"SCENE MANDATE: {scene}. Subject matches buyer for campaign '{campaign_name}'. "
+                            f"Documentary commercial lighting, authentic non-stock feel, sharp visible faces."
+                        ),
+                        image_hook=image_hook,
+                        image_headline=image_headline,
+                        cta=cta_text,
+                        full_hook=hook,
+                        full_headline=message,
+                        industry=industry,
+                        niche=niche,
                     ),
-                    image_hook=image_hook,
-                    image_headline=image_headline,
-                    cta=cta_text,
-                    full_hook=hook,
-                    full_headline=message,
                     industry=industry,
                     niche=niche,
                 ),
-                industry=industry,
                 niche=niche,
+                industry=industry,
             ),
             niche=niche,
             industry=industry,
+            brand_name=brand_name,
         )
         variants.append(
             IcpImageVariantPlan(
@@ -3140,7 +4087,7 @@ def _fallback_variants(
                 offer=offer,
                 prompt=prompt,
                 reasoning=f"Fallback variant {i + 1}: {reason}.",
-                ad_angle=(angle_assignments[i] if angle_assignments and i < len(angle_assignments) else ""),
+                ad_angle=angle,
                 image_hook=image_hook,
                 image_headline=image_headline,
             )
@@ -3182,6 +4129,311 @@ def _style_enforcement_block(frameworks: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _last_carousel_index(
+    is_carousel: bool, strategy_seeds: list[dict], count: int
+) -> int | None:
+    """
+    Fallback only when seeds lack per-card carousel_index/total.
+    Prefer each seed's own index==total (supports multiple creatives in one batch).
+    """
+    if count < 1:
+        return None
+    # Prefer last seed that is explicitly marked as the closer of its carousel.
+    for i in range(count - 1, -1, -1):
+        if i >= len(strategy_seeds):
+            continue
+        seed = strategy_seeds[i]
+        try:
+            idx = int(seed.get("carousel_index") or 0)
+            tot = int(seed.get("carousel_total") or 0)
+        except (TypeError, ValueError):
+            idx, tot = 0, 0
+        fmt = str(seed.get("format") or "").strip().lower()
+        if (is_carousel or fmt == "carousel") and tot >= 2 and idx >= tot:
+            return i
+    if is_carousel:
+        return count - 1
+    idxs = [
+        i
+        for i in range(count)
+        if i < len(strategy_seeds)
+        and str(strategy_seeds[i].get("format") or "").strip().lower() == "carousel"
+    ]
+    return idxs[-1] if idxs else None
+
+
+def _seed_is_carousel_closer(seed: dict | None, *, fallback_last: bool = False) -> bool:
+    if not isinstance(seed, dict):
+        return fallback_last
+    try:
+        idx = int(seed.get("carousel_index") or 0)
+        tot = int(seed.get("carousel_total") or 0)
+        if tot >= 2 and idx:
+            return idx >= tot
+    except (TypeError, ValueError):
+        pass
+    return fallback_last
+
+
+def _apply_seed_product_focus(
+    plan: IcpImageVariantPlan,
+    seed: dict | None,
+    *,
+    industry: str = "",
+    niche: str = "",
+    campaign_product_focus: str = "",
+) -> IcpImageVariantPlan:
+    focus = _seed_product_focus(seed) or _normalize_product_focus(campaign_product_focus)
+    model = _seed_product_model(seed)
+    if not focus:
+        return plan
+    use_cases = list(plan.use_cases or [])
+    if focus == "product_only":
+        if "hero_product" not in use_cases:
+            use_cases = ["hero_product", *[u for u in use_cases if u != "bs_emotional_using"]][:3]
+    elif focus == "with_person":
+        if not any(u in use_cases for u in ("product_person", "bs_emotional_using", "lifestyle")):
+            use_cases = ["product_person", *use_cases][:3]
+    img_hook = (plan.image_hook or "").strip()
+    if focus == "product_only" and model and not img_hook:
+        img_hook = _billboard_words(model, 6)
+    prompt = enforce_product_focus_in_prompt(
+        plan.prompt,
+        product_focus=focus,
+        product_model=model,
+        industry=industry,
+        niche=niche,
+    )
+    return IcpImageVariantPlan(
+        use_cases=use_cases,
+        hook=plan.hook,
+        message=plan.message,
+        cta=plan.cta,
+        offer=plan.offer,
+        prompt=prompt,
+        reasoning=plan.reasoning,
+        ad_angle=plan.ad_angle,
+        image_hook=img_hook or plan.image_hook,
+        image_headline=plan.image_headline,
+    )
+
+
+def _pack_icp_plan(
+    icp_text: str,
+    variants: list[IcpImageVariantPlan],
+    *,
+    is_carousel: bool,
+    strategy_seeds: list[dict],
+    cta: str = "",
+    llm_data: dict | None = None,
+    industry: str = "",
+    niche: str = "",
+    image_aspect_ratio: str = "4:3",
+    on_image_style: str = "auto",
+    fashion_retail_promo: bool = False,
+    campaign_product_focus: str = "",
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
+) -> dict[str, Any]:
+    """Attach campaign-level copy; carousel closers keep CTA, all cards keep on-image hook/headline."""
+    campaign_hook = ""
+    campaign_headline = ""
+    campaign_cta = (cta or "").strip()
+    if isinstance(llm_data, dict):
+        campaign_hook = str(llm_data.get("campaign_hook") or llm_data.get("overall_hook") or "").strip()
+        campaign_headline = str(
+            llm_data.get("campaign_headline") or llm_data.get("overall_headline") or ""
+        ).strip()
+        campaign_cta = str(llm_data.get("campaign_cta") or "").strip() or campaign_cta
+    last_card_i = _last_carousel_index(is_carousel, strategy_seeds, len(variants))
+    packed: list[IcpImageVariantPlan] = []
+    for i, v in enumerate(variants):
+        seed = strategy_seeds[i] if i < len(strategy_seeds) else None
+        if _seed_is_photo_only(seed if isinstance(seed, dict) else None):
+            packed.append(
+                IcpImageVariantPlan(
+                    use_cases=v.use_cases,
+                    hook=v.hook,
+                    message=v.message,
+                    cta=v.cta,
+                    offer=v.offer,
+                    prompt=enforce_fashion_retail_photo_in_prompt(
+                        v.prompt, aspect_ratio=image_aspect_ratio or "4:3"
+                    ),
+                    reasoning=v.reasoning,
+                    ad_angle=v.ad_angle,
+                    image_hook="",
+                    image_headline="",
+                )
+            )
+            continue
+        if _seed_is_retail_promo(seed if isinstance(seed, dict) else None):
+            img_hook, img_headline, cta_line = _fashion_retail_promo_on_image_lines(
+                seed=seed if isinstance(seed, dict) else None,
+                hook=v.hook,
+                message=v.message,
+                offer=v.offer,
+                cta=v.cta or cta,
+            )
+            ratio = (
+                str(seed.get("aspect_ratio") or "").strip()
+                if isinstance(seed, dict)
+                else ""
+            ) or image_aspect_ratio or "1:1"
+            promo_prompt = enforce_fashion_retail_promo_in_prompt(
+                _strip_fashion_photo_only_lock(v.prompt), aspect_ratio=ratio
+            )
+            packed.append(
+                IcpImageVariantPlan(
+                    use_cases=v.use_cases,
+                    hook=v.hook,
+                    message=v.message,
+                    cta=cta_line,
+                    offer=v.offer,
+                    prompt=enforce_on_image_copy_in_prompt(
+                        strip_burned_in_copy_from_prompt(promo_prompt, allow_cta=True),
+                        image_hook=img_hook,
+                        image_headline=img_headline,
+                        cta=cta_line,
+                        full_hook=v.hook,
+                        full_headline=v.message,
+                        industry=industry,
+                        niche=niche,
+                        primary_color=primary_color,
+                    ),
+                    reasoning=v.reasoning,
+                    ad_angle=v.ad_angle,
+                    image_hook=img_hook,
+                    image_headline=img_headline,
+                )
+            )
+            continue
+        is_card = is_carousel or (
+            isinstance(seed, dict)
+            and str(seed.get("format") or "").strip().lower() == "carousel"
+        )
+        if is_card:
+            if not campaign_hook:
+                campaign_hook = (v.hook or "").strip()
+            if not campaign_headline:
+                campaign_headline = (v.message or "").strip()
+            if not campaign_cta:
+                campaign_cta = (v.cta or "").strip()
+            is_closer = _seed_is_carousel_closer(
+                seed if isinstance(seed, dict) else None,
+                fallback_last=(i == last_card_i),
+            )
+            if is_closer:
+                cta_line = campaign_cta or (v.cta or "").strip()
+                img_hook = (v.image_hook or "").strip()
+                img_headline = (v.image_headline or "").strip()
+                if not img_hook or not img_headline:
+                    derived_h, derived_m = _related_image_lines(
+                        v.hook, v.message, ad_angle=v.ad_angle, niche=niche
+                    )
+                    img_hook = img_hook or derived_h
+                    img_headline = img_headline or derived_m
+                packed.append(
+                    IcpImageVariantPlan(
+                        use_cases=v.use_cases,
+                        hook=v.hook,
+                        message=v.message,
+                        cta=cta_line,
+                        offer="",
+                        prompt=enforce_on_image_copy_in_prompt(
+                            strip_burned_in_copy_from_prompt(v.prompt, allow_cta=True),
+                            image_hook=img_hook,
+                            image_headline=img_headline,
+                            cta=cta_line,
+                            full_hook=v.hook,
+                            full_headline=v.message,
+                            industry=industry,
+                            niche=niche,
+                            primary_color=primary_color,
+                        ),
+                        reasoning=v.reasoning,
+                        ad_angle=v.ad_angle,
+                        image_hook=img_hook,
+                        image_headline=img_headline,
+                    )
+                )
+            else:
+                img_hook = (v.image_hook or "").strip()
+                img_headline = (v.image_headline or "").strip()
+                if not img_hook or not img_headline:
+                    derived_h, derived_m = _related_image_lines(
+                        v.hook, v.message, ad_angle=v.ad_angle, niche=niche
+                    )
+                    img_hook = img_hook or derived_h
+                    img_headline = img_headline or derived_m
+                packed.append(
+                    IcpImageVariantPlan(
+                        use_cases=v.use_cases,
+                        hook=v.hook,
+                        message=v.message,
+                        cta="",
+                        offer="",
+                        prompt=enforce_on_image_copy_in_prompt(
+                            strip_burned_in_copy_from_prompt(v.prompt, allow_cta=True),
+                            image_hook=img_hook,
+                            image_headline=img_headline,
+                            cta="",
+                            full_hook=v.hook,
+                            full_headline=v.message,
+                            industry=industry,
+                            niche=niche,
+                            primary_color=primary_color,
+                        ),
+                        reasoning=v.reasoning,
+                        ad_angle=v.ad_angle,
+                        image_hook=img_hook,
+                        image_headline=img_headline,
+                    )
+                )
+        else:
+            packed.append(v)
+    finalized: list[IcpImageVariantPlan] = []
+    for i, v in enumerate(packed):
+        seed = strategy_seeds[i] if i < len(strategy_seeds) else None
+        focused = _apply_seed_product_focus(
+            v, seed, industry=industry, niche=niche, campaign_product_focus=campaign_product_focus
+        )
+        styled_prompt = enforce_on_image_style_in_prompt(
+            focused.prompt,
+            on_image_style=on_image_style,
+            niche=niche,
+            industry=industry,
+            fashion_retail_promo=fashion_retail_promo,
+            primary_color=primary_color,
+            secondary_color=secondary_color,
+            font_heading=font_heading,
+            font_body=font_body,
+        )
+        finalized.append(
+            IcpImageVariantPlan(
+                use_cases=focused.use_cases,
+                hook=focused.hook,
+                message=focused.message,
+                cta=focused.cta,
+                offer=focused.offer,
+                prompt=styled_prompt,
+                reasoning=focused.reasoning,
+                ad_angle=focused.ad_angle,
+                image_hook=focused.image_hook,
+                image_headline=focused.image_headline,
+            )
+        )
+    return {
+        "icp_text": icp_text,
+        "variants": [x.to_dict() for x in finalized],
+        "campaign_hook": campaign_hook,
+        "campaign_headline": campaign_headline,
+        "campaign_cta": campaign_cta,
+    }
+
+
 async def generate_icp_image_plan(
     *,
     campaign_name: str,
@@ -3199,25 +4451,25 @@ async def generate_icp_image_plan(
     existing_hooks: list[str] | None = None,
     existing_prompts: list[str] | None = None,
     creative_format: str = "static",
+    strategy_notes: str = "",
+    strategy_variants: list[dict] | None = None,
+    on_image_style: str = "auto",
+    product_focus: str = "",
+    primary_color: str = "",
+    secondary_color: str = "",
+    font_heading: str = "",
+    font_body: str = "",
 ) -> dict[str, Any]:
     """
     Build ICP from industry + niche + objective, then produce N distinct image variant plans.
     Returns { icp_text, variants: [{ use_cases, hook, message, image_hook, image_headline, ... }] }.
     """
-    count = max(1, min(20, int(variant_count or 1)))
+    count = max(1, min(100, int(variant_count or 1)))
     hooks_avoid = [h.strip() for h in (existing_hooks or []) if h and h.strip()]
     prompts_avoid = [p.strip() for p in (existing_prompts or []) if p and p.strip()]
     frameworks = [f.strip() for f in (hook_frameworks or []) if f and str(f).strip()]
     industry_label = (industry or "").strip() or campaign_name
     niche_label = (niche or "").strip()
-    angle_assignments = assign_angles_to_variants(
-        frameworks,
-        count,
-        objective_id,
-        industry=industry_label,
-        niche=niche_label,
-        campaign_name=campaign_name,
-    )
     service_location = (geography or "").strip()
     facts_block = format_brand_facts_for_llm(brand_facts)
     facts_whitelist = brand_facts_whitelist_text(brand_facts)
@@ -3226,7 +4478,79 @@ async def generate_icp_image_plan(
         areas = [str(a).strip() for a in (brand_facts.get("service_areas") or []) if str(a).strip()]
         locs = [str(a).strip() for a in (brand_facts.get("locations") or []) if str(a).strip()]
         service_location = ", ".join((areas or locs)[:3])
-    is_carousel = (creative_format or "").strip().lower() == "carousel"
+    strategy_seeds = [v for v in (strategy_variants or []) if isinstance(v, dict)]
+    campaign_product_focus = _normalize_product_focus(product_focus)
+    if campaign_product_focus:
+        for seed in strategy_seeds:
+            if isinstance(seed, dict) and not _seed_product_focus(seed):
+                seed["product_focus"] = campaign_product_focus
+    fmt_l = (creative_format or "").strip().lower()
+    seed_formats = [
+        str(v.get("format") or "").strip().lower() for v in strategy_seeds if v.get("format")
+    ]
+    is_mixed = fmt_l == "mixed" or (
+        "carousel" in seed_formats and "static" in seed_formats
+    )
+    is_carousel = (not is_mixed) and (fmt_l == "carousel" or seed_formats == ["carousel"] * len(seed_formats) and bool(seed_formats))
+
+    fashion_retail_photo = _campaign_is_fashion_retail_photo(
+        niche=niche_label,
+        industry=industry_label,
+        campaign_name=campaign_name,
+        brand_name=brand_name,
+        strategy_seeds=strategy_seeds,
+    )
+    fashion_retail_promo = _campaign_is_fashion_retail_promo(
+        niche=niche_label,
+        industry=industry_label,
+        campaign_name=campaign_name,
+        brand_name=brand_name,
+        strategy_seeds=strategy_seeds,
+    )
+    resolved_on_image_style = resolve_on_image_style(
+        on_image_style,
+        niche=niche_label,
+        industry=industry_label,
+        fashion_retail_promo=fashion_retail_promo,
+    )
+    if fashion_retail_promo:
+        seed_ratio = next(
+            (
+                str(s.get("aspect_ratio") or "").strip()
+                for s in strategy_seeds
+                if isinstance(s, dict) and str(s.get("aspect_ratio") or "").strip()
+            ),
+            "",
+        )
+        if seed_ratio:
+            image_aspect_ratio = seed_ratio
+        elif image_aspect_ratio in ("", "4:3"):
+            image_aspect_ratio = "1:1"
+    elif fashion_retail_photo and not fashion_retail_promo and image_aspect_ratio in ("", "1:1"):
+        image_aspect_ratio = "4:3"
+
+    angle_assignments = assign_angles_to_variants(
+        frameworks,
+        count,
+        objective_id,
+        industry=industry_label,
+        niche=niche_label,
+        campaign_name=campaign_name,
+        product_focus=campaign_product_focus,
+    )
+    angle_assignments = _lock_angles_to_carousel_groups(
+        angle_assignments,
+        strategy_seeds,
+        count,
+        frameworks=frameworks,
+    )
+    for i, seed in enumerate(strategy_seeds[:count]):
+        if not isinstance(seed, dict):
+            continue
+        seed_angle = str(seed.get("ad_angle") or "").strip()
+        if seed_angle and i < len(angle_assignments):
+            angle_assignments[i] = seed_angle
+
     framework_lines = []
     for fid in frameworks:
         tip = ANGLE_GUIDANCE.get(fid, "Apply this marketing angle clearly in hook + scene.")
@@ -3234,11 +4558,17 @@ async def generate_icp_image_plan(
     framework_block = (
         "\n".join(framework_lines)
         if framework_lines
-        else "- (none selected) — AI will pick angles from campaign objective and ICP."
+        else (
+            "- product_hero: catalog product-alone layout — model name + bold headline on brand colors; no story angle."
+            if campaign_product_focus == "product_only"
+            else "- (none selected) — AI will pick angles from campaign objective and ICP."
+        )
     )
     angle_block = per_variant_angle_instructions(angle_assignments)
     carousel_block = (
-        _carousel_story_roles(count, angle_assignments) if is_carousel and count >= 1 else ""
+        _carousel_story_roles(count, angle_assignments, strategy_seeds)
+        if is_carousel and count >= 1
+        else ""
     )
 
     icp_text = await build_icp_from_campaign(
@@ -3258,8 +4588,23 @@ async def generate_icp_image_plan(
         niche=niche_label,
         icp_text=icp_text,
         avoid_snippets=prompts_avoid,
-        hook_frameworks=frameworks,
+        hook_frameworks=frameworks if campaign_product_focus != "product_only" else ["product_hero"],
     )
+    if campaign_product_focus == "product_only":
+        catalog_scenes = [
+            "Catalog hero: product alone on diagonal brand-color studio blocks (primary + white), sharp detail, 50–70% frame",
+            "E-commerce product shot: clean studio, geometric brand-color accents, bold stacked headline space, no people",
+            "Premium retail catalog: product hero on minimal background, model-name label bar, brand primary accent strip",
+        ]
+        for i in range(count):
+            scene_mandates[i] = catalog_scenes[i % len(catalog_scenes)]
+    seen_seed_scenes: set[str] = set()
+    for i, seed in enumerate(strategy_seeds[:count]):
+        scene = str(seed.get("scene") or seed.get("prompt") or "").strip()
+        key = re.sub(r"\s+", " ", scene.lower())[:100]
+        if scene and key not in seen_seed_scenes:
+            scene_mandates[i] = scene[:500]
+            seen_seed_scenes.add(key)
 
     niche_visual_mandate = _build_niche_visual_mandate(
         niche=niche_label,
@@ -3281,7 +4626,23 @@ async def generate_icp_image_plan(
             angle_assignments=angle_assignments,
             reason="OPENROUTER_API_KEY is missing",
         )
-        return {"icp_text": icp_text, "variants": [v.to_dict() for v in variants]}
+        return _pack_icp_plan(
+            icp_text,
+            variants,
+            is_carousel=is_carousel,
+            strategy_seeds=strategy_seeds,
+            cta=cta,
+            industry=industry_label,
+            niche=niche_label,
+            image_aspect_ratio=image_aspect_ratio,
+            on_image_style=on_image_style,
+            fashion_retail_promo=fashion_retail_promo,
+            campaign_product_focus=campaign_product_focus,
+            primary_color=primary_color,
+            secondary_color=secondary_color,
+            font_heading=font_heading,
+            font_body=font_body,
+        )
 
     style_block = _style_enforcement_block(list(dict.fromkeys(angle_assignments)))
     offer_for_model = offer
@@ -3291,6 +4652,12 @@ async def generate_icp_image_plan(
         offer_for_model = enforce_niche_product_focus_copy(
             offer or "", niche=niche_label, industry=industry_label, field="offer"
         )
+    brand_visual_msg = _brand_visual_lock(
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        font_heading=font_heading,
+        font_body=font_body,
+    ).strip()
     user_msg = "\n".join([
         _USE_CASE_CATALOGUE,
         "",
@@ -3298,7 +4665,9 @@ async def generate_icp_image_plan(
         "MARKETING INPUTS (this order defines campaign intent — process 1→5 before writing):",
         f"1. INDUSTRY (brand category): {industry_label}",
         f"2. NICHE (campaign specialty): {niche_label or 'Not specified'}",
-        f"3. BRAND: {brand_name or 'Unknown'}",
+        f"3. BRAND: {brand_name or 'Unknown'} "
+        f"(this is the ONLY company name allowed on-image — never invent Lusso / Shop Dimad / "
+        f"She Diamond / Shop Diamonds as a store name; those are lookalikes or website nav)",
         f"4. CAMPAIGN OBJECTIVE (must drive this action): {objective_id or 'conversions'}",
         "5. AD ANGLE / HOOK FRAMEWORK: see SELECTED AD ANGLES below",
         f"6. SERVICE LOCATION (authoritative — use ONLY this for any place name in copy/prompt): "
@@ -3317,18 +4686,77 @@ async def generate_icp_image_plan(
             )
             else []
         ),
+        *(
+            [
+                "CAMPAIGN PRODUCT-ONLY SHOT (all variants): Catalog/studio hero — NO people in frame. "
+                "Ad angles are OPTIONAL — do NOT force pain-led, social-proof story, or before/after angles. "
+                "Focus copy on product name/model, key feature, offer, and CTA. "
+                "image_hook may be the product model name; image_headline a short feature or offer line.",
+                "",
+            ]
+            if campaign_product_focus == "product_only"
+            else []
+        ),
+        *(
+            [
+                "PRODUCT SHOT LOCK (per-variant seeds): When product_focus=product_only, write a catalog/studio "
+                "product hero — NO people. Prefer use_cases hero_product + detail_texture. "
+                "When product_focus=with_person, show a real person with the product (product_person / bs_emotional_using). "
+                "When product_model is set, that exact model name must appear in the scene and may become image_hook on product-only cards.",
+                "",
+            ]
+            if any(_seed_product_focus(s) for s in strategy_seeds[:count] if isinstance(s, dict))
+            else []
+        ),
+        *(
+            [
+                "FASHION RETAIL PROMO LOCK (critical): Client-style clothing ads like premium denim/knitwear campaigns. "
+                "Each variant matches its USE CASES — hero model, multi-look lineup, product detail, or lifestyle. "
+                "Photoreal models + clothes are the hero. "
+                "MUST burn image_hook + image_headline + CTA pill onto the image — "
+                "headline from MD (e.g. NEW ARRIVALS / THE DENIM EDIT), "
+                "image_headline from offer (e.g. 20% OFF SITEWIDE · USE CODE EOFY20), "
+                "CTA button from MD (e.g. Shop New Arrivals / Shop The Edit). "
+                "Do NOT send offer/CTA to caption only — they belong ON the image for fashion retail. "
+                f"Compose for ASPECT RATIO {image_aspect_ratio} (1:1 square lineup, 9:16 full-length vertical). "
+                "Lower third clear for headline + offer + CTA bar. Brand logo composited in post top-right.",
+                "",
+            ]
+            if fashion_retail_promo
+            else []
+        ),
+        *(
+            [
+                "FASHION RETAIL PHOTO LOCK (critical): Online clothing ads = person + outfit ONLY. "
+                "Every variant is a photoreal editorial fashion shot — full-length or three-quarter model wearing the clothes. "
+                "image_hook and image_headline MUST be empty strings. Do NOT burn NEW ARRIVALS, EOFY, discount codes, "
+                "or CTA buttons into the photo. hook/message/offer are feed caption copy only. "
+                f"Compose for {image_aspect_ratio} portrait (model vertical, clothes hero).",
+                "",
+            ]
+            if fashion_retail_photo and not fashion_retail_promo
+            else []
+        ),
         *( [facts_block, ""] if facts_block else [
             "VERIFIED BRAND FACTS: none provided — do NOT invent rates, review counts, customer volumes, or years of experience.",
             "",
         ] ),
         "",
-        f"CREATIVE FORMAT: {'carousel (swipe story)' if is_carousel else 'static (standalone ads)'}",
+        f"CREATIVE FORMAT: {'mixed static + carousel' if is_mixed else ('carousel (swipe story)' if is_carousel else 'static (standalone ads)')}",
         f"CAMPAIGN LABEL: {campaign_name}",
         f"SCENE POOL: {_derive_industry_bucket(campaign_name=campaign_name, industry=industry_label, niche=niche_label, icp_text=icp_text)}",
         f"CTA HINT (optional shared guidance — still invent a distinct CTA per variant): {cta or 'none — invent action CTAs from campaign + ICP'}",
-        f"OFFER HINT (caption only — do NOT put in image): {offer_for_model or 'infer from ICP and campaign'}",
+        (
+            f"OFFER HINT (burn on image as image_headline + promo code pill when provided): {offer_for_model or 'infer from ICP'}"
+            if fashion_retail_promo
+            else f"OFFER HINT (caption only — do NOT put in image): {offer_for_model or 'infer from ICP and campaign'}"
+        ),
         f"ASPECT RATIO: {image_aspect_ratio}",
         f"VARIANT / CARD COUNT: {count}",
+        f"ON-IMAGE TYPE STYLE (campaign — same for ALL variants): user selected '{on_image_style or 'auto'}' "
+        f"→ resolved '{resolved_on_image_style}'.{on_image_style_lock(resolved_on_image_style, primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)} "
+        "Do NOT mix jeweller gold serif on retail/bike ads unless jewellery_luxury is selected.",
+        *([brand_visual_msg, ""] if brand_visual_msg else []),
         "",
         *( [niche_visual_mandate, ""] if niche_visual_mandate else [] ),
         "LOCATION RULE (critical): If SERVICE LOCATION is set, any local claim in hook / image_hook / "
@@ -3369,7 +4797,10 @@ async def generate_icp_image_plan(
             "JEWELLERY NICHE LOCK (critical): Niche is Jewellery. Every hook, headline, image_hook, "
             "image_headline, offer, CTA story, and prompt must be about jewellery (necklace, rings, "
             "earrings, bracelet, gift unboxing). BANNED: furniture, sofas, outdoor goods, home refresh, "
-            "home décor collections — even if brand facts mention them."
+            "home décor collections — even if brand facts mention them. "
+            "PRODUCT HERO: name the specific piece and ZOOM it as the main subject (40–70% of frame, "
+            "macro/tight close-up, sharp stones and metal). People and boutique/lifestyle MAY stay as "
+            "softer supporting background — do not delete them, but they must not dominate the frame."
             if _is_jewellery_niche(niche=niche_label, industry=industry_label)
             else ""
         ),
@@ -3387,6 +4818,41 @@ async def generate_icp_image_plan(
         "ICP PROFILE:",
         icp_text,
         "",
+        *(
+            [
+                "CLIENT STRATEGY (knowledge only — NOT a script to copy):",
+                "Write ORIGINAL catchy hook + matching headline pairs. Same campaign idea as the client,",
+                "but do NOT paste their primary text or hook verbatim. Stronger billboard lines are welcome.",
+                "When strategy seeds include scene / post_type / design_notes, treat them as MANDATORY art direction —",
+                "layout, product placement, colors, and on-image text structure must match the MD brief.",
+                "Hook and headline MUST be one matching pair (same promise, same audience). "
+                "Never split one sentence across two fields. Never leave a fragment ending on your/at/the.",
+                *( [f"Strategy notes: {(strategy_notes or '')[:1200]}"] if (strategy_notes or "").strip() else [] ),
+                *[
+                    (
+                        f"  Seed {i + 1}: format={seed.get('format') or 'static'}"
+                        f" angle={seed.get('ad_angle') or '-'}"
+                        f" post_type={str(seed.get('post_type') or '')[:60] or '-'}"
+                        f" use_cases={seed.get('use_cases') or []}"
+                        f" ratio={seed.get('aspect_ratio') or '-'}"
+                        f" product_focus={seed.get('product_focus') or '-'}"
+                        f" product_model={str(seed.get('product_model') or '')[:80] or '-'}"
+                        f" card={seed.get('carousel_index') or '-'}/{seed.get('carousel_total') or '-'}"
+                        f" scene={str(seed.get('scene') or seed.get('prompt') or '')[:480]}"
+                        f" design={str(seed.get('design_notes') or '')[:180] or '-'}"
+                        f" client_hook={str(seed.get('client_hook') or '')[:140]}"
+                        f" client_message={str(seed.get('client_message') or '')[:140]}"
+                    )
+                    for i, seed in enumerate(strategy_seeds[:count])
+                ],
+                "Product focus seeds: product_only = catalog hero, NO people; with_person = model/user with product. "
+                "When product_model is set, show THAT exact model in the scene and prefer it for image_hook on product-only shots.",
+                "Carousel seeds: ONE square photo per card. CTA pill only on the last card of that carousel.",
+                "",
+            ]
+            if strategy_seeds or (strategy_notes or "").strip()
+            else []
+        ),
         "SCENE STARTING POINT (one per variant — adapt to ICP; vary props and setting across variants):",
         *[f"  Variant {i + 1}: {scene_mandates[i]}" for i in range(count)],
         "",
@@ -3395,13 +4861,24 @@ async def generate_icp_image_plan(
         "",
         f"Produce exactly {count} variant(s). Each must use HALO aligned to the ICP.",
         (
-            "CAROUSEL MODE: every hook/message/prompt must advance the SAME swipe story "
-            "(problem → agitate/proof → solution). Angles colour the beat; they must not break the story."
-            if is_carousel
-            else "STATIC MODE: variants can be alternate standalone creatives."
+            "MIXED MODE: honour each seed's format. Carousel cards are one swipe story; static rows are standalone ads."
+            if is_mixed
+            else (
+                "CAROUSEL MODE: return campaign_hook + campaign_headline + campaign_cta ONCE at JSON root. "
+                "Each variant is one swipe CARD: hook=short card headline, message=short card description. "
+                "Cards 1..N-1: cta='', but still burn image_hook + image_headline onto the photo. "
+                "LAST card: cta=campaign_cta and also burn a pill CTA button on the photo. "
+                "Cards advance one story (problem → agitate/proof → solution + CTA on the closer)."
+                if is_carousel
+                else "STATIC MODE: variants can be alternate standalone creatives with on-image hook/headline/CTA."
+            )
         ),
-        "Keep FULL hook + message strong and complete for the post.",
-        "Also invent RELATED image_hook (max 6 words) + image_headline (max 8 words) — catchy twins for the photo only.",
+        "UNIQUENESS (critical): every variant MUST have a DIFFERENT hook, DIFFERENT headline, and DIFFERENT scene. "
+        "Repeating the same luxury line (e.g. 'The Art of Elegance') across cards is a FAILED batch — rewrite. "
+        "Carousel cards still share one story, but each card's photograph must be a new beat. Only the last card burns a CTA."
+        "Keep FULL hook + message strong and complete for the post — a matching pair, not two unrelated lines.",
+        "Invent catchy ORIGINAL image_hook (complete phrase, max 8 words) + image_headline (complete phrase, max 8 words) "
+        "that match the hook/headline idea. Never truncated fragments.",
         "Both image_hook and image_headline are REQUIRED on every variant — never leave them blank.",
         "AUSTRALIAN ENGLISH (every industry): catchy Aussie billboard voice — not flat US corporate. "
         "Spelling: organise/colour/centre. Prefer Ring us / Book free quote over Call Now / Learn More when it fits.",
@@ -3470,8 +4947,9 @@ async def generate_icp_image_plan(
                 {"role": "system", "content": _VARIANTS_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=3600,
-            temperature=0.85,
+            max_tokens=min(32000, 3500 + count * 450),
+            temperature=0.92,
+            response_format={"type": "json_object"},
         )
         raw = (response.choices[0].message.content or "").strip()
         data = _parse_json_object(raw)
@@ -3486,11 +4964,11 @@ async def generate_icp_image_plan(
                     continue
                 hook = str(item.get("hook") or "").strip()
                 message = str(item.get("message") or "").strip()
-                assigned_angle = (
-                    angle_assignments[i]
-                    if angle_assignments and i < len(angle_assignments)
-                    else str(item.get("ad_angle") or "").strip()
-                )
+                assigned_angle = ""
+                if angle_assignments and i < len(angle_assignments):
+                    assigned_angle = str(angle_assignments[i] or "").strip()
+                if not assigned_angle:
+                    assigned_angle = str(item.get("ad_angle") or "").strip()
                 image_hook = _billboard_words(str(item.get("image_hook") or ""), 6)
                 image_headline = _billboard_words(str(item.get("image_headline") or ""), 8)
                 if not image_hook or not image_headline:
@@ -3652,6 +5130,7 @@ async def generate_icp_image_plan(
                     prompt,
                     niche=niche_label,
                     industry=industry_label,
+                    brand_name=brand_name,
                 )
                 # Stop fake "rate on laptop lid" and duplicated % props.
                 prompt = enforce_realistic_prop_text_in_prompt(
@@ -3674,17 +5153,105 @@ async def generate_icp_image_plan(
                     niche=niche_label,
                     industry=industry_label,
                 )
-                # Pin EXACT on-image lines into the prompt (strip any inventted slogans).
-                prompt = enforce_on_image_copy_in_prompt(
-                    prompt,
-                    image_hook=image_hook,
-                    image_headline=image_headline,
-                    cta=cta_line,
-                    full_hook=hook,
-                    full_headline=message,
-                    industry=industry_label,
-                    niche=niche_label,
+                card_is_carousel = is_carousel or (
+                    i < len(strategy_seeds)
+                    and str(strategy_seeds[i].get("format") or "").strip().lower() == "carousel"
                 )
+                seed_i = strategy_seeds[i] if i < len(strategy_seeds) else None
+                # Retail promo wins over legacy photo_only flags on fashion briefs.
+                photo_only = _seed_is_photo_only(
+                    seed_i if isinstance(seed_i, dict) else None
+                ) and not _seed_is_retail_promo(seed_i if isinstance(seed_i, dict) else None)
+                retail_promo = _seed_is_retail_promo(
+                    seed_i if isinstance(seed_i, dict) else None
+                ) or (fashion_retail_promo and not photo_only and not card_is_carousel)
+                last_card_i = _last_carousel_index(is_carousel, strategy_seeds, count)
+                card_is_closer = _seed_is_carousel_closer(
+                    seed_i if isinstance(seed_i, dict) else None,
+                    fallback_last=(i == last_card_i),
+                )
+                # Fashion retail photo-only (explicit flag): no burned text.
+                if photo_only:
+                    image_hook, image_headline, cta_line = "", "", ""
+                    prompt = enforce_fashion_retail_photo_in_prompt(
+                        prompt, aspect_ratio=image_aspect_ratio
+                    )
+                elif retail_promo and not card_is_carousel:
+                    promo_hook, promo_headline, promo_cta = _fashion_retail_promo_on_image_lines(
+                        seed=seed_i if isinstance(seed_i, dict) else None,
+                        hook=hook,
+                        message=message,
+                        offer=offer_line or offer,
+                        cta=cta_line or cta,
+                    )
+                    if promo_hook:
+                        image_hook = promo_hook
+                    if promo_headline:
+                        image_headline = promo_headline
+                    cta_line = promo_cta or cta_line
+                    seed_ratio = ""
+                    if seed_i and isinstance(seed_i, dict):
+                        seed_ratio = str(seed_i.get("aspect_ratio") or "").strip()
+                    prompt = _strip_fashion_photo_only_lock(prompt)
+                    prompt = enforce_fashion_retail_promo_in_prompt(
+                        prompt,
+                        aspect_ratio=seed_ratio or image_aspect_ratio,
+                    )
+                    prompt = enforce_on_image_copy_in_prompt(
+                        strip_burned_in_copy_from_prompt(prompt, allow_cta=True),
+                        image_hook=image_hook,
+                        image_headline=image_headline,
+                        cta=cta_line,
+                        full_hook=hook,
+                        full_headline=message,
+                        industry=industry_label,
+                        niche=niche_label,
+                        primary_color=primary_color,
+                    )
+                # Carousel: CTA pill only on the last card of EACH creative (index==total).
+                elif card_is_carousel and not card_is_closer:
+                    # Non-closer carousel cards: no CTA button, but DO burn hook/headline.
+                    cta_line = ""
+                    prompt = enforce_on_image_copy_in_prompt(
+                        # allow_cta=True here prevents the stripper from appending
+                        # "no text overlay / captions live in carousel UI" notes.
+                        # We still want hook/headline burned onto the middle cards.
+                        strip_burned_in_copy_from_prompt(prompt, allow_cta=True),
+                        image_hook=image_hook,
+                        image_headline=image_headline,
+                        cta="",
+                        full_hook=hook,
+                        full_headline=message,
+                        industry=industry_label,
+                        niche=niche_label,
+                        primary_color=primary_color,
+                    )
+                elif card_is_carousel and card_is_closer:
+                    # Closer carousel card: CTA pill + burn hook/headline.
+                    cta_line = cta_line or (cta or "").strip() or "Book a Consultation"
+                    prompt = enforce_on_image_copy_in_prompt(
+                        strip_burned_in_copy_from_prompt(prompt, allow_cta=True),
+                        image_hook=image_hook,
+                        image_headline=image_headline,
+                        cta=cta_line,
+                        full_hook=hook,
+                        full_headline=message,
+                        industry=industry_label,
+                        niche=niche_label,
+                        primary_color=primary_color,
+                    )
+                else:
+                    prompt = enforce_on_image_copy_in_prompt(
+                        prompt,
+                        image_hook=image_hook,
+                        image_headline=image_headline,
+                        cta=cta_line,
+                        full_hook=hook,
+                        full_headline=message,
+                        industry=industry_label,
+                        niche=niche_label,
+                        primary_color=primary_color,
+                    )
                 prompt = enforce_no_spurious_circled_paper_prop(
                     prompt,
                     industry=industry_label,
@@ -3729,6 +5296,7 @@ async def generate_icp_image_plan(
                 )
             if variants:
                 while len(variants) < count:
+                    next_i = len(variants)
                     fb = _fallback_variants(
                         campaign_name=campaign_name,
                         brand_name=brand_name,
@@ -3739,14 +5307,38 @@ async def generate_icp_image_plan(
                         image_aspect_ratio=image_aspect_ratio,
                         variant_count=1,
                         existing_hooks=hooks_avoid + [v.hook for v in variants],
-                        scene_mandates=[scene_mandates[len(variants) % len(scene_mandates)]],
+                        scene_mandates=[scene_mandates[next_i % len(scene_mandates)]],
+                        angle_assignments=[
+                            angle_assignments[next_i] if next_i < len(angle_assignments) else ""
+                        ],
                         reason="LLM returned fewer variants than requested",
                     )
                     variants.append(fb[0])
-                return {
-                    "icp_text": icp_text,
-                    "variants": [v.to_dict() for v in variants[:count]],
-                }
+                variants = _ensure_unique_variant_copy(
+                    variants[:count],
+                    brand=brand_name,
+                    niche=niche_label,
+                    industry=industry_label,
+                    cta_hint=cta,
+                )
+                return _pack_icp_plan(
+                    icp_text,
+                    variants[:count],
+                    is_carousel=is_carousel,
+                    strategy_seeds=strategy_seeds,
+                    cta=cta,
+                    llm_data=data if isinstance(data, dict) else None,
+                    industry=industry_label,
+                    niche=niche_label,
+                    image_aspect_ratio=image_aspect_ratio,
+                    on_image_style=on_image_style,
+                    fashion_retail_promo=fashion_retail_promo,
+                    campaign_product_focus=campaign_product_focus,
+                    primary_color=primary_color,
+                    secondary_color=secondary_color,
+                    font_heading=font_heading,
+                    font_body=font_body,
+                )
 
         logger.warning("ICP image plan LLM returned invalid JSON; using fallback variants")
         fallback_reason = "LLM returned unusable JSON"
@@ -3768,4 +5360,27 @@ async def generate_icp_image_plan(
         angle_assignments=angle_assignments,
         reason=fallback_reason,
     )
-    return {"icp_text": icp_text, "variants": [v.to_dict() for v in variants]}
+    variants = _ensure_unique_variant_copy(
+        variants,
+        brand=brand_name,
+        niche=niche_label,
+        industry=industry_label,
+        cta_hint=cta,
+    )
+    return _pack_icp_plan(
+        icp_text,
+        variants,
+        is_carousel=is_carousel,
+        strategy_seeds=strategy_seeds,
+        cta=cta,
+        industry=industry_label,
+        niche=niche_label,
+        image_aspect_ratio=image_aspect_ratio,
+        on_image_style=on_image_style,
+        fashion_retail_promo=fashion_retail_promo,
+        campaign_product_focus=campaign_product_focus,
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        font_heading=font_heading,
+        font_body=font_body,
+    )

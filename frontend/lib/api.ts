@@ -2,7 +2,7 @@ import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
   AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
-  SuggestAdAnglesResult, WebsiteBrandFetchResult,
+  SuggestAdAnglesResult, StrategyParseResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
   GenerationCatalog, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
@@ -426,11 +426,32 @@ export const generationApi = {
     variant_count?: number
     existing_hooks?: string[]
     existing_prompts?: string[]
-    creative_format?: 'static' | 'carousel' | string
-  }) =>
-    api
-      .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout: 120_000 })
-      .then((r) => r.data),
+    creative_format?: 'static' | 'carousel' | 'mixed' | string
+    strategy_notes?: string
+    product_focus?: string
+    primary_color?: string
+    secondary_color?: string
+    font_heading?: string
+    font_body?: string
+    strategy_variants?: Array<{
+      id?: string
+      format?: string
+      ad_angle?: string
+      scene?: string
+      prompt?: string
+      client_hook?: string
+      client_message?: string
+      carousel_index?: number
+      carousel_total?: number
+      carousel_group?: string
+    }>
+  }) => {
+    const count = Math.max(1, data.variant_count ?? 1)
+    const timeout = Math.min(600_000, 90_000 + count * 12_000)
+    return api
+      .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout })
+      .then((r) => r.data)
+  },
 
   suggestAdAngles: (data: {
     campaign_name: string
@@ -448,6 +469,14 @@ export const generationApi = {
     api
       .post<WebsiteBrandFetchResult>('/generation/fetch-brand-from-url', data, { timeout: 120_000 })
       .then((r) => r.data),
+
+  parseStrategyFile: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api
+      .post<StrategyParseResult>('/generation/parse-strategy', form, { timeout: 180_000 })
+      .then((r) => r.data)
+  },
 
   generateImagePrompt: (data: {
     product_name?: string

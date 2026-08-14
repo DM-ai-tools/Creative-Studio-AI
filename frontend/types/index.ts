@@ -66,6 +66,12 @@ export interface UsageEventRow {
   created_at?: string | null
 }
 
+export interface UsageDailyPoint {
+  date: string
+  total: number
+  [model: string]: number | string
+}
+
 export interface AdminUsage {
   totals: {
     calls: number
@@ -79,6 +85,10 @@ export interface AdminUsage {
   by_provider: UsageBucket[]
   by_model: UsageBucket[]
   recent: UsageEventRow[]
+  daily_cost?: UsageDailyPoint[]
+  daily_requests?: UsageDailyPoint[]
+  chart_models?: string[]
+  period_days?: number
 }
 
 export interface Tenant {
@@ -264,8 +274,61 @@ export interface SuggestAdAnglesResult {
   source?: 'ai' | 'rules' | string
 }
 
+export interface StrategyVariantPlan {
+  id?: string
+  format?: string
+  ad_angle?: string
+  use_cases?: string[]
+  hook?: string
+  message?: string
+  image_hook?: string
+  image_headline?: string
+  cta?: string
+  offer?: string
+  prompt?: string
+  reasoning?: string
+  creative_type?: string
+  carousel_index?: number | null
+  carousel_total?: number | null
+  carousel_group?: string | null
+  /** Fashion retail: model + outfit photo only — feed copy stays off-image. */
+  photo_only?: boolean
+  /** Client-style retail promo ad (headline + offer on image). */
+  retail_promo?: boolean
+  aspect_ratio?: string
+  product_name?: string
+  post_type?: string
+  design_notes?: string
+}
+
+export interface StrategyParseResult {
+  brand_name: string
+  industry: string
+  niche: string
+  geography: string
+  age_range: string
+  audience_type: string
+  languages: string
+  objective_id: string
+  cta: string
+  offer: string
+  product_name: string
+  ad_copy_tone: string
+  placements: string[]
+  formats: string[]
+  hook_frameworks: string[]
+  target_variant_count: number
+  notes: string
+  reasoning: string
+  filename: string
+  variants: StrategyVariantPlan[]
+  image_aspect_ratio?: string
+  creative_style?: string
+}
+
 export interface BrandFacts {
   services?: string[]
+  products?: string[]
   service_areas?: string[]
   locations?: string[]
   offers?: string[]
@@ -293,6 +356,8 @@ export interface WebsiteBrandFetchResult {
   niche?: string
   primary_color: string
   secondary_color: string
+  font_heading?: string | null
+  font_body?: string | null
   logo_url?: string | null
   page_title?: string
   description?: string
@@ -304,6 +369,9 @@ export interface WebsiteBrandFetchResult {
 export interface IcpImagePlanResult {
   icp_text: string
   variants: IcpImageVariantPlan[]
+  campaign_hook?: string
+  campaign_headline?: string
+  campaign_cta?: string
 }
 
 export interface WebsiteScriptResult {

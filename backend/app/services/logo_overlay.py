@@ -405,15 +405,21 @@ def apply_logo_overlay_to_file(
     logo_on_light_url: str | None = None,
     format_type: str | None = None,
 ) -> str | None:
+    from app.services.brand_logo import logo_local_path
     from app.services.file_service import file_service
     from app.services.media_content import image_suffix_and_type
 
-    logo_path = file_url_to_local_path(logo_url)
+    logo_path = logo_local_path(logo_url)
     image_path = file_url_to_local_path(image_file_url)
     if not logo_path or not image_path:
+        if logo_url and not logo_path:
+            logger.warning(
+                "Logo overlay skipped — logo not readable: %s",
+                str(logo_url)[:120],
+            )
         return image_file_url
 
-    logo_on_light_path = file_url_to_local_path(logo_on_light_url)
+    logo_on_light_path = logo_local_path(logo_on_light_url) if logo_on_light_url else None
 
     try:
         image_bytes = image_path.read_bytes()

@@ -7,12 +7,22 @@ import Button from '@/components/ui/Button'
 import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import {
   emptyImageVariantSlot,
+  normalizeProductFocus,
   resizeImageVariantSlots,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
 import { briefsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
-import type { Brief, CatalogOption } from '@/types'
+import type { Brief, BrandFacts, CatalogOption } from '@/types'
+
+function catalogProductsFromBrief(brief: Brief): string[] {
+  const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
+  const voice = kb.voice_rules as Record<string, unknown> | undefined
+  const facts = (voice?.brand_facts ?? kb.brand_facts) as BrandFacts | undefined
+  return Array.isArray(facts?.products)
+    ? facts!.products!.map((p) => String(p).trim()).filter(Boolean)
+    : []
+}
 
 export function slotsFromBrief(brief: Brief): ImageVariantSlot[] {
   const kb = brief.key_benefits ?? {}
@@ -34,6 +44,11 @@ export function slotsFromBrief(brief: Brief): ImageVariantSlot[] {
     prompt: String(v.prompt || ''),
     reasoning: String(v.reasoning || ''),
     ad_angle: String(v.ad_angle || ''),
+    format: v.format ? String(v.format) : undefined,
+    carousel_index: v.carousel_index ? Number(v.carousel_index) : undefined,
+    carousel_total: v.carousel_total ? Number(v.carousel_total) : undefined,
+    product_focus: normalizeProductFocus(v.product_focus),
+    product_model: String(v.product_model || ''),
     generated_at: v.generated_at ? String(v.generated_at) : null,
   }))
   return resizeImageVariantSlots(mapped, count)
@@ -51,6 +66,11 @@ export function serializeImageVariants(slots: ImageVariantSlot[]) {
     prompt: s.prompt.trim(),
     reasoning: s.reasoning.trim() || undefined,
     ad_angle: s.ad_angle || undefined,
+    format: s.format || undefined,
+    carousel_index: s.carousel_index || undefined,
+    carousel_total: s.carousel_total || undefined,
+    product_focus: s.product_focus || undefined,
+    product_model: s.product_model?.trim() || undefined,
     generated_at: s.generated_at ?? undefined,
   }))
 }
@@ -115,6 +135,7 @@ export default function BriefImageVariantsEditor({
             toast('Regenerate AI plans from Create Brief, then edit and save here')
           }
           angleOptions={angleOptions}
+          catalogProducts={catalogProductsFromBrief(brief)}
         />
         <div className="flex justify-end">
           <Button type="button" variant="primary" isLoading={saving} onClick={() => void handleSave()}>

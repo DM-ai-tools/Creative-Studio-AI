@@ -17,6 +17,40 @@ logger = logging.getLogger(__name__)
 _HEX = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 
+def _clean_font_family(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"none", "null", "undefined", "inherit", "system-ui"}:
+        return ""
+    # Strip CSS stacks — keep first named family.
+    first = raw.split(",")[0].strip().strip("'\"")
+    return first[:80] if first else ""
+
+
+def _extract_fonts(branding: dict[str, Any]) -> tuple[str, str]:
+    """Heading + body families from Firecrawl branding.typography / fonts."""
+    typography = branding.get("typography") if isinstance(branding.get("typography"), dict) else {}
+    families = typography.get("fontFamilies") if isinstance(typography.get("fontFamilies"), dict) else {}
+    heading = _clean_font_family(families.get("heading") or families.get("display"))
+    body = _clean_font_family(families.get("primary") or families.get("body"))
+    fonts_list = branding.get("fonts") if isinstance(branding.get("fonts"), list) else []
+    for item in fonts_list:
+        if not isinstance(item, dict):
+            continue
+        family = _clean_font_family(item.get("family"))
+        if not family:
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role in {"heading", "display", "title"} and not heading:
+            heading = family
+        elif role in {"body", "primary", "text", ""} and not body:
+            body = family
+    if heading and not body:
+        body = heading
+    if body and not heading:
+        heading = body
+    return heading, body
+
+
 def _norm_hex(value: Any, fallback: str) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -38,6 +72,33 @@ def _normalize_url(url: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("Invalid website URL")
     return u
+
+
+_CATEGORY_LABEL_RE = re.compile(
+    r"(?i)^(shop|buy|browse|collections?|engagement|wedding|fine)\b|"
+    r"^(diamonds?|jewellery|jewelry|rings?|earrings?|necklaces?|bracelets?)$|"
+    r"^shop\s+diamonds?"
+)
+
+
+def _company_name_from_host(url: str) -> str:
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    slug = host.split(".")[0].replace("-", " ").replace("_", " ").strip()
+    if not slug:
+        return host
+    # adoriajewels → Adoria Jewels
+    for suffix in ("jewels", "jewellery", "jewelry", "diamonds"):
+        if slug.endswith(suffix) and len(slug) > len(suffix) + 2:
+            prefix = slug[: -len(suffix)].strip()
+            return f"{prefix.title()} {suffix.title()}"
+    return slug.title()
+
+
+def _looks_like_nav_or_category(name: str) -> bool:
+    n = (name or "").strip()
+    if not n or len(n) < 2:
+        return True
+    return bool(_CATEGORY_LABEL_RE.search(n))
 
 
 def _guess_industry_from_text(text: str) -> str:
@@ -94,7 +155,9 @@ async def _infer_industry_llm(*, brand_name: str, page_title: str, markdown: str
                         "Classify the business industry. Return ONLY JSON: "
                         '{"industry":"<id>","niche":"<short niche>","brand_name":"<name>"} '
                         "industry id must be one of: dental, healthcare, digital_marketing, "
-                        "wholesale, trade, pro_services, retail, ecommerce, saas, general."
+                        "wholesale, trade, pro_services, retail, ecommerce, saas, general. "
+                        "brand_name must be the COMPANY name (e.g. Adoria Jewellery), NEVER a "
+                        "nav/category label like Shop Diamonds, Collections, or Engagement Rings."
                     ),
                 },
                 {
@@ -225,12 +288,28 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         markdown=markdown or str(personality.get("targetAudience") or ""),
     )
     industry, niche, brand_name = inferred
+    host_name = _company_name_from_host(url)
+    if _looks_like_nav_or_category(brand_name):
+        brand_name = host_name or brand_name
 
-    primary = _norm_hex(colors.get("primary"), "#0F1B3D")
+    components = branding.get("components") if isinstance(branding.get("components"), dict) else {}
+    button_primary = (
+        components.get("buttonPrimary")
+        if isinstance(components.get("buttonPrimary"), dict)
+        else {}
+    )
+    primary = _norm_hex(
+        colors.get("primary") or button_primary.get("background"),
+        "#0F1B3D",
+    )
     secondary = _norm_hex(
-        colors.get("secondary") or colors.get("accent") or colors.get("link"),
+        colors.get("secondary")
+        or colors.get("accent")
+        or colors.get("link")
+        or colors.get("textPrimary"),
         "#00C2A8",
     )
+    font_heading, font_body = _extract_fonts(branding)
 
     if not branding:
         logger.warning("Firecrawl returned no branding object for %s — check API key / plan", url)
@@ -260,6 +339,8 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         "niche": niche or str(personality.get("targetAudience") or "")[:80],
         "primary_color": primary,
         "secondary_color": secondary,
+        "font_heading": font_heading or None,
+        "font_body": font_body or None,
         "logo_url": logo_str or None,
         "page_title": page_title,
         "description": str(metadata.get("description") or metadata.get("ogDescription") or "")[:500],
@@ -282,6 +363,9 @@ async def _fetch_via_fallback(url: str) -> dict[str, Any]:
         markdown=body,
     )
     industry, niche, brand_name = inferred
+    host_name = _company_name_from_host(url)
+    if _looks_like_nav_or_category(brand_name):
+        brand_name = host_name or brand_name
 
     # Best-effort favicon
     parsed = urlparse(url)

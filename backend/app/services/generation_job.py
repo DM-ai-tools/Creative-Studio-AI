@@ -17,8 +17,15 @@ from app.services.cta_defaults import resolve_campaign_cta
 from app.services.icp_image_plan_service import (
     _billboard_words,
     _related_image_lines,
+    enforce_brand_identity_in_prompt,
+    enforce_fashion_retail_photo_in_prompt,
+    enforce_fashion_retail_promo_in_prompt,
+    enforce_niche_product_focus_in_prompt,
     enforce_no_spurious_circled_paper_prop,
     enforce_on_image_copy_in_prompt,
+    enforce_on_image_style_in_prompt,
+    enforce_product_focus_in_prompt,
+    strip_burned_in_copy_from_prompt,
 )
 from app.services.variant_service import VariantService
 from app.services.video_duration import (
@@ -28,6 +35,30 @@ from app.services.video_duration import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_last_carousel_card(slot: dict[str, Any] | None, image_variants: list[dict[str, Any]]) -> bool:
+    if not isinstance(slot, dict):
+        carousel_slots = [
+            s for s in image_variants if str(s.get("format") or "").strip().lower() == "carousel"
+        ]
+        return len(carousel_slots) <= 1
+    try:
+        idx = int(slot.get("carousel_index") or 0)
+        total = int(slot.get("carousel_total") or 0)
+        if idx and total:
+            return idx >= total
+    except (TypeError, ValueError):
+        pass
+    carousel_slots = [
+        s for s in image_variants if str(s.get("format") or "").strip().lower() == "carousel"
+    ]
+    if len(carousel_slots) <= 1:
+        return True
+    try:
+        return carousel_slots.index(slot) >= len(carousel_slots) - 1
+    except ValueError:
+        return True
 
 
 def _slot_has_saved_plan(slot: dict[str, Any] | None) -> bool:
@@ -64,6 +95,34 @@ def _copy_from_image_slot(slot: dict[str, Any]) -> tuple[dict[str, Any], str, st
         "hashtags": [],
     }
     return copy, on_image_hook, on_image_headline
+
+
+def _lock_brand_name_on_prompt(
+    prompt: str,
+    *,
+    snap: dict[str, Any],
+    brief_dict: dict[str, Any],
+    brand: Any,
+) -> str:
+    name = (
+        str(snap.get("brand_name") or "").strip()
+        or str(brief_dict.get("brand_name") or "").strip()
+        or str(getattr(brand, "name", "") or "").strip()
+    )
+    industry = str(
+        brief_dict.get("target_industry_label")
+        or snap.get("agency_industry")
+        or getattr(brand, "industry", "")
+        or ""
+    )
+    niche = str(brief_dict.get("niche") or brief_dict.get("product_name") or "")
+    locked = enforce_niche_product_focus_in_prompt(
+        prompt,
+        niche=niche,
+        industry=industry,
+        brand_name=name,
+    )
+    return enforce_brand_identity_in_prompt(locked, brand_name=name)
 
 
 async def run_brief_generation_job(
@@ -216,8 +275,32 @@ async def run_brief_generation_job(
                 )
                 brief.variant_count = len(formats) * count_per_format
 
-            for fmt in formats:
-                for _ in range(count_per_format):
+            image_mode = str(
+                brief_dict.get("media_type") or kb_models.get("media_type") or ""
+            ) == "image" or all(f in {"static", "carousel"} for f in formats)
+
+            if image_variants and image_mode:
+                work_items: list[tuple[str, int]] = []
+                for i, slot in enumerate(image_variants):
+                    raw = str(slot.get("format") or "").strip().lower()
+                    if raw not in {"static", "carousel"}:
+                        image_fmts = [f for f in formats if f in {"static", "carousel"}]
+                        raw = (
+                            image_fmts[0]
+                            if len(image_fmts) == 1
+                            else (formats[0] if formats else "static")
+                        )
+                    work_items.append((raw, i))
+                brief.variant_count = len(work_items)
+            else:
+                work_items = []
+                vi = 0
+                for fmt in formats:
+                    for _ in range(count_per_format):
+                        work_items.append((fmt, vi))
+                        vi += 1
+
+            for fmt, variant_index in work_items:
                     # Touch updated_at so stale-RUNNING reconciliation does not abort long HeyGen jobs.
                     brief.status = "RUNNING"
                     await db.commit()
@@ -247,6 +330,35 @@ async def run_brief_generation_job(
                     slot_cta = (str(slot.get("cta") or "").strip() if slot else "")
                     slot_prompt = (str(slot.get("prompt") or "").strip() if slot else "")
                     slot_ad_angle = (str(slot.get("ad_angle") or "").strip() if slot else "")
+                    slot_photo_only = bool(isinstance(slot, dict) and slot.get("photo_only"))
+                    _fashion_niche = str(
+                        kb_models.get("niche")
+                        or brief_dict.get("niche")
+                        or brief.product_name
+                        or ""
+                    ).lower()
+                    _fashion_ind = str(
+                        kb_models.get("industry")
+                        or brief_dict.get("target_industry_label")
+                        or brand.industry
+                        or ""
+                    ).lower()
+                    _is_fashion = any(
+                        k in f"{_fashion_niche} {_fashion_ind}"
+                        for k in (
+                            "fashion", "apparel", "clothing", "runway", "arrivals",
+                            "denim", "knitwear", "wardrobe", "retail",
+                        )
+                    )
+                    slot_retail_promo = bool(
+                        isinstance(slot, dict)
+                        and (slot.get("retail_promo") or (_is_fashion and not slot_photo_only))
+                    )
+                    carousel_last = fmt != "carousel" or _is_last_carousel_card(
+                        slot if isinstance(slot, dict) else None, image_variants
+                    )
+                    if fmt == "carousel" and not carousel_last:
+                        slot_cta = ""
 
                     logger.info(
                         "Brief %s: generating variant format=%s index=%s slot=%s",
@@ -259,7 +371,13 @@ async def run_brief_generation_job(
                     on_image_message = ""
                     if _slot_has_saved_plan(slot):
                         copy, on_image_hook, on_image_message = _copy_from_image_slot(slot)
-                        if not str(copy.get("cta") or "").strip():
+                        if fmt == "carousel":
+                            copy["cta"] = (
+                                slot_cta or resolve_campaign_cta(brief_dict)
+                                if carousel_last
+                                else ""
+                            )
+                        elif not str(copy.get("cta") or "").strip():
                             copy["cta"] = resolve_campaign_cta(brief_dict)
                         logger.info(
                             "Brief %s: variant %s uses saved image_variants plan "
@@ -302,10 +420,21 @@ async def run_brief_generation_job(
                         on_image_message = (
                             _billboard_words(slot_image_headline, 8) or derived_image_headline
                         )
-                        if slot_cta:
+                        if fmt == "carousel":
+                            copy["cta"] = (
+                                slot_cta or resolve_campaign_cta(brief_dict)
+                                if carousel_last
+                                else ""
+                            )
+                        elif slot_cta:
                             copy["cta"] = slot_cta
                         elif not str(copy.get("cta") or "").strip():
                             copy["cta"] = resolve_campaign_cta(brief_dict)
+
+                    if slot_photo_only:
+                        on_image_hook = ""
+                        on_image_message = ""
+                        slot_cta = ""
 
                     compliance = await ai_service.run_compliance_check(
                         copy,
@@ -389,21 +518,122 @@ async def run_brief_generation_job(
                                     or brief.product_name
                                     or ""
                                 )
-                                if slot_prompt:
-                                    # User (or AI-preview) already wrote the final prompt for this variant.
-                                    # Strip any invented on-image slogans and pin EXACT condensed lines.
-                                    effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                _brand_primary = str(snap.get("primary_color") or "")
+                                if slot_photo_only and slot_prompt:
+                                    ratio = (
+                                        brief_dict.get("image_aspect_ratio")
+                                        or kb_models.get("image_aspect_ratio")
+                                        or "4:3"
+                                    )
+                                    image_prompt = enforce_fashion_retail_photo_in_prompt(
+                                        slot_prompt, aspect_ratio=ratio
+                                    )
+                                    image_prompt = enforce_no_spurious_circled_paper_prop(
+                                        image_prompt, industry=_ind, niche=_niche
+                                    )
+                                    brief_dict["_image_plan_use_cases"] = slot_use_cases
+                                    brief_dict["_image_plan_reasoning"] = (
+                                        (slot.get("reasoning") if slot else "") or "fashion_retail_photo"
+                                    )
+                                elif slot_retail_promo and slot_prompt:
+                                    ratio = (
+                                        str(slot.get("aspect_ratio") or "").strip()
+                                        or brief_dict.get("image_aspect_ratio")
+                                        or kb_models.get("image_aspect_ratio")
+                                        or "1:1"
+                                    )
+                                    from app.services.icp_image_plan_service import (
+                                        _fashion_retail_promo_on_image_lines,
+                                        _strip_fashion_photo_only_lock,
+                                    )
+
+                                    promo_hook, promo_headline, promo_cta = _fashion_retail_promo_on_image_lines(
+                                        seed=slot if isinstance(slot, dict) else None,
+                                        hook=slot_hook or str(copy.get("hook") or ""),
+                                        message=slot_message or str(copy.get("headline") or ""),
+                                        offer=str(slot.get("offer") or copy.get("body_copy") or ""),
+                                        cta=slot_cta or str(copy.get("cta") or ""),
+                                    )
+                                    on_image_hook = promo_hook
+                                    on_image_message = promo_headline
+                                    copy["cta"] = promo_cta
+                                    base = enforce_fashion_retail_promo_in_prompt(
+                                        _strip_fashion_photo_only_lock(slot_prompt),
+                                        aspect_ratio=ratio,
+                                    )
                                     image_prompt = enforce_on_image_copy_in_prompt(
-                                        slot_prompt,
+                                        strip_burned_in_copy_from_prompt(base, allow_cta=True),
                                         image_hook=on_image_hook,
                                         image_headline=on_image_message,
-                                        cta=effective_cta,
+                                        cta=promo_cta,
                                         full_hook=slot_hook or str(copy.get("hook") or ""),
-                                        full_headline=slot_message
-                                        or str(copy.get("headline") or ""),
+                                        full_headline=slot_message or str(copy.get("headline") or ""),
                                         industry=_ind,
                                         niche=_niche,
+                                        primary_color=_brand_primary,
                                     )
+                                    image_prompt = enforce_no_spurious_circled_paper_prop(
+                                        image_prompt, industry=_ind, niche=_niche
+                                    )
+                                    brief_dict["_image_plan_use_cases"] = slot_use_cases
+                                    brief_dict["_image_plan_reasoning"] = (
+                                        (slot.get("reasoning") if slot else "") or "fashion_retail_promo"
+                                    )
+                                elif slot_prompt:
+                                    # User (or AI-preview) already wrote the final prompt for this variant.
+                                    if fmt == "carousel" and not carousel_last:
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            strip_burned_in_copy_from_prompt(
+                                                slot_prompt, allow_cta=True
+                                            ),
+                                            image_hook=on_image_hook,
+                                            image_headline=on_image_message,
+                                            cta="",
+                                            full_hook=slot_hook
+                                            or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
+                                        copy["cta"] = ""
+                                    elif fmt == "carousel" and carousel_last:
+                                        closer_cta = (
+                                            slot_cta
+                                            or str(copy.get("cta") or "").strip()
+                                            or resolve_campaign_cta(brief_dict)
+                                        )
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            strip_burned_in_copy_from_prompt(
+                                                slot_prompt, allow_cta=True
+                                            ),
+                                            image_hook=on_image_hook,
+                                            image_headline=on_image_message,
+                                            cta=closer_cta,
+                                            full_hook=slot_hook or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
+                                        copy["cta"] = closer_cta
+                                    else:
+                                        # Strip any invented on-image slogans and pin EXACT condensed lines.
+                                        effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            slot_prompt,
+                                            image_hook=on_image_hook,
+                                            image_headline=on_image_message,
+                                            cta=effective_cta,
+                                            full_hook=slot_hook or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
                                     image_prompt = enforce_no_spurious_circled_paper_prop(
                                         image_prompt, industry=_ind, niche=_niche
                                     )
@@ -430,19 +660,60 @@ async def run_brief_generation_job(
                                     plan = await select_and_build_image_plan(
                                         variant_brief, snap, copy=image_copy
                                     )
-                                    effective_cta = slot_cta or str(copy.get("cta") or "").strip()
-                                    image_prompt = enforce_on_image_copy_in_prompt(
-                                        plan.prompt,
-                                        image_hook=on_image_hook or str(image_copy["hook"]),
-                                        image_headline=on_image_message
-                                        or str(image_copy["headline"]),
-                                        cta=effective_cta,
-                                        full_hook=slot_hook or str(copy.get("hook") or ""),
-                                        full_headline=slot_message
-                                        or str(copy.get("headline") or ""),
-                                        industry=_ind,
-                                        niche=_niche,
-                                    )
+                                    if fmt == "carousel" and not carousel_last:
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            strip_burned_in_copy_from_prompt(
+                                                plan.prompt, allow_cta=True
+                                            ),
+                                            image_hook=on_image_hook
+                                            or str(image_copy["hook"]),
+                                            image_headline=on_image_message
+                                            or str(image_copy["headline"]),
+                                            cta="",
+                                            full_hook=slot_hook or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
+                                    elif fmt == "carousel" and carousel_last:
+                                        closer_cta = (
+                                            slot_cta
+                                            or str(copy.get("cta") or "").strip()
+                                            or resolve_campaign_cta(brief_dict)
+                                        )
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            strip_burned_in_copy_from_prompt(
+                                                plan.prompt, allow_cta=True
+                                            ),
+                                            image_hook=on_image_hook
+                                            or str(image_copy["hook"]),
+                                            image_headline=on_image_message
+                                            or str(image_copy["headline"]),
+                                            cta=closer_cta,
+                                            full_hook=slot_hook or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
+                                    else:
+                                        effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                        image_prompt = enforce_on_image_copy_in_prompt(
+                                            plan.prompt,
+                                            image_hook=on_image_hook or str(image_copy["hook"]),
+                                            image_headline=on_image_message
+                                            or str(image_copy["headline"]),
+                                            cta=effective_cta,
+                                            full_hook=slot_hook or str(copy.get("hook") or ""),
+                                            full_headline=slot_message
+                                            or str(copy.get("headline") or ""),
+                                            industry=_ind,
+                                            niche=_niche,
+                                            primary_color=_brand_primary,
+                                        )
                                     image_prompt = enforce_no_spurious_circled_paper_prop(
                                         image_prompt, industry=_ind, niche=_niche
                                     )
@@ -485,15 +756,23 @@ async def run_brief_generation_job(
                                 or "",
                                 brief_dict,
                             )
-                            # Prefer per-slot themes when image variants exist
-                            if image_variants:
+                            carousel_slots = [
+                                sv
+                                for sv in image_variants
+                                if isinstance(sv, dict)
+                                and str(sv.get("format") or "").strip().lower() == "carousel"
+                            ] or [sv for sv in image_variants if isinstance(sv, dict)]
+                            if carousel_slots:
                                 slot_themes = []
-                                for sv in image_variants:
-                                    if not isinstance(sv, dict):
-                                        continue
+                                for sv in carousel_slots:
                                     t = (
-                                        str(sv.get("message") or sv.get("image_headline") or sv.get("hook") or "")
-                                        .strip()
+                                        str(
+                                            sv.get("image_hook")
+                                            or sv.get("image_headline")
+                                            or sv.get("hook")
+                                            or sv.get("message")
+                                            or ""
+                                        ).strip()
                                     )
                                     if t:
                                         slot_themes.append(t[:80])
@@ -501,10 +780,16 @@ async def run_brief_generation_job(
                                     themes = slot_themes
                             if not themes:
                                 themes = [brief.title or "Offer"]
+                            last_cta = str(
+                                (slot.get("cta") if isinstance(slot, dict) else "")
+                                or copy.get("cta")
+                                or brief.cta
+                                or "Learn More"
+                            )
                             slides = build_carousel_slides(
                                 themes,
                                 offer=str(kb_models.get("offer") or copy.get("offer") or ""),
-                                cta=str(copy.get("cta") or brief.cta or "Learn More"),
+                                cta=last_cta if carousel_last else "",
                                 vertical_label=str(
                                     kb_models.get("industry")
                                     or brief_dict.get("target_industry_label")
@@ -512,17 +797,36 @@ async def run_brief_generation_job(
                                 ),
                             )
                             copy["carousel_slides"] = slides
-                            card_i = variant_index % max(1, len(slides))
+                            try:
+                                card_i = max(0, int((slot or {}).get("carousel_index") or 0) - 1)
+                            except (TypeError, ValueError, AttributeError):
+                                card_i = 0
+                            if not card_i and carousel_slots and isinstance(slot, dict):
+                                try:
+                                    card_i = carousel_slots.index(slot)
+                                except ValueError:
+                                    card_i = variant_index % max(1, len(slides))
+                            card_i = min(card_i, max(0, len(slides) - 1))
+                            total_cards = int((slot or {}).get("carousel_total") or 0) or len(slides)
                             slide = slides[card_i]
                             theme = str(slide.get("theme") or slide.get("headline") or "Offer")
+                            beat = (
+                                "PROBLEM opener"
+                                if card_i == 0
+                                else ("SOLUTION + CTA closer" if carousel_last else "AGITATE / PROOF bridge")
+                            )
+                            cta_rule = (
+                                f' LAST CARD: burn a pill CTA button reading exactly "{last_cta}".'
+                                if carousel_last
+                                else " No CTA button on this card — CTA burns only on the final swipe card."
+                            )
                             image_prompt = (
                                 f"{image_prompt.rstrip()} "
-                                f"Meta CAROUSEL CARD {card_i + 1} of {len(slides)} in ONE swipe story — "
+                                f"Meta CAROUSEL CARD {card_i + 1} of {total_cards} in ONE swipe story — "
                                 f"generate ONE square 1:1 feed card only for theme \"{theme}\". "
-                                f"Story beat: "
-                                f"{'PROBLEM opener' if card_i == 0 else ('SOLUTION + CTA closer' if card_i == len(slides) - 1 else 'AGITATE / PROOF bridge')}. "
+                                f"Story beat: {beat}. "
                                 "Do NOT render a multi-panel collage, strip, or row of cards in this image. "
-                                "This card must feel like the next swipe after the previous card in the same campaign."
+                                + cta_rule
                             )
                             logger.info(
                                 "Carousel card framed: brief=%s card=%s/%s theme=%r",
@@ -533,6 +837,48 @@ async def run_brief_generation_job(
                             )
 
                         burn_logo_on_still = fmt not in {"reel", "video"}
+                        slot_product_focus = (
+                            str(slot.get("product_focus") or "").strip()
+                            if isinstance(slot, dict)
+                            else ""
+                        ) or str(
+                            kb_models.get("product_focus")
+                            or brief_dict.get("product_focus")
+                            or ""
+                        ).strip()
+                        slot_product_model = (
+                            str(slot.get("product_model") or "").strip()
+                            if isinstance(slot, dict)
+                            else ""
+                        )
+                        if slot_product_focus:
+                            image_prompt = enforce_product_focus_in_prompt(
+                                image_prompt,
+                                product_focus=slot_product_focus,
+                                product_model=slot_product_model,
+                                industry=_fashion_ind,
+                                niche=_fashion_niche,
+                            )
+                        campaign_on_image_style = str(
+                            kb_models.get("on_image_style")
+                            or brief_dict.get("on_image_style")
+                            or "auto"
+                        ).strip()
+                        if campaign_on_image_style:
+                            image_prompt = enforce_on_image_style_in_prompt(
+                                image_prompt,
+                                on_image_style=campaign_on_image_style,
+                                niche=_fashion_niche,
+                                industry=_fashion_ind,
+                                fashion_retail_promo=bool(slot_retail_promo),
+                                primary_color=str(snap.get("primary_color") or ""),
+                                secondary_color=str(snap.get("secondary_color") or ""),
+                                font_heading=str(snap.get("font_heading") or ""),
+                                font_body=str(snap.get("font_body") or ""),
+                            )
+                        image_prompt = _lock_brand_name_on_prompt(
+                            image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
+                        )
                         pipeline["image"] = await ai_service.generate_image_asset(
                             prompt=image_prompt,
                             tenant_id=str(tenant_id),
@@ -640,10 +986,18 @@ async def run_brief_generation_job(
                                 "message": slot_message or None,
                                 "image_hook": on_image_hook or None,
                                 "image_headline": on_image_message or None,
-                                "cta": slot_cta or copy.get("cta") or None,
+                                "cta": (slot_cta or copy.get("cta") or None)
+                                if carousel_last
+                                else None,
                                 "prompt": slot_prompt or None,
                                 "ad_angle": slot_ad_angle or None,
                                 "hook_framework": slot_ad_angle or None,
+                                "carousel_index": (slot or {}).get("carousel_index")
+                                if isinstance(slot, dict)
+                                else None,
+                                "carousel_total": (slot or {}).get("carousel_total")
+                                if isinstance(slot, dict)
+                                else None,
                             },
                             "hook_framework": slot_ad_angle or None,
                         },
@@ -752,24 +1106,43 @@ async def run_regenerate_variant_image(
             prior_prompt = str((prior_image or {}).get("prompt") or "").strip()
 
             variant_index = int(image_plan.get("variant_index") or 0)
-            image_variants = kb_models.get("image_variants")
+            image_variants = [
+                sv
+                for sv in (kb_models.get("image_variants") or [])
+                if isinstance(sv, dict)
+            ]
             slot: dict[str, Any] | None = None
-            if isinstance(image_variants, list) and image_variants:
-                if variant_index < len(image_variants) and isinstance(image_variants[variant_index], dict):
+            if image_variants:
+                if 0 <= variant_index < len(image_variants):
                     slot = image_variants[variant_index]
-                elif isinstance(image_variants[0], dict):
-                    # Match by hook when index drifted
+                if slot is None:
+                    want_hook = (variant.hook or "").strip()
                     for sv in image_variants:
-                        if not isinstance(sv, dict):
-                            continue
-                        if str(sv.get("hook") or "").strip() == (variant.hook or "").strip():
+                        if str(sv.get("hook") or "").strip() == want_hook and want_hook:
                             slot = sv
                             break
-                    if slot is None and isinstance(image_variants[0], dict):
-                        slot = image_variants[0]
+                if slot is None:
+                    want_idx = int(image_plan.get("carousel_index") or 0)
+                    if want_idx:
+                        for sv in image_variants:
+                            try:
+                                if int(sv.get("carousel_index") or 0) == want_idx:
+                                    slot = sv
+                                    break
+                            except (TypeError, ValueError):
+                                continue
 
             if slot and str(slot.get("prompt") or "").strip():
                 slot_prompt = str(slot.get("prompt") or "").strip()
+
+            carousel_slots = [
+                sv
+                for sv in image_variants
+                if str(sv.get("format") or "").strip().lower() == "carousel"
+            ]
+            carousel_last = fmt != "carousel" or _is_last_carousel_card(
+                slot, carousel_slots or image_variants
+            )
 
             on_image_hook = str(
                 image_plan.get("image_hook")
@@ -788,13 +1161,15 @@ async def run_regenerate_variant_image(
                 on_image_hook = on_image_hook or derived_h
                 on_image_headline = on_image_headline or derived_m
 
-            effective_cta = str(
-                image_plan.get("cta")
-                or (slot or {}).get("cta")
-                or variant.cta
-                or brief.cta
-                or ""
-            ).strip()
+            effective_cta = ""
+            if fmt != "carousel" or carousel_last:
+                effective_cta = str(
+                    (slot or {}).get("cta")
+                    or image_plan.get("cta")
+                    or variant.cta
+                    or brief.cta
+                    or ""
+                ).strip()
 
             industry = str(
                 kb_models.get("industry")
@@ -808,11 +1183,48 @@ async def run_regenerate_variant_image(
                 or brief.product_name
                 or ""
             )
+            brand_primary = str(snap.get("primary_color") or "")
+
+            slot_photo_only = bool(isinstance(slot, dict) and slot.get("photo_only"))
+            if slot_photo_only:
+                on_image_hook = ""
+                on_image_headline = ""
+                effective_cta = ""
 
             base_prompt = slot_prompt or prior_prompt
-            if base_prompt:
+            if slot_photo_only and base_prompt:
+                ratio = brief_dict.get("image_aspect_ratio") or kb_models.get("image_aspect_ratio") or "4:3"
+                image_prompt = enforce_fashion_retail_photo_in_prompt(
+                    base_prompt, aspect_ratio=ratio
+                )
+                image_prompt = enforce_no_spurious_circled_paper_prop(
+                    image_prompt, industry=industry, niche=niche
+                )
+            elif fmt == "carousel" and not carousel_last:
+                # Middle/opener cards: no CTA pill, but DO burn hook/headline.
                 image_prompt = enforce_on_image_copy_in_prompt(
-                    base_prompt,
+                    strip_burned_in_copy_from_prompt(
+                        base_prompt or "", allow_cta=True
+                    ),
+                    image_hook=on_image_hook,
+                    image_headline=on_image_headline,
+                    cta="",
+                    full_hook=variant.hook or "",
+                    full_headline=variant.headline or "",
+                    industry=industry,
+                    niche=niche,
+                    primary_color=brand_primary,
+                )
+                image_prompt = enforce_no_spurious_circled_paper_prop(
+                    image_prompt, industry=industry, niche=niche
+                )
+            elif base_prompt:
+                image_prompt = enforce_on_image_copy_in_prompt(
+                    strip_burned_in_copy_from_prompt(
+                        base_prompt, allow_cta=bool(effective_cta)
+                    )
+                    if fmt == "carousel"
+                    else base_prompt,
                     image_hook=on_image_hook,
                     image_headline=on_image_headline,
                     cta=effective_cta,
@@ -820,6 +1232,7 @@ async def run_regenerate_variant_image(
                     full_headline=variant.headline or "",
                     industry=industry,
                     niche=niche,
+                    primary_color=brand_primary,
                 )
                 image_prompt = enforce_no_spurious_circled_paper_prop(
                     image_prompt, industry=industry, niche=niche
@@ -845,6 +1258,7 @@ async def run_regenerate_variant_image(
                     full_headline=variant.headline or "",
                     industry=industry,
                     niche=niche,
+                    primary_color=brand_primary,
                 )
 
             img_logo, img_logo_light = resolve_video_logo_urls(brand=snap, brief=brief_dict)
@@ -860,20 +1274,31 @@ async def run_regenerate_variant_image(
             params["models"] = models
             if slot_prompt:
                 image_plan["prompt"] = slot_prompt
-            image_plan["image_hook"] = on_image_hook
-            image_plan["image_headline"] = on_image_headline
+            image_plan["image_hook"] = on_image_hook or None
+            image_plan["image_headline"] = on_image_headline or None
+            image_plan["cta"] = effective_cta or None
+            if slot:
+                image_plan["carousel_index"] = slot.get("carousel_index")
+                image_plan["carousel_total"] = slot.get("carousel_total")
             params["image_plan"] = image_plan
             variant.generation_params = params
             variant.status = "GENERATING"
             await db.commit()
 
             logger.info(
-                "Regenerate image start variant=%s model=%s prompt_len=%d",
+                "Regenerate image start variant=%s model=%s prompt_len=%d "
+                "format=%s carousel_last=%s cta=%r",
                 variant_id,
                 chosen_model,
                 len(image_prompt),
+                fmt,
+                carousel_last,
+                effective_cta,
             )
 
+            image_prompt = _lock_brand_name_on_prompt(
+                image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
+            )
             image_result = await ai_service.generate_image_asset(
                 prompt=image_prompt,
                 tenant_id=str(tenant_id),

@@ -25,6 +25,7 @@ BrandFacts = dict[str, Any]
 def empty_brand_facts() -> BrandFacts:
     return {
         "services": [],
+        "products": [],
         "service_areas": [],
         "locations": [],
         "offers": [],
@@ -57,6 +58,7 @@ def format_brand_facts_for_llm(facts: BrandFacts | None) -> str:
         "",
     ]
     services = [str(s).strip() for s in (facts.get("services") or []) if str(s).strip()]
+    products = _normalize_product_names(facts.get("products") or [])
     areas = [str(s).strip() for s in (facts.get("service_areas") or []) if str(s).strip()]
     locations = [str(s).strip() for s in (facts.get("locations") or []) if str(s).strip()]
     offers = [str(s).strip() for s in (facts.get("offers") or []) if str(s).strip()]
@@ -73,6 +75,9 @@ def format_brand_facts_for_llm(facts: BrandFacts | None) -> str:
     highlights = [str(h).strip() for h in (reviews.get("highlights") or []) if str(h).strip()]
 
     lines.append(f"- Services offered: {', '.join(services) if services else '(not found on site)'}")
+    lines.append(
+        f"- Products / models on site: {', '.join(products[:12]) if products else '(not found on site)'}"
+    )
     lines.append(f"- Service areas: {', '.join(areas) if areas else '(not found on site)'}")
     lines.append(f"- Business locations / suburbs: {', '.join(locations) if locations else '(not found on site)'}")
     lines.append(f"- Current offers / promos: {', '.join(offers) if offers else '(not found on site)'}")
@@ -118,7 +123,7 @@ def brand_facts_whitelist_text(facts: BrandFacts | None) -> str:
     if not facts or not isinstance(facts, dict):
         return ""
     parts: list[str] = []
-    for key in ("services", "service_areas", "locations", "offers", "rates_or_pricing", "credentials", "unique_selling_points", "cta_phrases", "do_not_claim"):
+    for key in ("services", "products", "service_areas", "locations", "offers", "rates_or_pricing", "credentials", "unique_selling_points", "cta_phrases", "do_not_claim"):
         for item in facts.get(key) or []:
             parts.append(str(item))
     reviews = facts.get("reviews") if isinstance(facts.get("reviews"), dict) else {}
@@ -135,6 +140,61 @@ def brand_facts_whitelist_text(facts: BrandFacts | None) -> str:
     if facts.get("source_summary"):
         parts.append(str(facts.get("source_summary")))
     return " ".join(parts)
+
+
+def _normalize_product_names(raw: Any) -> list[str]:
+    """Flatten scraped product entries to display names."""
+    names: list[str] = []
+    if not raw:
+        return names
+    items = raw if isinstance(raw, list) else [raw]
+    for item in items:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("title") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name and name.lower() not in {"product", "products", "shop", "buy now"}:
+            names.append(name[:120])
+    return list(dict.fromkeys(names))[:20]
+
+
+def _heuristic_extract_products(text: str) -> list[str]:
+    """Best-effort product/model names from shop markdown."""
+    names: list[str] = []
+    for m in re.finditer(r"\[([^\]\n]{3,80})\]\([^)]+\)", text or ""):
+        label = m.group(1).strip()
+        if _looks_like_nav_or_category(label):
+            continue
+        if re.search(r"(?i)(add to cart|shop now|view|learn more|read more)$", label):
+            continue
+        names.append(label)
+    for m in re.finditer(
+        r"(?im)^(?:#{1,4}\s*|\*\*)\s*([A-Z0-9][\w\s+\-./]{2,60}?)\s*(?:\*\*)?\s*$",
+        text or "",
+    ):
+        label = m.group(1).strip()
+        if _looks_like_nav_or_category(label):
+            continue
+        if re.search(r"(?i)(collection|category|menu|footer|header|blog|about)", label):
+            continue
+        names.append(label)
+    return list(dict.fromkeys(names))[:16]
+
+
+def _looks_like_nav_or_category(name: str) -> bool:
+    n = (name or "").strip()
+    if not n or len(n) < 2:
+        return True
+    low = n.lower()
+    if low in {"home", "about", "contact", "blog", "faq", "cart", "checkout", "account"}:
+        return True
+    return bool(_CATEGORY_LABEL_RE.search(n))
+
+
+_CATEGORY_LABEL_RE = re.compile(
+    r"(?i)^(shop|buy|browse|collections?|kids?|children|men|women|sale|new)\b|"
+    r"^(bikes?|parts|accessories|services?)$"
+)
 
 
 def _heuristic_extract(markdown: str, *, brand_name: str = "") -> BrandFacts:
@@ -204,6 +264,7 @@ def _heuristic_extract(markdown: str, *, brand_name: str = "") -> BrandFacts:
         if kw in lower:
             found_services.append(label)
     facts["services"] = list(dict.fromkeys(found_services))[:10]
+    facts["products"] = _heuristic_extract_products(text)
 
     # Offers
     offer_hits = re.findall(
@@ -243,12 +304,12 @@ def _heuristic_extract(markdown: str, *, brand_name: str = "") -> BrandFacts:
 def _merge_facts(base: BrandFacts, overlay: BrandFacts) -> BrandFacts:
     out = empty_brand_facts()
     out.update(base)
-    for key in ("services", "service_areas", "locations", "offers", "rates_or_pricing", "credentials", "unique_selling_points", "cta_phrases", "do_not_claim"):
+    for key in ("services", "products", "service_areas", "locations", "offers", "rates_or_pricing", "credentials", "unique_selling_points", "cta_phrases", "do_not_claim"):
         merged = list(dict.fromkeys(
             [*(str(x).strip() for x in (base.get(key) or []) if str(x).strip()),
              *(str(x).strip() for x in (overlay.get(key) or []) if str(x).strip())]
         ))
-        out[key] = merged
+        out[key] = merged[:20 if key == "products" else 12]
     br = base.get("reviews") if isinstance(base.get("reviews"), dict) else {}
     orr = overlay.get("reviews") if isinstance(overlay.get("reviews"), dict) else {}
     out["reviews"] = {
@@ -301,13 +362,15 @@ async def extract_brand_facts(
             "2. If a rate, review count, year count, or award is not explicit → leave null / empty.\n"
             "3. Prefer specific service names (e.g. 'Split-system installation') over vague marketing fluff.\n"
             "4. service_areas = suburbs/cities/regions they say they serve.\n"
-            "5. rates_or_pricing = only numeric rates/prices written on the page.\n"
-            "6. do_not_claim = list of claim types NOT supported by this page "
+            "5. products = specific product/model/SKU names listed on the page (e.g. bike models, jewellery pieces, SKUs). "
+            "Use exact names from the site — never invent.\n"
+            "6. rates_or_pricing = only numeric rates/prices written on the page.\n"
+            "7. do_not_claim = list of claim types NOT supported by this page "
             "(e.g. 'customer volume', 'interest rate', 'years of experience').\n"
-            "7. confidence = high|medium|low based on how much concrete commercial detail is present.\n"
+            "8. confidence = high|medium|low based on how much concrete commercial detail is present.\n"
             "JSON shape:\n"
             "{"
-            '"services":[],"service_areas":[],"locations":[],"offers":[],'
+            '"services":[],"products":[],"service_areas":[],"locations":[],"offers":[],'
             '"rates_or_pricing":[],'
             '"reviews":{"rating":null,"count":null,"source":null,"highlights":[]},'
             '"credentials":[],"years_in_business":null,"phone":null,'
@@ -340,12 +403,15 @@ async def extract_brand_facts(
             return heuristic
         llm_facts = empty_brand_facts()
         for key in (
-            "services", "service_areas", "locations", "offers", "rates_or_pricing",
+            "services", "products", "service_areas", "locations", "offers", "rates_or_pricing",
             "credentials", "unique_selling_points", "cta_phrases", "do_not_claim",
         ):
             val = data.get(key)
             if isinstance(val, list):
-                llm_facts[key] = [str(x).strip() for x in val if str(x).strip()][:12]
+                if key == "products":
+                    llm_facts[key] = _normalize_product_names(val)
+                else:
+                    llm_facts[key] = [str(x).strip() for x in val if str(x).strip()][:12]
         rev = data.get("reviews") if isinstance(data.get("reviews"), dict) else {}
         llm_facts["reviews"] = {
             "rating": rev.get("rating"),

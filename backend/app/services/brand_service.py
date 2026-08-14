@@ -35,7 +35,17 @@ class BrandService:
     @staticmethod
     async def update_brand(db: AsyncSession, brand_id: UUID, tenant_id: UUID, data: BrandUpdate) -> Brand:
         brand = await BrandService.get_brand(db, brand_id, tenant_id)
-        for field, value in data.model_dump(exclude_none=True).items():
+        payload = data.model_dump(exclude_none=True)
+        if payload.get("logo_url") and str(payload["logo_url"]).startswith(("http://", "https://")):
+            from app.services.brand_logo import persist_remote_logo_url
+
+            persisted = persist_remote_logo_url(
+                str(payload["logo_url"]),
+                tenant_id=str(tenant_id),
+            )
+            if persisted:
+                payload["logo_url"] = persisted
+        for field, value in payload.items():
             setattr(brand, field, value)
         await db.flush()
         await db.refresh(brand)

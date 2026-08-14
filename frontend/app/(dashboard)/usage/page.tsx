@@ -6,6 +6,7 @@ import Topbar from '@/components/layout/Topbar'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
+import UsageAnalyticsDashboard from '@/components/usage/UsageAnalyticsDashboard'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
@@ -14,6 +15,7 @@ import type { AdminUsage } from '@/types'
 
 function money(n: number | null | undefined) {
   if (n == null || Number.isNaN(n)) return '—'
+  if (n >= 1) return `$${n.toFixed(2)}`
   return `$${n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`
 }
 
@@ -42,32 +44,38 @@ export default function UsagePage() {
   const totals = usage?.totals
 
   return (
-    <div>
+    <div className="min-h-full bg-[#050506]">
       <Topbar
-        title="API usage"
-        subtitle="Tokens, credits, and estimated spend across OpenRouter, Runway, HeyGen, Higgsfield, Firecrawl, and Meta"
+        title="Usage"
+        subtitle="API spend, request volume, and model breakdown — last 30 days"
       />
 
-      <div className="p-5 space-y-4">
-        <div className="flex justify-end">
-          <Button size="sm" variant="secondary" onClick={() => refetch()}>Refresh</Button>
+      <div className="p-5 space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            {[
+              { label: 'Total spend', value: isLoading ? '—' : money(totals?.cost_usd) },
+              { label: 'API calls', value: isLoading ? '—' : totals?.calls },
+              { label: 'Tokens', value: isLoading ? '—' : tokens(totals?.total_tokens) },
+              { label: 'Credits', value: isLoading ? '—' : (totals?.credits ?? 0).toFixed(1) },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className="rounded-xl border border-[#2a2a2e] bg-[#111114] px-4 py-2.5 min-w-[120px]"
+              >
+                <div className="text-[10px] font-bold text-[#8e8e93] uppercase tracking-wide">
+                  {item.label}
+                </div>
+                <div className="text-lg font-bold text-[#f5f5f7] tabular-nums">{item.value}</div>
+              </div>
+            ))}
+          </div>
+          <Button size="sm" variant="secondary" onClick={() => refetch()}>
+            Refresh
+          </Button>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-          {[
-            { label: 'Estimated spend', value: isLoading ? '—' : money(totals?.cost_usd) },
-            { label: 'Credits burned', value: isLoading ? '—' : (totals?.credits ?? 0).toFixed(1) },
-            { label: 'Tokens', value: isLoading ? '—' : tokens(totals?.total_tokens) },
-            { label: 'API calls', value: isLoading ? '—' : totals?.calls },
-            { label: 'Failed calls', value: isLoading ? '—' : totals?.failed_calls },
-            { label: 'Prompt / completion', value: isLoading ? '—' : `${tokens(totals?.prompt_tokens)} / ${tokens(totals?.completion_tokens)}` },
-          ].map((item) => (
-            <Card key={item.label}>
-              <div className="text-xs font-bold text-lt uppercase tracking-wide mb-1">{item.label}</div>
-              <div className="text-xl font-extrabold text-navy">{item.value}</div>
-            </Card>
-          ))}
-        </div>
+        <UsageAnalyticsDashboard usage={usage ?? { totals: { calls: 0, failed_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, credits: 0, cost_usd: 0 }, by_provider: [], by_model: [], recent: [] }} loading={isLoading} />
 
         <div className="grid lg:grid-cols-2 gap-4">
           <Card title="By API / provider" padding={false}>
@@ -85,7 +93,7 @@ export default function UsagePage() {
                       <tr key={i}><td colSpan={5} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
                     ))
                   : (usage?.by_provider ?? []).length === 0
-                    ? <tr><td colSpan={5} className="px-4 py-6 text-center text-mid">No API usage recorded yet. Generate a brief or scrape a brand to start the log.</td></tr>
+                    ? <tr><td colSpan={5} className="px-4 py-6 text-center text-mid">No API usage recorded yet.</td></tr>
                     : (usage?.by_provider ?? []).map((row) => (
                       <tr key={row.name} className="border-b border-border">
                         <td className="px-4 py-2.5 font-semibold text-navy capitalize">{row.name}</td>
@@ -126,10 +134,10 @@ export default function UsagePage() {
         </div>
 
         <Card title="Recent API calls" padding={false}>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-light">
+                <tr className="bg-light sticky top-0 z-10">
                   {['When', 'Client', 'Provider', 'Model', 'Operation', 'Tokens', 'Credits', 'Spend', 'Status'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
                   ))}

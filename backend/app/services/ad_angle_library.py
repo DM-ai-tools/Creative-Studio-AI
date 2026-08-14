@@ -32,6 +32,7 @@ AD_ANGLE_CATALOG: list[tuple[str, str, str]] = [
     ("fear_loss_aversion", "Fear / Loss Aversion", "Real consequence of inaction"),
     ("fomo_scarcity", "FOMO / Scarcity", "Genuine limitation; social exclusion angle"),
     ("contrarian", "Contrarian / Unpopular Opinion", "Saturated category; sophisticated ICP"),
+    ("product_hero", "Product Hero / Catalog", "Product-alone retail; model name + bold headline on brand colors"),
 ]
 
 VALID_ANGLE_IDS = frozenset(a[0] for a in AD_ANGLE_CATALOG)
@@ -135,6 +136,19 @@ INDUSTRY_ANGLE_POOLS: dict[str, dict[str, list[str]]] = {
             "educational_howto", "myth_busting",
         ]),
     },
+    "fashion_retail": {
+        "primary": _normalize_angle_list([
+            "offer_urgency", "fomo_scarcity", "ugc_style", "social_proof",
+        ]),
+        "secondary": _normalize_angle_list([
+            "pattern_interrupt", "curiosity_hook", "testimonial_review",
+            "founder_led", "before_after",
+        ]),
+        "blocked": _normalize_angle_list([
+            "contrarian", "fear_loss_aversion", "problem_agitate_solve",
+            "educational_howto", "myth_busting",
+        ]),
+    },
 }
 
 _INDUSTRY_POOL_NOTES: dict[str, str] = {
@@ -179,6 +193,15 @@ def resolve_industry_angle_key(*, industry: str = "", niche: str = "", campaign_
 
     if any(k in hay for k in ("retail", "store", "shop", "boutique", "brick and mortar")):
         return "retail"
+
+    if any(
+        k in hay
+        for k in (
+            "fashion", "apparel", "clothing", "denim", "knitwear", "runway",
+            "arrivals", "wardrobe", "jeans", "new season", "editorial fashion",
+        )
+    ):
+        return "fashion_retail"
 
     if any(
         k in hay
@@ -350,6 +373,15 @@ ANGLE_GUIDANCE: dict[str, str] = {
     "contrarian": (
         "Take a stance against common category belief. Visual tension between accepted approach and brand approach. "
         "Crossed-out conventional wisdom or subject breaking from the group."
+    ),
+    "product_hero": (
+        "PRODUCT-ALONE CATALOG AD (mandatory when product_focus=product_only): "
+        "Simple premium retail layout like a bike/jewellery catalog ad — NO people, NO pain-story, NO before/after. "
+        "Product fills 50–70% of frame on clean studio background with diagonal brand-color blocks (primary + white). "
+        "Stacked bold headline in brand colors (2–3 short words per line, e.g. RIDE / WITH / STYLE). "
+        "Product model name as a lower label bar in white bold sans on brand primary (e.g. NORCO SCENE VLT 2025). "
+        "image_hook = product model name; image_headline = short feature or stacked headline line; offer/CTA optional pill. "
+        "Use brand website colors and fonts — not random gold or generic stock."
     ),
 }
 
@@ -761,14 +793,23 @@ def assign_angles_to_variants(
     industry: str = "",
     niche: str = "",
     campaign_name: str = "",
+    product_focus: str = "",
 ) -> list[str]:
     """
     One angle per variant.
 
     If the user selected angles, those win 1:1 (no industry reshuffle).
     Example: 2 variants + [before_after, pain_led] → exactly those two slots.
+
+    Product-alone catalog shots always use product_hero — no pain-led defaults.
     """
-    count = max(1, min(20, int(variant_count or 1)))
+    # Keep angle assignments aligned with the app's variant cap.
+    # If we cap at 20 here, carousel briefs with >20 cards will leave the
+    # last cards without locked angles (LLM fills them), causing mixed results.
+    count = max(1, min(100, int(variant_count or 1)))
+    focus = (product_focus or "").strip().lower().replace("-", "_")
+    if focus in {"product_only", "product_alone", "product_hero", "catalog", "solo"}:
+        return ["product_hero"] * count
     # Preserve user order; normalize aliases; drop blocked only.
     raw = [normalize_angle_id(a) or a for a in (selected or []) if a]
     valid = filter_angles_by_industry(

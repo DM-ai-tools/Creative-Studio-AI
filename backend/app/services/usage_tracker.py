@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections import defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -314,15 +316,132 @@ def _patch_chat_create(client: Any) -> None:
     completions.create = tracked_create
 
 
+_CHART_DAYS = 30
+_MAX_CHART_MODELS = 7
+
+_MODEL_LABELS: dict[str, str] = {
+    "claude-haiku-4.5": "Claude Haiku",
+    "claude-sonnet-4.6": "Claude Sonnet 4.6",
+    "claude-sonnet-4": "Claude Sonnet 4",
+    "gpt-4o-mini": "GPT-4o Mini",
+    "gpt-4o": "GPT-4o",
+    "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-3.1-flash-image-preview": "Gemini 3.1 Flash",
+    "gemini_image3.1_flash": "Gemini 3.1 Image",
+    "gemini_image3_pro": "Gemini 3 Pro Image",
+    "veo3.1": "Veo 3.1",
+    "scrape": "Firecrawl",
+    "graph_api": "Meta Graph",
+}
+
+
+def _display_model(model: str, provider: str = "") -> str:
+    raw = (model or "").strip()
+    prov = (provider or "").strip().lower()
+    if not raw:
+        if prov == "firecrawl":
+            return "Firecrawl"
+        if prov == "runway":
+            return "Runway"
+        if prov == "heygen":
+            return "HeyGen"
+        if prov == "meta":
+            return "Meta"
+        return prov.title() or "Other"
+    short = raw.split("/")[-1] if "/" in raw else raw
+    key = short.lower().replace("_", "-")
+    for needle, label in _MODEL_LABELS.items():
+        if needle in key or key in needle:
+            return label
+    cleaned = short.replace("-", " ").replace("_", " ")
+    return cleaned[:36].title()
+
+
+def _build_daily_series(
+    rows: list[Any],
+    *,
+    value_fn: Callable[[Any], float],
+    days: int = _CHART_DAYS,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Daily stacked series — top models + Other bucket."""
+    today = datetime.now(timezone.utc).date()
+    day_keys = [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+    by_day: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    model_totals: dict[str, float] = defaultdict(float)
+
+    for r in rows:
+        if not r.created_at:
+            continue
+        day = r.created_at.astimezone(timezone.utc).date().isoformat()
+        label = _display_model(r.model, r.provider)
+        val = float(value_fn(r) or 0)
+        by_day[day][label] += val
+        model_totals[label] += val
+
+    top = [
+        m
+        for m, _ in sorted(model_totals.items(), key=lambda x: x[1], reverse=True)
+        if model_totals[m] > 0
+    ][:_MAX_CHART_MODELS]
+    legend = list(top)
+    has_other = len(model_totals) > len(top)
+    if has_other:
+        legend.append("Other")
+
+    series: list[dict[str, Any]] = []
+    for day in day_keys:
+        point: dict[str, Any] = {"date": day, "total": 0.0}
+        other = 0.0
+        for m in top:
+            v = by_day[day].get(m, 0.0)
+            point[m] = round(v, 4)
+            point["total"] += v
+        for m, v in by_day[day].items():
+            if m not in top:
+                other += v
+        if has_other:
+            point["Other"] = round(other, 4)
+            point["total"] += other
+        point["total"] = round(point["total"], 4)
+        series.append(point)
+    return series, legend
+
+
+def _align_series_to_legend(series: list[dict[str, Any]], legend: list[str]) -> list[dict[str, Any]]:
+    """Force a daily series to use the same model keys as the cost chart legend."""
+    out: list[dict[str, Any]] = []
+    fixed = [m for m in legend if m != "Other"]
+    include_other = "Other" in legend
+    for point in series:
+        aligned: dict[str, Any] = {"date": point["date"], "total": 0.0}
+        other = 0.0
+        for m in fixed:
+            v = float(point.get(m, 0) or 0)
+            aligned[m] = round(v, 4)
+            aligned["total"] += v
+        for key, raw in point.items():
+            if key in {"date", "total"} or key in fixed or key == "Other":
+                continue
+            other += float(raw or 0)
+        if include_other:
+            other += float(point.get("Other") or 0)
+            aligned["Other"] = round(other, 4)
+            aligned["total"] += other
+        aligned["total"] = round(float(aligned["total"]), 4)
+        out.append(aligned)
+    return out
+
+
 async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, Any]:
     from app.models.usage_event import UsageEvent
     from app.models.tenant import Tenant
 
     async with AsyncSessionLocal() as db:
-        q = select(UsageEvent)
+        since = datetime.now(timezone.utc) - timedelta(days=_CHART_DAYS)
+        q = select(UsageEvent).where(UsageEvent.created_at >= since)
         if not platform and tenant_id:
             q = q.where(UsageEvent.tenant_id == tenant_id)
-        q = q.order_by(UsageEvent.created_at.desc()).limit(500)
+        q = q.order_by(UsageEvent.created_at.desc())
         rows = list((await db.execute(q)).scalars().all())
 
         tenant_ids = {r.tenant_id for r in rows if r.tenant_id}
@@ -383,9 +502,17 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
             }
         )
 
+    daily_cost, chart_models = _build_daily_series(rows, value_fn=lambda r: float(r.cost_usd or 0))
+    daily_requests_raw, _ = _build_daily_series(rows, value_fn=lambda r: 1.0)
+    daily_requests = _align_series_to_legend(daily_requests_raw, chart_models)
+
     return {
         "totals": totals,
         "by_provider": _bucket(lambda r: r.provider),
         "by_model": _bucket(lambda r: r.model or r.provider),
         "recent": recent,
+        "daily_cost": daily_cost,
+        "daily_requests": daily_requests,
+        "chart_models": chart_models,
+        "period_days": _CHART_DAYS,
     }

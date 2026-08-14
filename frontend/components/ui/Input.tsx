@@ -7,17 +7,18 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   hint?: string
   leftIcon?: React.ReactNode
   rightElement?: React.ReactNode
+  labelClassName?: string
 }
 
 const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { label, error, hint, leftIcon, rightElement, className, id, ...props },
+  { label, error, hint, leftIcon, rightElement, labelClassName, className, id, ...props },
   ref
 ) {
   const inputId = id || label?.toLowerCase().replace(/\s+/g, '-')
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={inputId} className="label-ui">
+        <label htmlFor={inputId} className={cn('label-ui', labelClassName)}>
           {label}
         </label>
       )}

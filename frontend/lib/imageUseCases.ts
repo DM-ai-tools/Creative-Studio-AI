@@ -59,8 +59,55 @@ export type ImageVariantSlot = {
   reasoning: string
   /** Assigned ad angle id for this variant (e.g. pattern_interrupt). */
   ad_angle: string
+  /** static | carousel — from strategy MD Type column when present. */
+  format?: string
+  /** 1-based index when this slot is one swipe card in a carousel. */
+  carousel_index?: number
+  carousel_total?: number
+  /** Groups cards that belong to the same Meta carousel creative (e.g. creative-1). */
+  carousel_group?: string
+  /** Fashion retail: model + outfit photo only — feed copy stays off-image. */
+  photo_only?: boolean
+  /** Client-style retail promo (headline + offer burned on image). */
+  retail_promo?: boolean
+  aspect_ratio?: string
+  /** Retail / ecommerce: product-only catalog shot vs person with product. */
+  product_focus?: 'product_only' | 'with_person' | ''
+  /** Specific product/model from scraped catalog (e.g. NEO + 20 2026). */
+  product_model?: string
   /** ISO timestamp when AI plan was last generated for this variant. */
   generated_at: string | null
+}
+
+export function isCarouselSlot(slot: ImageVariantSlot, formats?: string[]): boolean {
+  if (slot.format === 'carousel') return true
+  if (slot.format === 'static') return false
+  const fmts = formats ?? []
+  return fmts.includes('carousel') && !fmts.includes('static')
+}
+
+export function isLastCarouselCard(
+  slot: ImageVariantSlot,
+  index: number,
+  slots: ImageVariantSlot[],
+  formats?: string[]
+): boolean {
+  if (!isCarouselSlot(slot, formats)) return false
+  // Prefer explicit per-creative index/total (Card 6 of 6 in Creative 1, etc.).
+  if (slot.carousel_index && slot.carousel_total) {
+    return slot.carousel_index >= slot.carousel_total
+  }
+  // Same carousel_group: last slot in that group.
+  if (slot.carousel_group) {
+    const groupIdxs = slots
+      .map((s, i) => (s.carousel_group === slot.carousel_group ? i : -1))
+      .filter((i) => i >= 0)
+    return groupIdxs[groupIdxs.length - 1] === index
+  }
+  const idxs = slots
+    .map((s, i) => (isCarouselSlot(s, formats) ? i : -1))
+    .filter((i) => i >= 0)
+  return idxs[idxs.length - 1] === index
 }
 
 export function emptyImageVariantSlot(): ImageVariantSlot {
@@ -75,8 +122,81 @@ export function emptyImageVariantSlot(): ImageVariantSlot {
     prompt: '',
     reasoning: '',
     ad_angle: '',
+    product_focus: '',
+    product_model: '',
     generated_at: null,
   }
+}
+
+export const PRODUCT_FOCUS_OPTIONS = [
+  { value: '', label: 'Auto (AI decides)' },
+  { value: 'product_only', label: 'Product alone — catalog / studio hero' },
+  { value: 'with_person', label: 'With person / model / kid' },
+] as const
+
+export type ProductFocusId = 'product_only' | 'with_person'
+
+export function normalizeProductFocus(value: unknown): ImageVariantSlot['product_focus'] {
+  const s = String(value ?? '').trim()
+  if (s === 'product_only' || s === 'with_person') return s
+  return ''
+}
+
+export function labelForProductFocus(value: string | undefined): string {
+  return PRODUCT_FOCUS_OPTIONS.find((o) => o.value === (value || ''))?.label ?? 'Auto'
+}
+
+export type OnImageStyleId =
+  | 'auto'
+  | 'retail_modern'
+  | 'jewellery_luxury'
+  | 'fashion_editorial'
+  | 'high_contrast'
+
+export const ON_IMAGE_STYLE_OPTIONS: {
+  value: OnImageStyleId
+  label: string
+  hint: string
+}[] = [
+  {
+    value: 'auto',
+    label: 'Auto (by industry)',
+    hint: 'Jewellery → gold luxury · Fashion promo → editorial white · Else → modern retail',
+  },
+  {
+    value: 'retail_modern',
+    label: 'Modern retail',
+    hint: 'White sans-serif on dark gradient — bike shops, services, general retail',
+  },
+  {
+    value: 'jewellery_luxury',
+    label: 'Jewellery luxury',
+    hint: 'Champagne gold serif + script — Adoria-style jeweller ads only',
+  },
+  {
+    value: 'fashion_editorial',
+    label: 'Fashion editorial',
+    hint: 'White serif caps + offer bar — Runway Secrets / clothing promo',
+  },
+  {
+    value: 'high_contrast',
+    label: 'High contrast',
+    hint: 'Bold white caps sans + strong CTA — urgency / performance',
+  },
+]
+
+export function labelForOnImageStyle(value: string | undefined): string {
+  return ON_IMAGE_STYLE_OPTIONS.find((o) => o.value === (value || 'auto'))?.label ?? 'Auto'
+}
+
+const DANGLING_LAST =
+  /^(to|for|and|or|of|a|an|the|with|your|our|my|at|in|on|from|by|is|are)$/i
+
+export function isIncompleteOnImageLine(text: string): boolean {
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const last = words[words.length - 1].replace(/[^a-zA-Z']/g, '')
+  return DANGLING_LAST.test(last)
 }
 
 /** Fallback catchy on-image lines when AI omits image_hook / image_headline.
@@ -89,8 +209,10 @@ export function relatedOnImageLines(hook: string, message: string): {
   const clip = (text: string, max: number) => {
     const words = text.trim().split(/\s+/).filter(Boolean)
     if (!words.length) return ''
+    // Keep short complete lines whole (e.g. "What happens at an Adoria consultation?")
+    if (words.length <= max) return text.trim().replace(/[,;:-]+$/, '')
     let out = words.slice(0, max).join(' ').replace(/[,;:-]+$/, '')
-    while (/\b(to|for|and|or|of|a|the|with)$/i.test(out)) {
+    while (DANGLING_LAST.test(out.split(/\s+/).pop() || '')) {
       const parts = out.split(/\s+/)
       if (parts.length <= 1) break
       out = parts.slice(0, -1).join(' ')
@@ -118,13 +240,15 @@ export function relatedOnImageLines(hook: string, message: string): {
     image_hook = 'Refinance before rates move'
     image_headline = 'Check your broker options'
   } else {
-    image_hook = clip(hook, 6)
-    image_headline = clip(message, 8)
+    const hookWords = hook.trim().split(/\s+/).filter(Boolean)
+    image_hook = hookWords.length <= 8 ? hook.trim() : clip(hook, 6)
+    const same = hook.trim().toLowerCase() === message.trim().toLowerCase()
+    image_headline = same ? '' : clip(message, 8)
   }
 
   return {
-    image_hook: clip(image_hook, 7),
-    image_headline: clip(image_headline, 8),
+    image_hook: isIncompleteOnImageLine(image_hook) ? clip(hook, 8) : image_hook,
+    image_headline: isIncompleteOnImageLine(image_headline) ? '' : image_headline,
   }
 }
 
@@ -132,7 +256,7 @@ export function resizeImageVariantSlots(
   prev: ImageVariantSlot[],
   count: number
 ): ImageVariantSlot[] {
-  const n = Math.max(1, Math.min(20, Math.round(count) || 1))
+  const n = Math.max(1, Math.min(100, Math.round(count) || 1))
   if (prev.length === n) return prev
   if (prev.length < n) {
     return [
@@ -141,4 +265,34 @@ export function resizeImageVariantSlots(
     ]
   }
   return prev.slice(0, n)
+}
+
+/** Split slot indices into carousel creative groups (or chunks of 6) for batched AI plans. */
+export function chunkSlotIndicesForGeneration(slots: ImageVariantSlot[]): number[][] {
+  if (!slots.length) return []
+
+  const hasGroups = slots.some((s) => (s.carousel_group || '').trim())
+  if (hasGroups) {
+    const chunks: number[][] = []
+    let current: number[] = []
+    let group = ''
+    for (let i = 0; i < slots.length; i++) {
+      const g = (slots[i].carousel_group || '').trim()
+      if (g && group && g !== group && current.length) {
+        chunks.push(current)
+        current = []
+      }
+      if (g) group = g
+      current.push(i)
+    }
+    if (current.length) chunks.push(current)
+    return chunks
+  }
+
+  const size = 6
+  const chunks: number[][] = []
+  for (let i = 0; i < slots.length; i += size) {
+    chunks.push(Array.from({ length: Math.min(size, slots.length - i) }, (_, j) => i + j))
+  }
+  return chunks
 }

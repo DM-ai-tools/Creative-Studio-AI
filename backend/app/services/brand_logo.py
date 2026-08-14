@@ -128,6 +128,56 @@ def resolve_video_logo_urls(
     return default_url or None, resolved_on_light
 
 
+def persist_remote_logo_url(
+    logo_url: str | None,
+    *,
+    tenant_id: str,
+) -> str | None:
+    """
+    Store a brand logo under /files/ for compositing.
+    Remote http(s) URLs from website scrape are downloaded once per save.
+    """
+    raw = (logo_url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("/files/") or raw.startswith("files/"):
+        return raw if raw.startswith("/files/") else f"/{raw.lstrip('/')}"
+
+    path = logo_local_path(raw)
+    if not path or not path.is_file():
+        logger.warning("Could not resolve logo for persistence: %s", raw[:120])
+        return None
+
+    suffix = path.suffix.lower()
+    if suffix == ".svg":
+        logger.warning(
+            "SVG logo cannot be composited onto images — re-upload PNG/JPG on Brand Kit (%s)",
+            raw[:80],
+        )
+        return None
+
+    try:
+        content = path.read_bytes()
+        from app.services.media_content import image_suffix_and_type
+        from app.services.file_service import file_service
+
+        ext, content_type = image_suffix_and_type(content)
+        if content_type == "application/octet-stream" and suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            ext = suffix if suffix.startswith(".") else f".{suffix}"
+        saved = file_service.save_bytes(
+            content=content,
+            tenant_id=tenant_id,
+            subfolder="brand",
+            suffix=ext,
+            content_type=content_type if content_type != "application/octet-stream" else "image/png",
+        )
+        logger.info("Persisted brand logo to %s (from %s)", saved.get("file_url"), raw[:80])
+        return str(saved.get("file_url") or "") or None
+    except Exception:
+        logger.exception("Failed to persist brand logo from %s", raw[:80])
+        return None
+
+
 def logo_local_path(logo_url: str | None) -> Path | None:
     """Map /files/ URL, absolute path, or http(s) URL to a readable local file."""
     if not logo_url or not str(logo_url).strip():

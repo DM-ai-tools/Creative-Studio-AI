@@ -143,6 +143,7 @@ _USE_CASE_DESCRIPTIONS: dict[str, str] = {
 _RATIO_HINTS: dict[str, str] = {
     "1:1":    "square canvas, balanced composition, Instagram/Facebook feed optimised",
     "4:5":    "portrait canvas 4:5, strong vertical composition, Instagram portrait feed",
+    "4:3":    "portrait 4:3, fashion retail / editorial model shot, person and outfit hero",
     "9:16":   "tall portrait 9:16 full-screen vertical, Reels/Stories/TikTok layout",
     "16:9":   "landscape 16:9, wide cinematic composition, website hero / YouTube",
     "1.91:1": "wide landscape 1.91:1, Facebook/Google ads banner layout",
@@ -258,6 +259,16 @@ ON-IMAGE TEXT (critical):
 - Text reinforces the remaining 20–30% of the message — it must match what the scene shows.
 - Burn ONLY short billboard lines. Never put long Facebook primary text / hook essays on the photo.
 - Prefer industry vocabulary that the ICP recognises in under 3 seconds.
+- JEWELLERY / FINE JEWELLER: all on-image type is metallic champagne-gold (#D4AF37 to burnished bronze).
+  Headline in elegant serif Title Case or sentence case — NEVER ALL CAPS.
+  Supporting line in thin tracked sans-serif sentence case; romantic/engagement line in flowing gold script.
+  Place gold type on a dark third of the frame.
+  BRAND NAME: use ONLY the BRAND field letter-for-letter (e.g. Adoria Jewellery). Never invent
+  Lusso, Shop Dimad, She Diamond, Shop Diamonds-as-a-store, Tiffany, or any other jeweller name.
+  The Brand Kit logo is composited in post — do not draw a fake wordmark.
+- JEWELLERY PRODUCT HERO: name the specific piece and make it the main subject (macro/tight close-up,
+  ~40–70% of frame, sharp gem/metal). People and boutique/lifestyle may remain as softer supporting
+  background — do not remove them, but never let faces or the room dominate.
 
 PLATFORM-AWARE LAYOUT RULES:
 - Social feed (Instagram/Facebook/TikTok/LinkedIn): text in upper or lower third, bold
@@ -339,7 +350,8 @@ def _build_campaign_summary(
 ) -> str:
     """Compact campaign context block sent to the LLM selector."""
     lines = [
-        f"BRAND: {brand.get('brand_name') or brief.get('brand_name', 'Unknown')}",
+        f"BRAND: {brand.get('brand_name') or brief.get('brand_name', 'Unknown')} "
+        "(ONLY allowed company name on-image — never invent another jeweller house)",
         f"BRAND PRIMARY COLOUR: {brand.get('primary_color', '#0F1B3D')}",
         f"BRAND SECONDARY COLOUR: {brand.get('secondary_color', '#00C2A8')}",
         f"INDUSTRY: {brief.get('target_industry_label') or brand.get('agency_industry', '')}",
@@ -386,6 +398,15 @@ def _parse_llm_plan(raw: str) -> dict[str, Any] | None:
     except (json.JSONDecodeError, AttributeError):
         pass
     return None
+
+
+def _pin_brand_on_plan(plan: ImagePlan, brief: dict[str, Any], brand: dict[str, Any]) -> ImagePlan:
+    from app.services.icp_image_plan_service import enforce_brand_identity_in_prompt
+
+    name = str(brand.get("brand_name") or brief.get("brand_name") or "").strip()
+    if name and plan.prompt:
+        plan.prompt = enforce_brand_identity_in_prompt(plan.prompt, brand_name=name)
+    return plan
 
 
 def _mock_plan(brief: dict[str, Any], brand: dict[str, Any]) -> ImagePlan:
@@ -473,24 +494,32 @@ async def select_and_build_image_plan(
                 uc for uc in (data.get("use_cases") or [])
                 if uc in _USE_CASE_DESCRIPTIONS
             ] or _SELECTOR_FALLBACK_USE_CASES
-            return ImagePlan(
-                use_cases=use_cases,
-                prompt=prompt,
-                reasoning=(data.get("reasoning") or "").strip(),
+            return _pin_brand_on_plan(
+                ImagePlan(
+                    use_cases=use_cases,
+                    prompt=prompt,
+                    reasoning=(data.get("reasoning") or "").strip(),
+                ),
+                brief,
+                brand,
             )
 
         # LLM returned non-JSON — try to salvage the text as the prompt
         logger.warning("LLM did not return valid JSON for image plan; using text as prompt")
         prompt = raw[:950] if raw else _mock_plan(brief, brand).prompt
-        return ImagePlan(
-            use_cases=_SELECTOR_FALLBACK_USE_CASES,
-            prompt=prompt,
-            reasoning="Use cases auto-selected (LLM returned plain text).",
+        return _pin_brand_on_plan(
+            ImagePlan(
+                use_cases=_SELECTOR_FALLBACK_USE_CASES,
+                prompt=prompt,
+                reasoning="Use cases auto-selected (LLM returned plain text).",
+            ),
+            brief,
+            brand,
         )
 
     except Exception:
         logger.exception("select_and_build_image_plan failed")
-        return _mock_plan(brief, brand)
+        return _pin_brand_on_plan(_mock_plan(brief, brand), brief, brand)
 
 _SYSTEM_PROMPT = """
 You are a world-class AI image prompt engineer specialising in commercial advertising photography.

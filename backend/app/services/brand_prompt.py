@@ -224,4 +224,7 @@ def build_image_prompt(
         prompt += "Do not repeat the headline in multiple banners. "
 
     prompt += f"{tone} tone, high-end Facebook Instagram ad, natural and trustworthy."
+    from app.services.icp_image_plan_service import enforce_brand_identity_in_prompt
+
+    prompt = enforce_brand_identity_in_prompt(prompt, brand_name=brand_name)
     return clamp_runway_image_prompt(prompt)

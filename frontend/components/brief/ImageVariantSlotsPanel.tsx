@@ -12,8 +12,12 @@ import {
 import {
   IMAGE_USE_CASES,
   IMAGE_USE_CASE_GROUPS,
+  PRODUCT_FOCUS_OPTIONS,
+  isCarouselSlot,
+  isLastCarouselCard,
   labelForUseCase,
   type ImageVariantSlot,
+  type ProductFocusId,
 } from '@/lib/imageUseCases'
 import { labelForAngle } from '@/lib/adAngles'
 import type { CatalogOption } from '@/types'
@@ -27,8 +31,20 @@ type Props = {
   generatingAll?: boolean
   campaignOffer?: string
   onCampaignOfferChange?: (value: string) => void
+  campaignHook?: string
+  campaignHeadline?: string
+  campaignCta?: string
+  onCampaignHookChange?: (value: string) => void
+  onCampaignHeadlineChange?: (value: string) => void
+  onCampaignCtaChange?: (value: string) => void
+  formats?: string[]
   angleOptions?: CatalogOption[]
   exportContext?: ImageVariantExportContext
+  /** Product/model names scraped from brand website — optional picker per variant. */
+  catalogProducts?: string[]
+  /** Campaign-level shot style — applies to every variant when generating. */
+  productFocus?: ProductFocusId | ''
+  onProductFocusChange?: (value: ProductFocusId | '') => void
 }
 
 function formatGenerationTime(iso: string): string {
@@ -51,10 +67,21 @@ export default function ImageVariantSlotsPanel({
   generatingAll,
   campaignOffer = '',
   onCampaignOfferChange,
+  campaignHook = '',
+  campaignHeadline = '',
+  campaignCta = '',
+  onCampaignHookChange,
+  onCampaignHeadlineChange,
+  onCampaignCtaChange,
+  formats,
   angleOptions,
   exportContext,
+  catalogProducts = [],
+  productFocus = '',
+  onProductFocusChange,
 }: Props) {
   const [openPicker, setOpenPicker] = useState<number | null>(null)
+  const hasCarousel = slots.some((s) => isCarouselSlot(s, formats))
 
   const hasVariantContent = (slot: ImageVariantSlot) =>
     Boolean(slot.hook.trim() || slot.message.trim() || slot.prompt.trim())
@@ -100,13 +127,31 @@ export default function ImageVariantSlotsPanel({
             {slots.length} image variant{slots.length !== 1 ? 's' : ''}
           </p>
           <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
-            Plans are built from your <strong>industry</strong>, <strong>niche</strong>, and{' '}
-            <strong>brand</strong> (ICP + HALO). Each variant gets its own ad angle, use case, hook,
-            message, CTA, and prompt. Change <strong>Target Variants</strong> in step 1 to add or
-            remove slots.
+            Slots stay empty until you click <strong>Generate AI for all</strong>. Static ads get
+            hook + on-image CTA. Carousel cards are visual + short headline; the campaign CTA
+            burns on the last card of each creative. Change <strong>Target Variants</strong> in step 1
+            to add or remove slots.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <div className="flex flex-col gap-0.5 min-w-[220px]">
+            <label className="text-[9px] font-bold uppercase tracking-widest text-navy">
+              Shot style (all variants)
+            </label>
+            <select
+              value={productFocus || ''}
+              onChange={(e) =>
+                onProductFocusChange?.(e.target.value as ProductFocusId | '')
+              }
+              className="rounded-lg border border-sky-400 bg-white px-2.5 py-1.5 text-xs font-semibold text-charcoal"
+            >
+              {PRODUCT_FOCUS_OPTIONS.map((opt) => (
+                <option key={opt.value || 'auto'} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <Button
             type="button"
             size="sm"
@@ -128,22 +173,78 @@ export default function ImageVariantSlotsPanel({
           </Button>
         </div>
       </div>
-
-      <div className="rounded-xl border border-border bg-white px-4 py-3">
-        <Input
-          label="Offer"
-          placeholder="e.g. Free Meta ads audit this week"
-          value={campaignOffer}
-          onChange={(e) => onCampaignOfferChange?.(e.target.value)}
-        />
-        <p className="text-[10px] text-mid mt-1">
-          Used when generating AI plans — each variant can also have its own offer below.
+      {productFocus ? (
+        <p className="text-[10px] text-sky-800 -mt-2">
+          {PRODUCT_FOCUS_OPTIONS.find((o) => o.value === productFocus)?.label ===
+          'Product alone — catalog / studio hero'
+            ? 'Every variant: product-only catalog hero — no people in frame.'
+            : productFocus === 'with_person'
+              ? 'Every variant: person/model with the product (e.g. kid on bike).'
+              : null}
         </p>
+      ) : (
+        <p className="text-[10px] text-mid -mt-2">
+          Shot style Auto — AI picks product-only vs with-person per variant.
+        </p>
+      )}
+
+      <div className="rounded-xl border border-border bg-white px-4 py-3 space-y-3">
+        {hasCarousel ? (
+          <>
+            <p className="text-xs font-bold text-navy uppercase tracking-wide">
+              Carousel ad (campaign-level)
+            </p>
+            <p className="text-[11px] text-mid -mt-2">
+              One story, one CTA. Cards below are visuals + short headlines — the CTA button
+              burns on the last swipe card only.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input
+                label="Overall hook"
+                placeholder="e.g. What happens at an Adoria consultation?"
+                value={campaignHook}
+                onChange={(e) => onCampaignHookChange?.(e.target.value)}
+              />
+              <Input
+                label="Overall headline"
+                placeholder="e.g. Four steps to a ring that feels hers"
+                value={campaignHeadline}
+                onChange={(e) => onCampaignHeadlineChange?.(e.target.value)}
+              />
+            </div>
+            <Input
+              label="Offer"
+              placeholder="e.g. Free design consultation"
+              value={campaignOffer}
+              onChange={(e) => onCampaignOfferChange?.(e.target.value)}
+            />
+            <Input
+              label="CTA (burned on the last card)"
+              placeholder="e.g. Book a Consultation"
+              value={campaignCta}
+              onChange={(e) => onCampaignCtaChange?.(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <Input
+              label="Offer"
+              placeholder="e.g. Free Meta ads audit this week"
+              value={campaignOffer}
+              onChange={(e) => onCampaignOfferChange?.(e.target.value)}
+            />
+            <p className="text-[10px] text-mid">
+              Used when generating AI plans — each variant can also have its own offer below.
+            </p>
+          </>
+        )}
       </div>
 
       {slots.map((slot, index) => {
         const busy = generatingIndex === index || Boolean(generatingAll)
         const pickerOpen = openPicker === index
+        const carouselCard = isCarouselSlot(slot, formats)
+        const lastCarousel = isLastCarouselCard(slot, index, slots, formats)
         return (
           <div key={index} className="space-y-1">
           <div
@@ -152,9 +253,30 @@ export default function ImageVariantSlotsPanel({
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-bold text-navy">
                 Variant {index + 1}
-                {slot.ad_angle ? (
+                {slot.format === 'carousel' && slot.carousel_total ? (
+                  <span className="ml-2 text-[10px] font-semibold text-violet-700 normal-case">
+                    {slot.carousel_group
+                      ? `${slot.carousel_group.replace('creative-', 'Creative ')} · `
+                      : ''}
+                    Card {slot.carousel_index}/{slot.carousel_total}
+                    {lastCarousel ? ' · CTA' : ''}
+                  </span>
+                ) : slot.format === 'carousel' ? (
+                  <span className="ml-2 text-[10px] font-semibold text-violet-700 normal-case">
+                    Carousel
+                  </span>
+                ) : slot.format === 'static' ? (
+                  <span className="ml-2 text-[10px] font-semibold text-mid normal-case">
+                    Static
+                  </span>
+                ) : null}
+                {slot.ad_angle && productFocus !== 'product_only' ? (
                   <span className="ml-2 text-[10px] font-semibold text-accent normal-case">
                     {labelForAngle(slot.ad_angle, angleOptions)}
+                  </span>
+                ) : productFocus === 'product_only' ? (
+                  <span className="ml-2 text-[10px] font-semibold text-sky-700 normal-case">
+                    Catalog hero
                   </span>
                 ) : null}
                 {slot.prompt ? (
@@ -255,51 +377,123 @@ export default function ImageVariantSlotsPanel({
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Input
-                label="Hook (post — keep as is)"
-                placeholder="e.g. Your best clients are leaving for integrated solutions"
-                value={slot.hook}
-                onChange={(e) => updateSlot(index, { hook: e.target.value })}
+            <div>
+              <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1.5">
+                Product / model (optional)
+              </label>
+              <input
+                list={catalogProducts.length ? `product-models-${index}` : undefined}
+                placeholder={
+                  catalogProducts.length
+                    ? 'Pick from site catalog or type a model name'
+                    : 'e.g. NEO + 20 2026 — scrape website for suggestions'
+                }
+                value={slot.product_model || ''}
+                onChange={(e) => updateSlot(index, { product_model: e.target.value })}
+                className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal"
               />
-              <Input
-                label="Headline (post — keep as is)"
-                placeholder="e.g. Don't lose assets to firms offering lending + wealth together"
-                value={slot.message}
-                onChange={(e) => updateSlot(index, { message: e.target.value })}
-              />
+              {catalogProducts.length > 0 ? (
+                <datalist id={`product-models-${index}`}>
+                  {catalogProducts.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              ) : null}
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Input
-                label="On-image hook (catchy, related)"
-                placeholder="e.g. Clients leaving for one-stop shops?"
-                value={slot.image_hook}
-                onChange={(e) => updateSlot(index, { image_hook: e.target.value })}
-              />
-              <Input
-                label="On-image headline (catchy, related)"
-                placeholder="e.g. Keep lending + wealth together"
-                value={slot.image_headline}
-                onChange={(e) => updateSlot(index, { image_headline: e.target.value })}
-              />
-            </div>
-            <Input
-              label="CTA on image (this variant)"
-              placeholder="e.g. Book Consultation, Get Free Audit, Claim Pilot"
-              value={slot.cta}
-              onChange={(e) => updateSlot(index, { cta: e.target.value })}
-            />
-            <p className="text-[10px] text-mid -mt-1">
-              Hook &amp; headline stay full for the post. On-image lines must be related to them but
-              shorter and catchier so the creative stops the scroll in ~3 seconds.
-            </p>
 
-            <Input
-              label="Offer (caption / feed — not on image)"
-              placeholder="e.g. I’m tired of guessing. I want proof that this actually works. Claim the free review and get next steps."
-              value={slot.offer}
-              onChange={(e) => updateSlot(index, { offer: e.target.value })}
-            />
+            {carouselCard ? (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Input
+                    label="Card headline (post)"
+                    placeholder="e.g. Meet our jewellers"
+                    value={slot.hook}
+                    onChange={(e) => updateSlot(index, { hook: e.target.value })}
+                  />
+                  <Input
+                    label="Card description (post)"
+                    placeholder="e.g. Boutique welcome — the first step of the consult"
+                    value={slot.message}
+                    onChange={(e) => updateSlot(index, { message: e.target.value })}
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Input
+                    label="On-image hook (burned on photo)"
+                    placeholder="e.g. Ready for something bespoke?"
+                    value={slot.image_hook}
+                    onChange={(e) => updateSlot(index, { image_hook: e.target.value })}
+                  />
+                  <Input
+                    label="On-image headline (burned on photo)"
+                    placeholder="e.g. Crafted for your story"
+                    value={slot.image_headline}
+                    onChange={(e) => updateSlot(index, { image_headline: e.target.value })}
+                  />
+                </div>
+                {lastCarousel ? (
+                  <Input
+                    label="CTA on image (last card)"
+                    placeholder="e.g. Book a Consultation"
+                    value={slot.cta || campaignCta}
+                    onChange={(e) => updateSlot(index, { cta: e.target.value })}
+                  />
+                ) : null}
+                <p className="text-[10px] text-mid">
+                  Every carousel card burns the on-image hook + headline onto the photo.
+                  {lastCarousel
+                    ? ' Last card also gets the CTA pill button.'
+                    : ' No CTA button on this card — only on the last card of this creative.'}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Input
+                    label="Hook (post — keep as is)"
+                    placeholder="e.g. Your best clients are leaving for integrated solutions"
+                    value={slot.hook}
+                    onChange={(e) => updateSlot(index, { hook: e.target.value })}
+                  />
+                  <Input
+                    label="Headline (post — keep as is)"
+                    placeholder="e.g. Don't lose assets to firms offering lending + wealth together"
+                    value={slot.message}
+                    onChange={(e) => updateSlot(index, { message: e.target.value })}
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Input
+                    label="On-image hook (catchy, related)"
+                    placeholder="e.g. Clients leaving for one-stop shops?"
+                    value={slot.image_hook}
+                    onChange={(e) => updateSlot(index, { image_hook: e.target.value })}
+                  />
+                  <Input
+                    label="On-image headline (catchy, related)"
+                    placeholder="e.g. Keep lending + wealth together"
+                    value={slot.image_headline}
+                    onChange={(e) => updateSlot(index, { image_headline: e.target.value })}
+                  />
+                </div>
+                <Input
+                  label="CTA on image (this variant)"
+                  placeholder="e.g. Book Consultation, Get Free Audit, Claim Pilot"
+                  value={slot.cta}
+                  onChange={(e) => updateSlot(index, { cta: e.target.value })}
+                />
+                <p className="text-[10px] text-mid -mt-1">
+                  Hook &amp; headline stay full for the post. On-image lines must be complete
+                  phrases (never cut off on &quot;your / at / the&quot;).
+                </p>
+                <Input
+                  label="Offer (caption / feed — not on image)"
+                  placeholder="e.g. I’m tired of guessing. I want proof that this actually works. Claim the free review and get next steps."
+                  value={slot.offer}
+                  onChange={(e) => updateSlot(index, { offer: e.target.value })}
+                />
+              </>
+            )}
 
             <div>
               <div className="flex items-center justify-between mb-1.5">

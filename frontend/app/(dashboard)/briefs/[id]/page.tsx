@@ -198,21 +198,22 @@ export default function BriefDetailPage() {
   // Also keep polling PARTIAL when completed_variants < variant_count (mid-batch images).
   // Stops automatically after POLL_TIMEOUT_MS to prevent infinite loops on stuck jobs.
   const POLL_TIMEOUT_MS = 15 * 60 * 1000 // 15 minutes
-  useEffect(() => {
-    if (!brief) return
-    const target = Math.max(1, Number(brief.variant_count) || 1)
-    const readyCount = (variants ?? []).filter(
-      (v) => v.status === 'READY' || v.status === 'APPROVED'
-    ).length
-    const listed = variants?.length ?? 0
-    const incomplete =
-      listed < target ||
-      readyCount < target ||
-      Number(brief.completed_variants || 0) < target
-    const shouldPoll =
-      brief.status === 'RUNNING' || (brief.status === 'PARTIAL' && incomplete)
+  const pollTarget = Math.max(1, Number(brief?.variant_count) || 1)
+  const pollReadyCount = (variants ?? []).filter(
+    (v) => v.status === 'READY' || v.status === 'APPROVED'
+  ).length
+  const pollListed = variants?.length ?? 0
+  const pollIncomplete =
+    Boolean(brief) &&
+    (pollListed < pollTarget ||
+      pollReadyCount < pollTarget ||
+      Number(brief?.completed_variants || 0) < pollTarget)
+  const shouldPollBrief =
+    Boolean(brief) &&
+    (brief?.status === 'RUNNING' || (brief?.status === 'PARTIAL' && pollIncomplete))
 
-    if (!shouldPoll) {
+  useEffect(() => {
+    if (!shouldPollBrief) {
       runningStatusSyncRef.current = false
       pollStartedAtRef.current = null
       setPollTimedOut(false)
@@ -225,7 +226,7 @@ export default function BriefDetailPage() {
       setPollTimedOut(false)
     }
 
-    if (!incomplete) {
+    if (!pollIncomplete) {
       if (!runningStatusSyncRef.current) {
         runningStatusSyncRef.current = true
         void refetchBrief({ background: true })
@@ -248,15 +249,9 @@ export default function BriefDetailPage() {
     // Image stills finish in ~20–40s each — poll every 4s while incomplete.
     const timer = window.setInterval(tick, 4_000)
     return () => window.clearInterval(timer)
-  }, [
-    brief,
-    brief?.status,
-    brief?.variant_count,
-    brief?.completed_variants,
-    variants,
-    refetchBrief,
-    refetchVariants,
-  ])
+    // Depend on booleans only — never `variants`/`brief` objects, or each refetch
+    // restarts this effect and tick() immediately → terminal spam loop.
+  }, [shouldPollBrief, pollIncomplete, refetchBrief, refetchVariants])
 
   // When the job finishes (READY / PARTIAL / FAILED), force one fresh variants fetch
   // so variants 2..N appear even if an earlier poll stopped short.
@@ -479,16 +474,17 @@ export default function BriefDetailPage() {
   }
 
   // Poll while any single-variant image retry is in flight.
+  // Use a boolean flag — not the variants array — so each poll response does not restart the timer.
+  const anyVariantGenerating = (variants ?? []).some((v) => v.status === 'GENERATING')
   useEffect(() => {
-    const generating = (variants ?? []).some((v) => v.status === 'GENERATING')
-    if (!generating && !retryingVariantId) return
+    if (!anyVariantGenerating && !retryingVariantId) return
     const tick = () => {
       void refetchVariants({ background: true })
     }
     tick()
     const timer = window.setInterval(tick, 3_000)
     return () => window.clearInterval(timer)
-  }, [variants, retryingVariantId, refetchVariants])
+  }, [anyVariantGenerating, retryingVariantId, refetchVariants])
 
   useEffect(() => {
     if (!retryingVariantId || !variants) return

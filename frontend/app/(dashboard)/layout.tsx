@@ -54,13 +54,16 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
     })
   }
 
-  // If stored brand was deleted, or nothing selected yet, fall back to first brand.
+  // If nothing selected yet, pick first brand. Only reset when the active id is truly gone
+  // (deleted), not while a freshly saved brand is waiting on list refetch.
   useEffect(() => {
     if (!brands?.length) return
-    const stillExists = activeBrandId
-      ? brands.some((b) => b.id === activeBrandId)
-      : false
-    if (!stillExists) setActiveBrandId(brands[0].id)
+    if (!activeBrandId) {
+      setActiveBrandId(brands[0].id)
+      return
+    }
+    if (brands.some((b) => b.id === activeBrandId)) return
+    setActiveBrandId(brands[0].id)
   }, [brands, activeBrandId, setActiveBrandId])
 
   if (isLoading && !user) return <PageLoader />

@@ -2,10 +2,13 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import toast from 'react-hot-toast'
+import PasswordField from '@/components/auth/PasswordField'
+import { AUTH_INPUT, AUTH_LABEL } from '@/components/auth/authField'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import { useAuth } from '@/hooks/useAuth'
@@ -22,12 +25,20 @@ type FormData = z.infer<typeof schema>
 export default function LoginPage() {
   const router = useRouter()
   const { login } = useAuth()
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormData>({
+  const [remember, setRemember] = useState(true)
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<FormData>({
     resolver: zodResolver(schema),
   })
 
   const onSubmit = async (data: FormData) => {
     try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('cs_remember', remember ? '1' : '0')
+      }
       await login(data.email, data.password)
       router.push('/dashboard')
     } catch (err: unknown) {
@@ -51,33 +62,63 @@ export default function LoginPage() {
 
   return (
     <>
-      <h2 className="text-xl font-bold text-charcoal mb-1 tracking-tight">Welcome back</h2>
-      <p className="text-sm text-muted mb-6">Sign in to your creative workspace</p>
+      <h1 className="mb-8 text-center text-[34px] font-bold tracking-tight text-ink">Sign in</h1>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
         <Input
-          label="Email or username"
+          label="Email Address"
           type="text"
-          placeholder="admin"
+          placeholder="your@email.com"
           error={errors.email?.message}
+          labelClassName={AUTH_LABEL}
+          className={AUTH_INPUT}
+          autoComplete="email"
           {...register('email')}
         />
-        <Input
+        <PasswordField
           label="Password"
-          type="password"
-          placeholder="••••••••"
+          placeholder="Your password"
           error={errors.password?.message}
+          autoComplete="current-password"
           {...register('password')}
         />
-        <Button type="submit" variant="primary" size="lg" isLoading={isSubmitting} className="w-full mt-2">
+
+        <div className="flex items-center justify-between pt-0.5">
+          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-charcoal">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="h-4 w-4 rounded border-[#c8cacd] text-ink accent-ink"
+            />
+            Remember me
+          </label>
+          <Link href="/forgot-password" className="text-[13px] font-medium text-accent-dark hover:underline">
+            Forgot Password?
+          </Link>
+        </div>
+
+        <Button
+          type="submit"
+          variant="secondary"
+          size="lg"
+          isLoading={isSubmitting}
+          className="mt-1 h-12 w-full rounded-xl text-[15px]"
+        >
           Sign in
         </Button>
       </form>
 
-      <p className="text-center text-xs text-lt mt-5">
-        Don't have an account?{' '}
-        <Link href="/register" className="text-accent font-semibold hover:underline">
-          Create one
+      <p className="mt-5 text-center text-[11px] leading-relaxed text-muted">
+        By proceeding, you acknowledge and accept our{' '}
+        <span className="underline decoration-muted/70 underline-offset-2">Terms and Conditions</span> and{' '}
+        <span className="underline decoration-muted/70 underline-offset-2">Privacy Policy</span>.
+      </p>
+
+      <p className="mt-10 text-center text-[13px] text-muted">
+        Don&apos;t have account yet?{' '}
+        <Link href="/register" className="font-semibold text-accent-dark hover:underline">
+          Sign up
         </Link>
       </p>
     </>

@@ -20,9 +20,14 @@ import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
 import {
   emptyImageVariantSlot,
+  isCarouselSlot,
+  isLastCarouselCard,
+  isIncompleteOnImageLine,
+  chunkSlotIndicesForGeneration,
   relatedOnImageLines,
   resizeImageVariantSlots,
   type ImageVariantSlot,
+  type ProductFocusId,
 } from '@/lib/imageUseCases'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
@@ -36,7 +41,7 @@ import {
 } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
-import { API_CACHE_TTL, clearApiCache, clearBriefListCaches } from '@/lib/apiCache'
+import { API_CACHE_TTL, clearApiCache, clearBriefListCaches, patchApiCache } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import {
@@ -52,7 +57,7 @@ import {
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
 import { assignAnglesToVariants } from '@/lib/adAngles'
-import type { AdFormat, BrandFacts, CatalogOption, PerformanceStatsContext, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
+import type { AdFormat, Brand, BrandFacts, CatalogOption, PerformanceStatsContext, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
 
 const schema = z
   .object({
@@ -62,7 +67,7 @@ const schema = z
     brand_source: z.enum(['brand', 'website']),
     website_url: z.string().optional(),
     objective_id: z.string().min(1, 'Select an objective'),
-    target_variant_count: z.coerce.number().int().min(1).max(20),
+    target_variant_count: z.coerce.number().int().min(1).max(100),
     offer: z.string().optional(),
     product_name: z.string().optional(),
     cta: z.string().optional(),
@@ -112,6 +117,7 @@ function summarizeBrandFacts(facts: BrandFacts | null | undefined): string {
   }
   if (facts.rates_or_pricing?.length) bits.push(`Rates: ${facts.rates_or_pricing.slice(0, 2).join(', ')}`)
   if (facts.offers?.length) bits.push(`Offers: ${facts.offers.slice(0, 2).join(', ')}`)
+  if (facts.products?.length) bits.push(`Products: ${facts.products.slice(0, 4).join(', ')}`)
   if (facts.do_not_claim?.length) bits.push(`Won't invent: ${facts.do_not_claim.slice(0, 2).join(', ')}`)
   return bits.join(' · ')
 }
@@ -243,6 +249,7 @@ const FALLBACK_HOOK_FRAMEWORKS: CatalogOption[] = [
   { id: 'fear_loss_aversion', label: 'Fear / Loss Aversion' },
   { id: 'fomo_scarcity', label: 'FOMO / Scarcity' },
   { id: 'contrarian', label: 'Contrarian / Unpopular Opinion' },
+  { id: 'product_hero', label: 'Product Hero / Catalog' },
 ]
 
 function optionLabel(options: CatalogOption[], id: string): string {
@@ -302,10 +309,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [generatingAllSlots, setGeneratingAllSlots] = useState(false)
   const [imageIcpText, setImageIcpText] = useState<string | null>(null)
   const [imageCampaignOffer, setImageCampaignOffer] = useState('')
+  const [imageCampaignHook, setImageCampaignHook] = useState('')
+  const [imageCampaignHeadline, setImageCampaignHeadline] = useState('')
+  const [imageProductFocus, setImageProductFocus] = useState<ProductFocusId | ''>('')
   const [suggestingAngles, setSuggestingAngles] = useState(false)
   const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
   const [websiteBrand, setWebsiteBrand] = useState<WebsiteBrandFetchResult | null>(null)
   const [fetchingWebsiteBrand, setFetchingWebsiteBrand] = useState(false)
+  const [strategyParsed, setStrategyParsed] = useState<StrategyParseResult | null>(null)
+  const [parsingStrategy, setParsingStrategy] = useState(false)
+  const [strategyFileName, setStrategyFileName] = useState('')
+  const [strategyFilePending, setStrategyFilePending] = useState<File | null>(null)
   const [imageRatio, setImageRatio] = useState<string>('1:1')
   const [imageRatioCustom, setImageRatioCustom] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
@@ -373,9 +387,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     },
   })
 
+  const watchedBrandId = watch('brand_id')
+
   useEffect(() => {
-    if (preferredBrandId) setValue('brand_id', preferredBrandId)
-  }, [preferredBrandId, setValue])
+    if (defaultBrandId) {
+      setValue('brand_id', defaultBrandId)
+      return
+    }
+    if (!(watchedBrandId || '').trim() && preferredBrandId) {
+      setValue('brand_id', preferredBrandId)
+    }
+  }, [defaultBrandId, preferredBrandId, watchedBrandId, setValue])
 
   useEffect(() => {
     if (!catalog) return
@@ -407,7 +429,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }, [catalog, setValue, watch])
 
   // Keep sidebar ACTIVE BRAND in sync with the brand selected on this brief form.
-  const watchedBrandId = watch('brand_id')
   useEffect(() => {
     const id = (watchedBrandId || '').trim()
     if (id && id !== activeBrandId) setActiveBrandId(id)
@@ -440,15 +461,35 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     return source
   }, [catalog?.hook_frameworks])
 
+  const carouselSlotStructureKey = useMemo(
+    () =>
+      imageVariantSlots
+        .map(
+          (s) =>
+            `${s.format ?? ''}|${s.carousel_group ?? ''}|${s.carousel_index ?? ''}|${s.carousel_total ?? ''}`
+        )
+        .join(';'),
+    [imageVariantSlots]
+  )
+
   const variantAngleAssignments = useMemo(
     () =>
       assignAnglesToVariants(
         selectedFrameworks ?? [],
         Number(targetVariantCount) || 1,
-        objectiveId
+        objectiveId,
+        imageVariantSlots,
+        imageProductFocus === 'product_only' ? 'product_only' : undefined
       ),
-    [selectedFrameworks, targetVariantCount, objectiveId]
+    [selectedFrameworks, targetVariantCount, objectiveId, carouselSlotStructureKey, imageVariantSlots.length, imageProductFocus]
   )
+
+  useEffect(() => {
+    if (imageProductFocus !== 'product_only') return
+    if ((selectedFrameworks?.length ?? 0) > 0) {
+      setValue('hook_frameworks', [])
+    }
+  }, [imageProductFocus, selectedFrameworks, setValue])
 
   const brandOptions = (brands ?? []).map((brand) => ({ value: brand.id, label: brand.name }))
   const hasBrands = brandOptions.length > 0
@@ -458,6 +499,25 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     if (websiteBrand?.brand_facts) return websiteBrand.brand_facts
     return brandFactsFromVoiceRules(selectedBrand?.voice_rules)
   }, [websiteBrand, selectedBrand])
+
+  const resolvedBrandVisuals = useMemo(() => {
+    const voiceRules = (selectedBrand?.voice_rules || {}) as Record<string, unknown>
+    const scrapedFonts = voiceRules.scraped_fonts as
+      | { heading?: string; body?: string }
+      | undefined
+    return {
+      primary_color: selectedBrand?.primary_color ?? websiteBrand?.primary_color ?? '',
+      secondary_color: selectedBrand?.secondary_color ?? websiteBrand?.secondary_color ?? '',
+      font_heading:
+        websiteBrand?.font_heading ??
+        scrapedFonts?.heading ??
+        '',
+      font_body:
+        websiteBrand?.font_body ??
+        scrapedFonts?.body ??
+        '',
+    }
+  }, [selectedBrand, websiteBrand])
 
   const handleSuggestAdAngles = async (silent = false) => {
     const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
@@ -522,6 +582,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         scraped_from: 'firecrawl',
         scraped_at: new Date().toISOString(),
         brand_facts: result.brand_facts || null,
+        scraped_fonts: {
+          heading: result.font_heading || '',
+          body: result.font_body || '',
+        },
       }
 
       let savedBrand
@@ -543,7 +607,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               primary: result.primary_color,
               secondary: result.secondary_color,
             },
-            fonts: kit.fonts || {},
+            fonts: {
+              ...(kit.fonts || {}),
+              ...(result.font_heading ? { heading: result.font_heading } : {}),
+              ...(result.font_body ? { body: result.font_body } : {}),
+            },
             logo_variations: kit.logo_variations || {},
           })
         } catch {
@@ -573,6 +641,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               primary: result.primary_color,
               secondary: result.secondary_color,
             },
+            fonts: {
+              ...(result.font_heading ? { heading: result.font_heading } : {}),
+              ...(result.font_body ? { body: result.font_body } : {}),
+            },
           })
         } catch {
           /* kit optional */
@@ -580,11 +652,23 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         toast.success(`Saved to Brand Kit: ${savedBrand.name}`)
       }
 
-      clearApiCache('brands')
+      patchApiCache<Brand[]>('brands', (current) => {
+        const prior = current ?? brands ?? []
+        const idx = prior.findIndex((b) => b.id === savedBrand.id)
+        if (idx >= 0) {
+          const next = [...prior]
+          next[idx] = { ...prior[idx], ...savedBrand }
+          return next
+        }
+        return [...prior, savedBrand]
+      })
       await refetchBrands({ background: true })
-      setValue('brand_source', 'brand', { shouldValidate: true })
+
+      setActiveBrandId(savedBrand.id)
       setValue('brand_id', savedBrand.id, { shouldValidate: true })
+      setValue('brand_source', 'brand', { shouldValidate: true })
       setValue('website_url', result.source_url || url)
+      setWebsiteBrand(null)
 
       // Business fill: prefer scraped niche / service location when fields are empty.
       if (!(watch('niche') || '').trim() && result.niche) {
@@ -609,6 +693,125 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       toast.error(extractApiError(err) || 'Could not fetch brand from website')
     } finally {
       setFetchingWebsiteBrand(false)
+    }
+  }
+
+  const handleParseStrategy = async (file: File) => {
+    const lower = file.name.toLowerCase()
+    const allowed = ['.md', '.txt', '.markdown', '.doc', '.docx']
+    if (!allowed.some((ext) => lower.endsWith(ext))) {
+      toast.error('Upload a .md, .txt, .doc, or .docx strategy file')
+      return
+    }
+    setParsingStrategy(true)
+    setStrategyFileName(file.name)
+    try {
+      const result = await generationApi.parseStrategyFile(file)
+      setStrategyParsed(result)
+
+      const fromDoc = [...(result.formats || []), ...(result.variants || []).map((v) => v.format || '')]
+      const imageFmts = fromDoc
+        .filter((f): f is 'static' | 'carousel' => f === 'static' || f === 'carousel')
+        .filter((f, i, arr) => arr.indexOf(f) === i)
+      const videoFmts = fromDoc
+        .filter((f): f is 'reel' | 'video' => f === 'reel' || f === 'video')
+        .filter((f, i, arr) => arr.indexOf(f) === i)
+      if (imageFmts.length) {
+        setMediaType('image')
+        setValue('formats', imageFmts, { shouldValidate: true })
+      } else if (videoFmts.length) {
+        setMediaType('video')
+        setValue('formats', [videoFmts[0]], { shouldValidate: true })
+      }
+
+      if (result.industry) setValue('title', result.industry, { shouldValidate: true })
+      if (result.niche) setValue('niche', result.niche, { shouldValidate: true })
+      if (result.geography) setValue('geography', result.geography, { shouldValidate: true })
+      if (result.objective_id) setValue('objective_id', result.objective_id, { shouldValidate: true })
+      if (result.cta) setValue('cta', result.cta, { shouldValidate: true })
+      if (result.offer) setValue('offer', result.offer, { shouldValidate: true })
+      if (result.product_name) setValue('product_name', result.product_name, { shouldValidate: true })
+      if (result.ad_copy_tone) setValue('ad_copy_tone', result.ad_copy_tone, { shouldValidate: true })
+      if (result.audience_type) setValue('audience_type', result.audience_type, { shouldValidate: true })
+      if (result.age_range) setValue('age_range', result.age_range, { shouldValidate: true })
+      if (result.languages) setValue('languages', result.languages, { shouldValidate: true })
+      if (result.placements?.length) setValue('placements', result.placements, { shouldValidate: true })
+      if (result.hook_frameworks?.length) {
+        setValue('hook_frameworks', result.hook_frameworks, { shouldValidate: true })
+      }
+      const count = Math.max(1, Math.min(100, result.target_variant_count || result.variants.length || 1))
+      setValue('target_variant_count', count, { shouldValidate: true })
+      if (result.notes) setValue('notes', result.notes.slice(0, 2000), { shouldValidate: true })
+      if (result.offer) setImageCampaignOffer(result.offer)
+
+      const fashionRetailPromo =
+        result.creative_style === 'fashion_retail_promo' ||
+        result.creative_style === 'fashion_retail_photo'
+      const fashionPhotoOnly = result.creative_style === 'fashion_retail_photo'
+      if (result.image_aspect_ratio?.trim()) {
+        setImageRatio(result.image_aspect_ratio.trim())
+        setImageRatioCustom('')
+      } else if (fashionRetailPromo && !fashionPhotoOnly) {
+        setImageRatio('1:1')
+        setImageRatioCustom('')
+      }
+
+      const campaignCta = (result.cta || '').trim()
+      const shells = result.variants.slice(0, count).map((v) => {
+        const card = Number(v.carousel_index || 0)
+        const total = Number(v.carousel_total || 0)
+        const retailPromo = Boolean(
+          v.retail_promo || result.creative_style === 'fashion_retail_promo' || (fashionRetailPromo && !v.photo_only)
+        )
+        const photoOnly = Boolean(v.photo_only && !retailPromo)
+        const isCloser = Boolean(total && card && card >= total) || Boolean((v.cta || '').trim())
+        return {
+          ...emptyImageVariantSlot(),
+          ad_angle: (v.ad_angle || '').trim(),
+          format: (v.format || '').trim() || undefined,
+          carousel_index: card || undefined,
+          carousel_total: total || undefined,
+          carousel_group: (v.carousel_group || '').trim() || undefined,
+          photo_only: photoOnly || undefined,
+          retail_promo: retailPromo || undefined,
+          aspect_ratio: (v.aspect_ratio || '').trim() || undefined,
+          use_cases: v.use_cases?.length ? v.use_cases : retailPromo ? ['lifestyle', 'product_person'] : [],
+          cta: photoOnly ? '' : ((v.cta || '').trim() || campaignCta),
+          hook: (v.hook || '').trim(),
+          message: (v.message || '').trim(),
+          image_hook: photoOnly ? '' : (v.image_hook || '').trim(),
+          image_headline: photoOnly ? '' : (v.image_headline || '').trim(),
+          product_model: (v.product_name || '').trim() || undefined,
+          prompt: (v.prompt || '').trim(),
+          reasoning: (v.reasoning || '').trim(),
+        }
+      })
+      setImageVariantSlots(shells.length ? shells : [emptyImageVariantSlot()])
+
+      const match = (brands ?? []).find(
+        (b) => b.name.trim().toLowerCase() === (result.brand_name || '').trim().toLowerCase()
+      )
+      if (match) {
+        setValue('brand_id', match.id, { shouldValidate: true })
+      }
+
+      const fmtLabel = imageFmts
+        .map((f) => (f === 'carousel' ? 'Carousel' : 'Static'))
+        .join(' + ')
+      toast.success(
+        shells.length >= 8 && result.variants.length >= 8
+          ? `Strategy processed — ${shells.length} posts from MD (Generate AI for all to write prompts).`
+          : fashionRetailPromo && !fashionPhotoOnly
+          ? `Strategy processed — ${shells.length} retail promo ads (1:1/9:16, angles + on-image copy). Click Generate AI for all.`
+          : fashionPhotoOnly
+            ? `Strategy processed — ${shells.length} fashion static ads (photo only). Text stays in feed copy.`
+            : `Strategy processed — brief filled (${fmtLabel || 'formats'}). Click Generate AI for all to write hooks.`
+      )
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not read strategy file')
+      setStrategyParsed(null)
+    } finally {
+      setParsingStrategy(false)
     }
   }
 
@@ -667,13 +870,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       const imageFmts = fmts.filter((f) => !isVideoFormat(f))
       if (imageFmts.length === 0) {
         setValue('formats', ['static'], { shouldValidate: true })
-      } else if (imageFmts.length > 1) {
-        // Image mode is exclusive: Static XOR Carousel
-        setValue(
-          'formats',
-          [imageFmts.includes('carousel') ? 'carousel' : imageFmts[0]],
-          { shouldValidate: true }
-        )
       } else if (imageFmts.length !== fmts.length) {
         setValue('formats', imageFmts, { shouldValidate: true })
       }
@@ -844,6 +1040,34 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }
   }
 
+  const strategySeedForSlot = (index: number, slot: ImageVariantSlot) => {
+    const src = strategyParsed?.variants[index]
+    const scene = (slot.prompt || src?.prompt || src?.reasoning || '').trim()
+    return {
+      id: src?.id || `V${index + 1}`,
+      format: slot.format || src?.format || 'static',
+      ad_angle: slot.ad_angle || src?.ad_angle || '',
+      scene,
+      prompt: scene,
+      client_hook: (src?.hook || slot.hook || '').trim(),
+      client_message: (src?.message || slot.message || '').trim(),
+      post_type: (src?.post_type || '').trim() || undefined,
+      design_notes: (src?.design_notes || '').trim() || undefined,
+      product_model: (slot.product_model || src?.product_name || '').trim() || undefined,
+      image_hook: (slot.image_hook || src?.image_hook || '').trim(),
+      image_headline: (slot.image_headline || src?.image_headline || '').trim(),
+      use_cases: slot.use_cases?.length ? slot.use_cases : src?.use_cases || [],
+      carousel_index: slot.carousel_index || src?.carousel_index || undefined,
+      carousel_total: slot.carousel_total || src?.carousel_total || undefined,
+      carousel_group: slot.carousel_group || src?.carousel_group || undefined,
+      photo_only: Boolean(slot.photo_only && !slot.retail_promo && !src?.retail_promo),
+      retail_promo: Boolean(slot.retail_promo || src?.retail_promo),
+      aspect_ratio: slot.aspect_ratio || src?.aspect_ratio || undefined,
+      product_focus: imageProductFocus || slot.product_focus || undefined,
+      cta: (slot.cta || src?.cta || '').trim(),
+    }
+  }
+
   const handleGenerateImageSlot = async (index: number) => {
     const d = formValues
     const slot = imageVariantSlots[index]
@@ -862,6 +1086,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     setGeneratingSlotIndex(index)
     try {
       const slotAngle = variantAngleAssignments[index]
+      const catalogShot = imageProductFocus === 'product_only'
       const plan = await generationApi.previewIcpImagePlan({
         campaign_name: campaignName,
         brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
@@ -876,12 +1101,30 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
         geography: (d.geography ?? '').trim() || undefined,
         brand_facts: resolvedBrandFacts ?? undefined,
+        product_focus: imageProductFocus || undefined,
+        ...resolvedBrandVisuals,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-        hook_frameworks: slotAngle ? [slotAngle] : (d.hook_frameworks ?? []),
+        hook_frameworks: catalogShot
+          ? []
+          : slotAngle
+            ? [slotAngle]
+            : (d.hook_frameworks ?? []),
         variant_count: 1,
         existing_hooks: siblingHooks,
         existing_prompts: siblingPrompts,
-        creative_format: (d.formats ?? []).includes('carousel') ? 'carousel' : 'static',
+        creative_format:
+          slot.format === 'carousel' || slot.format === 'static'
+            ? slot.format
+            : (d.formats ?? []).includes('carousel') &&
+                !(d.formats ?? []).includes('static')
+              ? 'carousel'
+              : 'static',
+        ...(strategyParsed
+          ? {
+              strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '',
+              strategy_variants: [strategySeedForSlot(index, slot)],
+            }
+          : {}),
       })
       const variant = plan.variants[0]
       if (!variant) {
@@ -891,10 +1134,16 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       if (plan.icp_text?.trim()) {
         setImageIcpText(plan.icp_text.trim())
       }
+      if (plan.campaign_hook) setImageCampaignHook(plan.campaign_hook)
+      if (plan.campaign_headline) setImageCampaignHeadline(plan.campaign_headline)
+      if (plan.campaign_cta) setValue('cta', plan.campaign_cta, { shouldValidate: true })
       const generatedAt = new Date().toISOString()
       const hook = variant.hook || slot.hook
       const message = variant.message || slot.message
       const derived = relatedOnImageLines(hook, message)
+      const carouselCard = isCarouselSlot(slot, d.formats)
+      const lastCarousel = isLastCarouselCard(slot, index, imageVariantSlots, d.formats)
+      const photoOnly = Boolean(slot.photo_only && !slot.retail_promo)
       setImageVariantSlots((prev) =>
         prev.map((s, i) =>
           i === index
@@ -903,14 +1152,29 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
                 hook,
                 message,
-                image_hook: variant.image_hook || derived.image_hook || s.image_hook,
-                image_headline:
-                  variant.image_headline || derived.image_headline || s.image_headline,
-                cta: variant.cta || s.cta,
-                offer: variant.offer || imageCampaignOffer.trim() || s.offer,
+                image_hook: photoOnly
+                  ? ''
+                  : variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                    ? variant.image_hook
+                    : derived.image_hook || s.image_hook,
+                image_headline: photoOnly
+                  ? ''
+                  : variant.image_headline &&
+                      !isIncompleteOnImageLine(variant.image_headline)
+                    ? variant.image_headline
+                    : derived.image_headline || s.image_headline,
+                cta: photoOnly
+                  ? ''
+                  : carouselCard
+                    ? lastCarousel
+                      ? variant.cta || plan.campaign_cta || s.cta || (d.cta ?? '')
+                      : ''
+                    : variant.cta || s.cta,
+                offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
                 prompt: variant.prompt || s.prompt,
                 reasoning: variant.reasoning || '',
-                ad_angle: variant.ad_angle || slotAngle || '',
+                ad_angle: slot.ad_angle || variant.ad_angle || slotAngle || '',
+                product_model: s.product_model || '',
                 generated_at: generatedAt,
               }
             : s
@@ -931,60 +1195,146 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       toast.error('Enter an industry before generating image plans.')
       return
     }
+    const slots = imageVariantSlots
+    const chunks =
+      slots.length > 10 ? chunkSlotIndicesForGeneration(slots) : [slots.map((_, i) => i)]
+
     setGeneratingAllSlots(true)
+    toast.loading(
+      chunks.length > 1
+        ? `Generating ${slots.length} cards in ${chunks.length} batches…`
+        : `Generating ${slots.length} image plans…`,
+      { id: 'gen-all-slots' }
+    )
     try {
-      const plan = await generationApi.previewIcpImagePlan({
-        campaign_name: campaignName,
-        brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
-        industry:
-          (d.title ?? '').trim() ||
-          selectedBrand?.industry ||
-          websiteBrand?.industry ||
-          '',
-        niche: (d.niche ?? '').trim(),
-        objective_id: d.objective_id ?? '',
-        cta: d.cta ?? '',
-        offer: imageCampaignOffer.trim() || undefined,
-        geography: (d.geography ?? '').trim() || undefined,
-        brand_facts: resolvedBrandFacts ?? undefined,
-        image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-        hook_frameworks: d.hook_frameworks ?? [],
-        variant_count: imageVariantSlots.length,
-        creative_format: (d.formats ?? []).includes('carousel') ? 'carousel' : 'static',
-      })
-      if (plan.icp_text?.trim()) {
-        setImageIcpText(plan.icp_text.trim())
-      }
+      let icpText = imageIcpText
+      let campaignHook = imageCampaignHook
+      let campaignHeadline = imageCampaignHeadline
+      const existingHooks: string[] = []
+      const existingPrompts: string[] = []
+      let filled = 0
       const generatedAt = new Date().toISOString()
-      setImageVariantSlots((prev) =>
-        prev.map((s, i) => {
-          const variant = plan.variants[i]
-          if (!variant) return s
-          const hook = variant.hook || s.hook
-          const message = variant.message || s.message
-          const derived = relatedOnImageLines(hook, message)
-          return {
-            ...s,
-            use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
-            hook,
-            message,
-            image_hook: variant.image_hook || derived.image_hook || s.image_hook,
-            image_headline:
-              variant.image_headline || derived.image_headline || s.image_headline,
-            cta: variant.cta || s.cta,
-            offer: variant.offer || imageCampaignOffer.trim() || s.offer,
-            prompt: variant.prompt || s.prompt,
-            reasoning: variant.reasoning || '',
-            ad_angle: variant.ad_angle || variantAngleAssignments[i] || '',
-            generated_at: generatedAt,
-          }
+
+      for (let ci = 0; ci < chunks.length; ci++) {
+        const indices = chunks[ci]
+        const chunkAngle = variantAngleAssignments[indices[0]]
+        const catalogShot = imageProductFocus === 'product_only'
+        if (chunks.length > 1) {
+          toast.loading(
+            `Batch ${ci + 1}/${chunks.length} — ${indices.length} card${indices.length !== 1 ? 's' : ''}…`,
+            { id: 'gen-all-slots' }
+          )
+        }
+        const plan = await generationApi.previewIcpImagePlan({
+          campaign_name: campaignName,
+          brand_name: selectedBrand?.name ?? websiteBrand?.brand_name ?? '',
+          industry:
+            (d.title ?? '').trim() ||
+            selectedBrand?.industry ||
+            websiteBrand?.industry ||
+            '',
+          niche: (d.niche ?? '').trim(),
+          objective_id: d.objective_id ?? '',
+          cta: d.cta ?? '',
+          offer: imageCampaignOffer.trim() || undefined,
+          geography: (d.geography ?? '').trim() || undefined,
+          brand_facts: resolvedBrandFacts ?? undefined,
+          product_focus: imageProductFocus || undefined,
+          ...resolvedBrandVisuals,
+          image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+          hook_frameworks: catalogShot
+            ? []
+            : chunkAngle
+              ? [chunkAngle]
+              : (d.hook_frameworks ?? []),
+          variant_count: indices.length,
+          existing_hooks: existingHooks,
+          existing_prompts: existingPrompts,
+          creative_format:
+            (d.formats ?? []).includes('carousel') &&
+            (d.formats ?? []).includes('static')
+              ? 'mixed'
+              : (d.formats ?? []).includes('carousel')
+                ? 'carousel'
+                : 'static',
+          ...(strategyParsed
+            ? {
+                strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '',
+                strategy_variants: indices.map((i) => strategySeedForSlot(i, slots[i])),
+              }
+            : {}),
         })
-      )
+
+        if (plan.icp_text?.trim()) icpText = plan.icp_text.trim()
+        if (plan.campaign_hook) campaignHook = plan.campaign_hook
+        if (plan.campaign_headline) campaignHeadline = plan.campaign_headline
+        if (plan.campaign_cta) setValue('cta', plan.campaign_cta, { shouldValidate: true })
+
+        setImageVariantSlots((prev) => {
+          const next = [...prev]
+          indices.forEach((slotIdx, vi) => {
+            const variant = plan.variants[vi]
+            if (!variant) return
+            const s = next[slotIdx]
+            const hook = variant.hook || s.hook
+            const message = variant.message || s.message
+            const derived = relatedOnImageLines(hook, message)
+            const carouselCard = isCarouselSlot(s, d.formats)
+            const lastCarousel = isLastCarouselCard(s, slotIdx, prev, d.formats)
+            const photoOnly = Boolean(s.photo_only && !s.retail_promo)
+            next[slotIdx] = {
+              ...s,
+              use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
+              hook,
+              message,
+              image_hook: photoOnly
+                ? ''
+                : variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                  ? variant.image_hook
+                  : derived.image_hook || s.image_hook,
+              image_headline: photoOnly
+                ? ''
+                : variant.image_headline &&
+                    !isIncompleteOnImageLine(variant.image_headline)
+                  ? variant.image_headline
+                  : derived.image_headline || s.image_headline,
+              cta: photoOnly
+                ? ''
+                : carouselCard
+                  ? lastCarousel
+                    ? variant.cta || plan.campaign_cta || s.cta || (d.cta ?? '')
+                    : ''
+                  : variant.cta || s.cta,
+              offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
+              prompt: variant.prompt || s.prompt,
+              reasoning: variant.reasoning || '',
+              ad_angle: s.ad_angle || variant.ad_angle || variantAngleAssignments[slotIdx] || '',
+              generated_at: generatedAt,
+            }
+          })
+          return next
+        })
+
+        for (const v of plan.variants) {
+          if (v.hook?.trim()) existingHooks.push(v.hook.trim())
+          if (v.prompt?.trim()) existingPrompts.push(v.prompt.trim())
+          filled++
+        }
+      }
+
+      if (icpText) setImageIcpText(icpText)
+      if (campaignHook) setImageCampaignHook(campaignHook)
+      if (campaignHeadline) setImageCampaignHeadline(campaignHeadline)
+
       toast.success(
-        `${plan.variants.length} image variant${plan.variants.length !== 1 ? 's' : ''} filled from ICP — edit hook, message, CTA, and prompt as needed`
+        `${filled} image variant${filled !== 1 ? 's' : ''} filled from ICP — edit hook, message, CTA, and prompt as needed`,
+        { id: 'gen-all-slots' }
       )
     } catch {
-      toast.error('Could not generate plans — check OPENROUTER_API_KEY and restart backend')
+      toast.error(
+        'Could not generate plans — request timed out or failed. Cards generate in batches of 6; wait for the spinner to finish.',
+        { id: 'gen-all-slots' }
+      )
     } finally {
       setGeneratingAllSlots(false)
     }
@@ -1049,7 +1399,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       toast.error('Still loading models — wait a moment and try again.')
       return
     }
-
     const wantsVidOnSubmitEarly = (data.formats ?? []).some(isVideoFormat)
     const heygenOnSubmitEarly =
       wantsVidOnSubmitEarly && genSettings.videoModel.toLowerCase().startsWith('heygen')
@@ -1222,6 +1571,12 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 scraped_brand: websiteBrand ?? undefined,
               }
             : {}),
+          ...(strategyParsed
+            ? {
+                strategy_file: strategyParsed.filename || strategyFileName,
+                strategy_reasoning: strategyParsed.reasoning || '',
+              }
+            : {}),
           cta_text:
             (d.cta ?? '').trim() ||
             imageVariantSlots.map((s) => s.cta.trim()).find(Boolean) ||
@@ -1233,6 +1588,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           ...(mediaType === 'image'
             ? {
                 image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+                ...(imageProductFocus ? { product_focus: imageProductFocus } : {}),
+                ...(imageCampaignHook.trim() ? { campaign_hook: imageCampaignHook.trim() } : {}),
+                ...(imageCampaignHeadline.trim()
+                  ? { campaign_headline: imageCampaignHeadline.trim() }
+                  : {}),
                 image_variants: imageVariantSlots.map((s, i) => ({
                   use_cases: s.use_cases,
                   hook: s.hook.trim(),
@@ -1244,6 +1604,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   prompt: s.prompt.trim(),
                   reasoning: s.reasoning.trim() || undefined,
                   ad_angle: s.ad_angle || variantAngleAssignments[i] || undefined,
+                  format: s.format || undefined,
+                  carousel_index: s.carousel_index || undefined,
+                  carousel_total: s.carousel_total || undefined,
+                  carousel_group: s.carousel_group || undefined,
+                  photo_only: s.photo_only || undefined,
+                  retail_promo: s.retail_promo || undefined,
+                  aspect_ratio: s.aspect_ratio || undefined,
                   generated_at: s.generated_at ?? undefined,
                 })),
                 ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
@@ -1423,6 +1790,60 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           )}
 
           <BriefSection title="Industry & Brand" step="1">
+            <div className="rounded-xl border border-dashed border-accent/50 bg-accent/5 p-4 space-y-2">
+              <p className="text-xs font-bold text-navy uppercase tracking-wide">
+                Upload strategy file (.md, .docx)
+              </p>
+              <p className="text-[11px] text-mid">
+                Optional. Choose a markdown or Word file, then click <strong>Process strategy</strong> — that fills
+                industry, niche, location, and angles. Variant hooks stay empty until you click{' '}
+                <strong>Generate AI for all</strong>. Brand itself still comes from{' '}
+                <strong>Brand Kit</strong> or <strong>Website URL</strong> below.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  id="strategy-file-top"
+                  type="file"
+                  accept=".md,.txt,.markdown,.doc,.docx,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+                  disabled={parsingStrategy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (!file) return
+                    setStrategyFilePending(file)
+                    setStrategyFileName(file.name)
+                    setStrategyParsed(null)
+                  }}
+                  className="block min-w-0 flex-1 text-xs text-mid file:mr-3 file:rounded-full file:border file:border-accent/40 file:bg-white file:px-3.5 file:py-2 file:text-xs file:font-semibold file:text-charcoal hover:file:bg-accent/10"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="primary"
+                  isLoading={parsingStrategy}
+                  disabled={!strategyFilePending || parsingStrategy}
+                  onClick={() => {
+                    if (strategyFilePending) void handleParseStrategy(strategyFilePending)
+                  }}
+                >
+                  Process strategy
+                </Button>
+              </div>
+              {strategyFilePending && !strategyParsed && !parsingStrategy && (
+                <p className="text-xs text-mid">
+                  Ready: <strong>{strategyFileName}</strong> — click Process strategy to fill the brief.
+                </p>
+              )}
+              {parsingStrategy && (
+                <p className="text-xs font-medium text-charcoal">Processing strategy… filling the brief (not variants)</p>
+              )}
+              {strategyParsed && !parsingStrategy && (
+                <p className="text-xs font-semibold text-charcoal">
+                  Brief loaded from {strategyParsed.brand_name || strategyFileName}. Empty variant
+                  slots are ready — click <strong>Generate AI for all</strong> for catchy hooks.
+                </p>
+              )}
+            </div>
+
             <Input
               label="Industry"
               placeholder="e.g. Mortgage Broking, Dental, Digital Marketing"
@@ -1468,7 +1889,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
                 Brand source
               </p>
-              <div className="flex gap-2 mb-3">
+              <div className="flex flex-wrap gap-2 mb-3">
                 {(
                   [
                     { id: 'brand' as const, label: 'Brand Kit' },
@@ -1596,7 +2017,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               label="Target Variants"
               type="number"
               min={1}
-              max={20}
+              max={100}
               error={errors.target_variant_count?.message}
               {...register('target_variant_count')}
             />
@@ -1611,7 +2032,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </p>
               {mediaType === 'image' && (
                 <p className="text-xs text-sky-800 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 mb-3">
-                  Image tab: <strong>Static</strong> and <strong>Carousel</strong>. Switch to the{' '}
+                  Image tab: select <strong>Static</strong>, <strong>Carousel</strong>, or both
+                  if the campaign uses mixed stills and swipe cards. Switch to the{' '}
                   <strong>Video</strong> tab above for Portrait/Landscape.
                 </p>
               )}
@@ -1623,7 +2045,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               <ChipToggleGroup
                 options={mediaType === 'image' ? formatOptions.filter((f) => !isVideoFormat(f.id)) : formatOptions}
                 selected={selectedFormats ?? []}
-                exclusive={mediaType === 'image'}
+                exclusive={false}
                 onChange={(next) => {
                   setValue('formats', next, { shouldValidate: true })
                   // Meta carousel cards are square by default
@@ -1634,7 +2056,17 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 }}
                 disabled={!catalog}
               />
-              {mediaType === 'image' && (selectedFormats ?? []).includes('carousel') && (
+              {mediaType === 'image' &&
+                (selectedFormats ?? []).includes('static') &&
+                (selectedFormats ?? []).includes('carousel') && (
+                <p className="mt-2 text-[11px] text-mid">
+                  Mixed campaign: Static = single stills; Carousel = swipe cards. Both stay
+                  selected when the strategy file includes both types.
+                </p>
+              )}
+              {mediaType === 'image' &&
+                (selectedFormats ?? []).includes('carousel') &&
+                !(selectedFormats ?? []).includes('static') && (
                 <p className="mt-2 text-[11px] text-mid">
                   Carousel = one social swipe story. Card 1 problem → middle cards agitate/proof →
                   last card solution + CTA. Each variant is one card; keep 2+ variants. Angles colour
@@ -1645,10 +2077,19 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             </div>
 
             {/* ── Ad style / marketing approach (image mode) ── */}
-            {mediaType === 'image' && (
+            {mediaType === 'image' && imageProductFocus === 'product_only' ? (
+              <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5">
+                <p className="text-[11px] text-sky-900 leading-relaxed">
+                  <strong>Product-alone catalog mode</strong> — ad angles are{' '}
+                  <strong>not required</strong>. We auto-use a simple <strong>Product Hero / Catalog</strong>{' '}
+                  layout (like a bike or retail catalog ad: product + model name + bold headline on brand
+                  colors). Shot style controls the photo (no people).
+                </p>
+              </div>
+            ) : mediaType === 'image' ? (
               <div>
                 <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
-                  Ad angles
+                  Ad angles <span className="font-normal normal-case text-mid">(optional)</span>
                 </p>
                 <AdAngleSelector
                   options={hookFrameworkOptions}
@@ -1659,7 +2100,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   suggestionReason={angleSuggestionReason}
                 />
               </div>
-            )}
+            ) : null}
 
             {/* ── Image ratio picker (image mode only) ── */}
             {mediaType === 'image' && (
@@ -1668,6 +2109,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
                   {[
                     { id: '1:1',    label: '1:1',      desc: 'Instagram · Facebook feed' },
+                    { id: '4:3',    label: '4:3',      desc: 'Fashion retail · portrait feed' },
                     { id: '4:5',    label: '4:5',      desc: 'Instagram portrait feed' },
                     { id: '9:16',   label: '9:16',     desc: 'Reels · Stories · TikTok' },
                     { id: '16:9',   label: '16:9',     desc: 'Website · YouTube · Landscape' },
@@ -2081,7 +2523,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           {mediaType === 'image' && (
             <BriefSection title="Image Variants" step="5">
               <p className="text-[11px] text-mid -mt-1">
-                ICP-driven plans from your campaign name — unique use case, hook, headline, CTA, and prompt per variant.
+                Static: each ad has hook, on-image lines, and a CTA. Carousel: one campaign hook/headline/CTA,
+                then each card is a visual + short headline only.
               </p>
               <ImageVariantSlotsPanel
                 slots={imageVariantSlots}
@@ -2092,6 +2535,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 onGenerateAll={() => void handleGenerateAllImageSlots()}
                 campaignOffer={imageCampaignOffer}
                 onCampaignOfferChange={setImageCampaignOffer}
+                campaignHook={imageCampaignHook}
+                campaignHeadline={imageCampaignHeadline}
+                campaignCta={formValues.cta ?? ''}
+                onCampaignHookChange={setImageCampaignHook}
+                onCampaignHeadlineChange={setImageCampaignHeadline}
+                onCampaignCtaChange={(v) => setValue('cta', v, { shouldValidate: true })}
+                formats={selectedFormats ?? []}
                 angleOptions={hookFrameworkOptions}
                 exportContext={{
                   campaignName: campaignLabel(formValues.title ?? '', formValues.niche),
@@ -2100,6 +2550,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   aspectRatio: imageRatioCustom.trim() || imageRatio,
                   icpText: imageIcpText ?? undefined,
                 }}
+                catalogProducts={resolvedBrandFacts?.products ?? []}
+                productFocus={imageProductFocus}
+                onProductFocusChange={setImageProductFocus}
               />
             </BriefSection>
           )}
@@ -2186,8 +2639,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   {...register('cta')}
                 />
                 <p className="mt-1 text-[11px] text-mid">
-                  For image ads, each variant has its own <strong>CTA on image</strong> in step 5.
-                  Generate AI for all fills those CTAs. This field is only a shared hint.
+                  {(selectedFormats ?? []).includes('carousel')
+                    ? 'Carousel: this CTA is the ad action and is burned onto the LAST swipe card only. Earlier cards stay visual-only.'
+                    : 'For static image ads, each variant has its own CTA on image in step 5. This field is a shared hint.'}
                 </p>
               </>
             ) : (

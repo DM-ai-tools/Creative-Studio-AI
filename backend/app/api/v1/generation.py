@@ -1,8 +1,11 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from typing import List
+import logging
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.core.security import get_current_user
@@ -95,6 +98,96 @@ async def extract_stats_image(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not analyze image: {e}")
     return StatsImageExtractionResponse(stats=stats, filename=file.filename or "")
+
+
+class StrategyVariantPlan(BaseModel):
+    id: str = ""
+    format: str = "static"
+    ad_angle: str = ""
+    use_cases: list[str] = []
+    hook: str = ""
+    message: str = ""
+    image_hook: str = ""
+    image_headline: str = ""
+    cta: str = ""
+    offer: str = ""
+    prompt: str = ""
+    reasoning: str = ""
+    creative_type: str = "photo"
+    carousel_index: int | None = None
+    carousel_total: int | None = None
+    carousel_group: str | None = None
+    photo_only: bool = False
+    retail_promo: bool = False
+    aspect_ratio: str | None = None
+
+
+class StrategyParseResponse(BaseModel):
+    brand_name: str = ""
+    industry: str = ""
+    niche: str = ""
+    geography: str = ""
+    age_range: str = ""
+    audience_type: str = ""
+    languages: str = "English"
+    objective_id: str = "lead_generation"
+    cta: str = ""
+    offer: str = ""
+    product_name: str = ""
+    ad_copy_tone: str = ""
+    placements: list[str] = []
+    formats: list[str] = []
+    hook_frameworks: list[str] = []
+    target_variant_count: int = 1
+    notes: str = ""
+    reasoning: str = ""
+    filename: str = ""
+    variants: list[StrategyVariantPlan] = []
+    image_aspect_ratio: str = ""
+    creative_style: str = ""
+
+
+@router.post("/parse-strategy", response_model=StrategyParseResponse)
+async def parse_strategy_file(
+    file: UploadFile = File(...),
+    _current_user=Depends(get_current_user),
+):
+    """Read a client strategy .md/.txt/.docx and fill a CreativeStudio brief + variant plans."""
+    name = (file.filename or "strategy.md").lower()
+    from app.services.strategy_document_io import strategy_bytes_to_text, strategy_filename_ok
+
+    if not strategy_filename_ok(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a strategy file (.md, .txt, .docx, or .doc)",
+        )
+    raw = await file.read()
+    if len(raw) > 6_000_000:
+        raise HTTPException(status_code=400, detail="Strategy file is too large (max 6MB)")
+    try:
+        text = strategy_bytes_to_text(raw, filename=file.filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    from app.services.strategy_parse_service import (
+        parse_strategy_markdown,
+        strip_embedded_images_for_parse,
+    )
+
+    text = strip_embedded_images_for_parse(text)
+    if len(text.encode("utf-8")) > 400_000:
+        raise HTTPException(
+            status_code=400,
+            detail="Strategy text is too large after removing embedded images (max 400KB)",
+        )
+
+    try:
+        parsed = await parse_strategy_markdown(text, filename=file.filename or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Strategy parse failed")
+        raise HTTPException(status_code=502, detail=f"Could not read strategy: {e}") from e
+    return StrategyParseResponse(**parsed)
 
 
 class ModelSuggestionRequest(BaseModel):
@@ -325,7 +418,7 @@ class SuggestAdAnglesRequest(BaseModel):
     industry: str = ""
     niche: str = ""
     objective_id: str = ""
-    variant_count: int = Field(default=2, ge=1, le=20)
+    variant_count: int = Field(default=2, ge=1, le=100)
 
 
 class SuggestAdAnglesResponse(BaseModel):
@@ -372,18 +465,38 @@ class IcpImagePlanRequest(BaseModel):
     )
     image_aspect_ratio: str = "1:1"
     hook_frameworks: list[str] = Field(default_factory=list)
-    variant_count: int = Field(default=1, ge=1, le=20)
+    variant_count: int = Field(default=1, ge=1, le=100)
     existing_hooks: list[str] = Field(default_factory=list)
     existing_prompts: list[str] = Field(default_factory=list)
     creative_format: str = Field(
         default="static",
-        description="static | carousel — carousel cards form one swipe story",
+        description="static | carousel | mixed — carousel cards form one swipe story",
     )
+    strategy_notes: str = ""
+    strategy_variants: list[dict] = Field(
+        default_factory=list,
+        description="Client MD seeds (scene / intent). Knowledge only — do not paste verbatim.",
+    )
+    on_image_style: str = Field(
+        default="auto",
+        description="Campaign on-image typography: auto | retail_modern | jewellery_luxury | fashion_editorial | high_contrast",
+    )
+    product_focus: str = Field(
+        default="",
+        description="Campaign shot style: empty=auto | product_only | with_person — applies to all variants",
+    )
+    primary_color: str = Field(default="", description="Brand primary hex from website / Brand Kit")
+    secondary_color: str = Field(default="", description="Brand secondary hex from website / Brand Kit")
+    font_heading: str = Field(default="", description="Heading font family from website / Brand Kit")
+    font_body: str = Field(default="", description="Body font family from website / Brand Kit")
 
 
 class IcpImagePlanResponse(BaseModel):
     icp_text: str
     variants: list[IcpImageVariantPlanItem]
+    campaign_hook: str = ""
+    campaign_headline: str = ""
+    campaign_cta: str = ""
 
 
 @router.post("/icp-image-plan", response_model=IcpImagePlanResponse)
@@ -413,6 +526,14 @@ async def icp_image_plan(
         existing_hooks=data.existing_hooks,
         existing_prompts=data.existing_prompts,
         creative_format=data.creative_format,
+        strategy_notes=data.strategy_notes,
+        strategy_variants=data.strategy_variants,
+        on_image_style=data.on_image_style,
+        product_focus=data.product_focus,
+        primary_color=data.primary_color,
+        secondary_color=data.secondary_color,
+        font_heading=data.font_heading,
+        font_body=data.font_body,
     )
     return IcpImagePlanResponse(**result)
 
@@ -428,6 +549,8 @@ class FetchBrandFromUrlResponse(BaseModel):
     niche: str = ""
     primary_color: str
     secondary_color: str
+    font_heading: str | None = None
+    font_body: str | None = None
     logo_url: str | None = None
     page_title: str = ""
     description: str = ""
@@ -439,13 +562,21 @@ class FetchBrandFromUrlResponse(BaseModel):
 @router.post("/fetch-brand-from-url", response_model=FetchBrandFromUrlResponse)
 async def fetch_brand_from_url(
     data: FetchBrandFromUrlRequest,
-    _current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
     """Scrape a website (Firecrawl) and return brand identity + claimable business facts."""
+    from app.services.brand_logo import persist_remote_logo_url
     from app.services.firecrawl_brand_service import fetch_brand_from_website
 
     try:
         result = await fetch_brand_from_website(data.url)
+        if result.get("logo_url"):
+            persisted = persist_remote_logo_url(
+                str(result["logo_url"]),
+                tenant_id=str(current_user.tenant_id),
+            )
+            if persisted:
+                result["logo_url"] = persisted
     except ValueError as exc:
         from app.services.usage_tracker import record_firecrawl
 
