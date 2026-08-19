@@ -105,6 +105,18 @@ export const brandsApi = {
     form.append('file', file)
     return api.post<BrandKit>(`/brands/${brandId}/logo/on-light`, form).then((r) => r.data)
   },
+
+  fetchSocialStyle: (
+    brandId: string,
+    data: { handle_or_url: string; platform?: string }
+  ) =>
+    api
+      .post<{ brand_id: string; social_style_profile: import('@/types').SocialStyleProfile; message: string }>(
+        `/brands/${brandId}/fetch-social-style`,
+        data,
+        { timeout: 120_000 }
+      )
+      .then((r) => r.data),
 }
 
 // ── Briefs ────────────────────────────────────────────────────────────────────
@@ -433,6 +445,7 @@ export const generationApi = {
     secondary_color?: string
     font_heading?: string
     font_body?: string
+    social_style_profile?: import('@/types').SocialStyleProfile | null
     strategy_variants?: Array<{
       id?: string
       format?: string

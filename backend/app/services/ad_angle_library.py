@@ -381,6 +381,7 @@ ANGLE_GUIDANCE: dict[str, str] = {
         "Stacked bold headline in brand colors (2–3 short words per line, e.g. RIDE / WITH / STYLE). "
         "Product model name as a lower label bar in white bold sans on brand primary (e.g. NORCO SCENE VLT 2025). "
         "image_hook = product model name; image_headline = short feature or stacked headline line; offer/CTA optional pill. "
+        "Brand Kit logo is composited in a white header strip in post — do not draw a fake wordmark. "
         "Use brand website colors and fonts — not random gold or generic stock."
     ),
 }

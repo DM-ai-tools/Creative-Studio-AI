@@ -25,6 +25,8 @@ from app.services.icp_image_plan_service import (
     enforce_on_image_copy_in_prompt,
     enforce_on_image_style_in_prompt,
     enforce_product_focus_in_prompt,
+    consolidate_image_prompt_for_generation,
+    _prompt_describes_lifestyle_scene,
     strip_burned_in_copy_from_prompt,
 )
 from app.services.variant_service import VariantService
@@ -84,7 +86,11 @@ def _copy_from_image_slot(slot: dict[str, Any]) -> tuple[dict[str, Any], str, st
     cta = str(slot.get("cta") or "").strip()
     image_hook = str(slot.get("image_hook") or "").strip()
     image_headline = str(slot.get("image_headline") or "").strip()
-    derived_hook, derived_headline = _related_image_lines(hook, message)
+    ad_angle = str(slot.get("ad_angle") or "").strip()
+    niche = str(slot.get("niche") or "").strip()
+    derived_hook, derived_headline = _related_image_lines(
+        hook, message, ad_angle=ad_angle, niche=niche
+    )
     on_image_hook = _billboard_words(image_hook, 6) or derived_hook
     on_image_headline = _billboard_words(image_headline, 8) or derived_headline
     copy = {
@@ -95,6 +101,157 @@ def _copy_from_image_slot(slot: dict[str, Any]) -> tuple[dict[str, Any], str, st
         "hashtags": [],
     }
     return copy, on_image_hook, on_image_headline
+
+
+def _ensure_on_image_burn_lines(
+    *,
+    on_image_hook: str,
+    on_image_message: str,
+    slot: dict[str, Any] | None,
+    copy: dict[str, Any],
+    niche: str = "",
+    ad_angle: str = "",
+) -> tuple[str, str]:
+    """Guarantee short burn-in lines exist for static/carousel stills."""
+    hook = (on_image_hook or "").strip()
+    headline = (on_image_message or "").strip()
+    if hook and headline:
+        return hook, headline
+
+    slot_hook = str((slot or {}).get("hook") or copy.get("hook") or "").strip()
+    slot_message = str((slot or {}).get("message") or copy.get("headline") or "").strip()
+    if isinstance(slot, dict):
+        if not hook:
+            hook = _billboard_words(str(slot.get("image_hook") or "").strip(), 6)
+        if not headline:
+            headline = _billboard_words(str(slot.get("image_headline") or "").strip(), 8)
+
+    if not hook or not headline:
+        derived_hook, derived_headline = _related_image_lines(
+            slot_hook,
+            slot_message,
+            ad_angle=ad_angle or str((slot or {}).get("ad_angle") or "").strip(),
+            niche=niche,
+        )
+        hook = hook or derived_hook
+        headline = headline or derived_headline
+
+    return _billboard_words(hook, 6), _billboard_words(headline, 8)
+
+
+def _resolve_burn_in_cta(
+    *,
+    fmt: str,
+    carousel_last: bool,
+    slot: dict[str, Any] | None,
+    copy: dict[str, Any],
+    brief_dict: dict[str, Any],
+    brief_cta: str = "",
+) -> str:
+    """Static ads always need a burned CTA; carousel only on the last card."""
+    if fmt == "carousel" and not carousel_last:
+        return ""
+    for source in (
+        str((slot or {}).get("cta") or "").strip(),
+        str(copy.get("cta") or "").strip(),
+        str(brief_cta or "").strip(),
+        resolve_campaign_cta(brief_dict),
+    ):
+        if source:
+            return source[:80]
+    return "Learn More"
+
+
+def _finalize_burn_in_prompt(
+    image_prompt: str,
+    *,
+    fmt: str,
+    carousel_last: bool,
+    slot: dict[str, Any] | None,
+    copy: dict[str, Any],
+    brief_dict: dict[str, Any],
+    brief_cta: str,
+    on_image_hook: str,
+    on_image_message: str,
+    slot_cta: str,
+    slot_hook: str,
+    slot_message: str,
+    industry: str,
+    niche: str,
+    primary_color: str,
+) -> str:
+    """
+    Re-pin hook/headline/CTA at the very end of the prompt.
+
+    Product-focus and style locks run after the first enforce pass — this guarantees
+    the TEXT-ANCHOR block (with CTA pill) survives and stays last before the API call.
+    """
+    if fmt == "carousel" and not carousel_last:
+        burn_cta = ""
+    else:
+        burn_cta = _resolve_burn_in_cta(
+            fmt=fmt,
+            carousel_last=carousel_last,
+            slot=slot,
+            copy=copy,
+            brief_dict=brief_dict,
+            brief_cta=brief_cta,
+        )
+        if not burn_cta:
+            burn_cta = slot_cta
+    if not on_image_hook and not on_image_message and not burn_cta:
+        return image_prompt
+    body = strip_burned_in_copy_from_prompt(image_prompt, allow_cta=True)
+    return enforce_on_image_copy_in_prompt(
+        body,
+        image_hook=on_image_hook,
+        image_headline=on_image_message,
+        cta=burn_cta,
+        full_hook=slot_hook or str(copy.get("hook") or ""),
+        full_headline=slot_message or str(copy.get("headline") or ""),
+        industry=industry,
+        niche=niche,
+        primary_color=primary_color,
+    )
+
+
+def _append_social_style_to_prompt(image_prompt: str, snap: dict[str, Any]) -> str:
+    """Append stored SociaVault social feed style when generating final image prompts."""
+    profile = snap.get("social_style_profile")
+    if not isinstance(profile, dict):
+        return image_prompt
+    from app.services.social_style_service import (
+        format_social_style_for_llm,
+        format_social_style_scene_lock,
+        resolve_effective_brand_colors,
+    )
+
+    block = format_social_style_for_llm(profile)
+    scene_lock = format_social_style_scene_lock(
+        profile,
+        lifestyle_scene=_prompt_describes_lifestyle_scene(image_prompt),
+    )
+    if scene_lock and scene_lock not in block:
+        block = f"{block} {scene_lock}" if block else scene_lock
+    if not block:
+        guidance = str(profile.get("prompt_guidance") or "").strip()
+        if not guidance:
+            return image_prompt
+        block = f"Match client social feed style: {guidance}"
+    primary, secondary = resolve_effective_brand_colors(
+        primary_color=str(snap.get("primary_color") or ""),
+        secondary_color=str(snap.get("secondary_color") or ""),
+        social_style_profile=profile,
+    )
+    if primary or secondary:
+        colour_line = " Use social feed colours:"
+        if primary:
+            colour_line += f" CTA pill + headline accent {primary}."
+        if secondary:
+            colour_line += f" Background/frame {secondary}."
+        colour_line += " Do NOT use off-brand blue if feed is black/gold."
+        block = f"{block}{colour_line}"
+    return f"{image_prompt.rstrip()} {block}"
 
 
 def _lock_brand_name_on_prompt(
@@ -371,6 +528,10 @@ async def run_brief_generation_job(
                     on_image_message = ""
                     if _slot_has_saved_plan(slot):
                         copy, on_image_hook, on_image_message = _copy_from_image_slot(slot)
+                        if slot_cta and not str(copy.get("cta") or "").strip():
+                            copy["cta"] = slot_cta
+                        elif not slot_cta and str(copy.get("cta") or "").strip():
+                            slot_cta = str(copy.get("cta") or "").strip()
                         if fmt == "carousel":
                             copy["cta"] = (
                                 slot_cta or resolve_campaign_cta(brief_dict)
@@ -415,6 +576,13 @@ async def run_brief_generation_job(
                         derived_image_hook, derived_image_headline = _related_image_lines(
                             slot_hook or str(copy.get("hook") or ""),
                             slot_message or str(copy.get("headline") or ""),
+                            ad_angle=slot_ad_angle,
+                            niche=str(
+                                kb_models.get("niche")
+                                or brief_dict.get("niche")
+                                or brief.product_name
+                                or ""
+                            ),
                         )
                         on_image_hook = _billboard_words(slot_image_hook, 6) or derived_image_hook
                         on_image_message = (
@@ -435,6 +603,39 @@ async def run_brief_generation_job(
                         on_image_hook = ""
                         on_image_message = ""
                         slot_cta = ""
+                    elif fmt in {"static", "carousel"}:
+                        on_image_hook, on_image_message = _ensure_on_image_burn_lines(
+                            on_image_hook=on_image_hook,
+                            on_image_message=on_image_message,
+                            slot=slot if isinstance(slot, dict) else None,
+                            copy=copy,
+                            niche=str(
+                                kb_models.get("niche")
+                                or brief_dict.get("niche")
+                                or brief.product_name
+                                or ""
+                            ),
+                            ad_angle=slot_ad_angle,
+                        )
+                        if not str(copy.get("cta") or "").strip() and not slot_cta:
+                            resolved = _resolve_burn_in_cta(
+                                fmt=fmt,
+                                carousel_last=carousel_last,
+                                slot=slot if isinstance(slot, dict) else None,
+                                copy=copy,
+                                brief_dict=brief_dict,
+                                brief_cta=str(brief.cta or ""),
+                            )
+                            copy["cta"] = resolved
+                            slot_cta = resolved
+                        logger.info(
+                            "Brief %s: burn-in lines variant=%s hook=%r headline=%r cta=%r",
+                            brief_id,
+                            variant_index,
+                            on_image_hook,
+                            on_image_message,
+                            slot_cta or str(copy.get("cta") or "")[:40],
+                        )
 
                     compliance = await ai_service.run_compliance_check(
                         copy,
@@ -484,6 +685,25 @@ async def run_brief_generation_job(
                                 or kb_models.get("media_type")
                                 or "image"
                             )
+                            _ind = str(
+                                kb_models.get("industry")
+                                or brief_dict.get("target_industry_label")
+                                or brand.industry
+                                or ""
+                            )
+                            _niche = str(
+                                kb_models.get("niche")
+                                or brief_dict.get("niche")
+                                or brief.product_name
+                                or ""
+                            )
+                            from app.services.social_style_service import resolve_effective_brand_colors
+
+                            _brand_primary, _brand_secondary = resolve_effective_brand_colors(
+                                primary_color=str(snap.get("primary_color") or ""),
+                                secondary_color=str(snap.get("secondary_color") or ""),
+                                social_style_profile=snap.get("social_style_profile"),
+                            )
                             if media_type == "image":
                                 # Apply this variant's creative direction onto brief for planning.
                                 variant_brief = {
@@ -506,19 +726,6 @@ async def run_brief_generation_job(
                                         )
                                     ),
                                 }
-                                _ind = str(
-                                    kb_models.get("industry")
-                                    or brief_dict.get("target_industry_label")
-                                    or brand.industry
-                                    or ""
-                                )
-                                _niche = str(
-                                    kb_models.get("niche")
-                                    or brief_dict.get("niche")
-                                    or brief.product_name
-                                    or ""
-                                )
-                                _brand_primary = str(snap.get("primary_color") or "")
                                 if slot_photo_only and slot_prompt:
                                     ratio = (
                                         brief_dict.get("image_aspect_ratio")
@@ -620,10 +827,19 @@ async def run_brief_generation_job(
                                         )
                                         copy["cta"] = closer_cta
                                     else:
-                                        # Strip any invented on-image slogans and pin EXACT condensed lines.
-                                        effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                        effective_cta = _resolve_burn_in_cta(
+                                            fmt=fmt,
+                                            carousel_last=carousel_last,
+                                            slot=slot if isinstance(slot, dict) else None,
+                                            copy=copy,
+                                            brief_dict=brief_dict,
+                                            brief_cta=str(brief.cta or ""),
+                                        )
+                                        copy["cta"] = effective_cta
                                         image_prompt = enforce_on_image_copy_in_prompt(
-                                            slot_prompt,
+                                            strip_burned_in_copy_from_prompt(
+                                                slot_prompt, allow_cta=True
+                                            ),
                                             image_hook=on_image_hook,
                                             image_headline=on_image_message,
                                             cta=effective_cta,
@@ -700,9 +916,19 @@ async def run_brief_generation_job(
                                             primary_color=_brand_primary,
                                         )
                                     else:
-                                        effective_cta = slot_cta or str(copy.get("cta") or "").strip()
+                                        effective_cta = _resolve_burn_in_cta(
+                                            fmt=fmt,
+                                            carousel_last=carousel_last,
+                                            slot=slot if isinstance(slot, dict) else None,
+                                            copy=copy,
+                                            brief_dict=brief_dict,
+                                            brief_cta=str(brief.cta or ""),
+                                        )
+                                        copy["cta"] = effective_cta
                                         image_prompt = enforce_on_image_copy_in_prompt(
-                                            plan.prompt,
+                                            strip_burned_in_copy_from_prompt(
+                                                plan.prompt, allow_cta=True
+                                            ),
                                             image_hook=on_image_hook or str(image_copy["hook"]),
                                             image_headline=on_image_message
                                             or str(image_copy["headline"]),
@@ -871,14 +1097,88 @@ async def run_brief_generation_job(
                                 niche=_fashion_niche,
                                 industry=_fashion_ind,
                                 fashion_retail_promo=bool(slot_retail_promo),
-                                primary_color=str(snap.get("primary_color") or ""),
-                                secondary_color=str(snap.get("secondary_color") or ""),
+                                primary_color=_brand_primary,
+                                secondary_color=_brand_secondary,
                                 font_heading=str(snap.get("font_heading") or ""),
                                 font_body=str(snap.get("font_body") or ""),
                             )
+                        image_prompt = _append_social_style_to_prompt(image_prompt, snap)
                         image_prompt = _lock_brand_name_on_prompt(
                             image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
                         )
+                        if fmt in {"static", "carousel"} and not slot_photo_only:
+                            image_prompt = _finalize_burn_in_prompt(
+                                image_prompt,
+                                fmt=fmt,
+                                carousel_last=carousel_last,
+                                slot=slot if isinstance(slot, dict) else None,
+                                copy=copy,
+                                brief_dict=brief_dict,
+                                brief_cta=str(brief.cta or ""),
+                                on_image_hook=on_image_hook,
+                                on_image_message=on_image_message,
+                                slot_cta=slot_cta,
+                                slot_hook=slot_hook,
+                                slot_message=slot_message,
+                                industry=_ind,
+                                niche=_niche,
+                                primary_color=_brand_primary,
+                            )
+                            logger.info(
+                                "Brief %s: final burn-in variant=%s cta=%r prompt_len=%d",
+                                brief_id,
+                                variant_index,
+                                (
+                                    _resolve_burn_in_cta(
+                                        fmt=fmt,
+                                        carousel_last=carousel_last,
+                                        slot=slot if isinstance(slot, dict) else None,
+                                        copy=copy,
+                                        brief_dict=brief_dict,
+                                        brief_cta=str(brief.cta or ""),
+                                    )
+                                    if fmt == "static" or carousel_last
+                                    else ""
+                                ),
+                                len(image_prompt),
+                            )
+                        if fmt in {"static", "carousel"} and not slot_photo_only:
+                            image_prompt = consolidate_image_prompt_for_generation(
+                                image_prompt,
+                                scene_prompt=slot_prompt,
+                                image_hook=on_image_hook,
+                                image_headline=on_image_message,
+                                cta=slot_cta
+                                or _resolve_burn_in_cta(
+                                    fmt=fmt,
+                                    carousel_last=carousel_last,
+                                    slot=slot if isinstance(slot, dict) else None,
+                                    copy=copy,
+                                    brief_dict=brief_dict,
+                                    brief_cta=str(brief.cta or ""),
+                                ),
+                                primary_color=_brand_primary,
+                                secondary_color=_brand_secondary,
+                                brand_name=str(snap.get("brand_name") or brand.name or ""),
+                                product_focus=slot_product_focus,
+                                niche=_niche,
+                                industry=_ind,
+                            )
+                        if burn_logo_on_still and not img_logo:
+                            logger.warning(
+                                "Brief %s variant=%s: no brand logo resolved — upload PNG/JPG on Brand Kit",
+                                brief_id,
+                                variant_index,
+                            )
+                        elif burn_logo_on_still and slot_product_focus:
+                            logger.info(
+                                "Brief %s variant=%s: product_focus=%r logo=%s on_light=%s",
+                                brief_id,
+                                variant_index,
+                                slot_product_focus,
+                                "yes" if img_logo else "no",
+                                "yes" if img_logo_light else "no",
+                            )
                         pipeline["image"] = await ai_service.generate_image_asset(
                             prompt=image_prompt,
                             tenant_id=str(tenant_id),
@@ -1183,7 +1483,13 @@ async def run_regenerate_variant_image(
                 or brief.product_name
                 or ""
             )
-            brand_primary = str(snap.get("primary_color") or "")
+            from app.services.social_style_service import resolve_effective_brand_colors
+
+            brand_primary, brand_secondary = resolve_effective_brand_colors(
+                primary_color=str(snap.get("primary_color") or ""),
+                secondary_color=str(snap.get("secondary_color") or ""),
+                social_style_profile=snap.get("social_style_profile"),
+            )
 
             slot_photo_only = bool(isinstance(slot, dict) and slot.get("photo_only"))
             if slot_photo_only:
@@ -1220,11 +1526,7 @@ async def run_regenerate_variant_image(
                 )
             elif base_prompt:
                 image_prompt = enforce_on_image_copy_in_prompt(
-                    strip_burned_in_copy_from_prompt(
-                        base_prompt, allow_cta=bool(effective_cta)
-                    )
-                    if fmt == "carousel"
-                    else base_prompt,
+                    strip_burned_in_copy_from_prompt(base_prompt, allow_cta=True),
                     image_hook=on_image_hook,
                     image_headline=on_image_headline,
                     cta=effective_cta,
@@ -1296,9 +1598,101 @@ async def run_regenerate_variant_image(
                 effective_cta,
             )
 
+            slot_cta = str((slot or {}).get("cta") or effective_cta or "").strip()
+            slot_hook = str((slot or {}).get("hook") or variant.hook or "").strip()
+            slot_message = str((slot or {}).get("message") or variant.headline or "").strip()
+            regen_copy = {
+                "hook": slot_hook or variant.hook or "",
+                "headline": slot_message or variant.headline or "",
+                "body_copy": variant.body_copy or "",
+                "cta": effective_cta or slot_cta,
+            }
+            slot_product_focus = (
+                str(slot.get("product_focus") or "").strip()
+                if isinstance(slot, dict)
+                else ""
+            ) or str(
+                kb_models.get("product_focus")
+                or brief_dict.get("product_focus")
+                or ""
+            ).strip()
+            slot_product_model = (
+                str(slot.get("product_model") or "").strip()
+                if isinstance(slot, dict)
+                else ""
+            )
+            if slot_product_focus:
+                from app.services.icp_image_plan_service import enforce_product_focus_in_prompt
+
+                image_prompt = enforce_product_focus_in_prompt(
+                    image_prompt,
+                    product_focus=slot_product_focus,
+                    product_model=slot_product_model,
+                    industry=industry,
+                    niche=niche,
+                )
+            campaign_on_image_style = str(
+                kb_models.get("on_image_style")
+                or brief_dict.get("on_image_style")
+                or "auto"
+            ).strip()
+            if campaign_on_image_style:
+                from app.services.icp_image_plan_service import enforce_on_image_style_in_prompt
+
+                image_prompt = enforce_on_image_style_in_prompt(
+                    image_prompt,
+                    on_image_style=campaign_on_image_style,
+                    niche=niche,
+                    industry=industry,
+                    fashion_retail_promo=False,
+                    primary_color=brand_primary,
+                    secondary_color=brand_secondary,
+                    font_heading=str(snap.get("font_heading") or ""),
+                    font_body=str(snap.get("font_body") or ""),
+                )
+            image_prompt = _append_social_style_to_prompt(image_prompt, snap)
             image_prompt = _lock_brand_name_on_prompt(
                 image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
             )
+            if fmt in {"static", "carousel"} and not slot_photo_only:
+                image_prompt = _finalize_burn_in_prompt(
+                    image_prompt,
+                    fmt=fmt,
+                    carousel_last=carousel_last,
+                    slot=slot,
+                    copy=regen_copy,
+                    brief_dict=brief_dict,
+                    brief_cta=str(brief.cta or ""),
+                    on_image_hook=on_image_hook,
+                    on_image_message=on_image_headline,
+                    slot_cta=slot_cta,
+                    slot_hook=slot_hook,
+                    slot_message=slot_message,
+                    industry=industry,
+                    niche=niche,
+                    primary_color=brand_primary,
+                )
+                logger.info(
+                    "Regenerate final burn-in variant=%s cta=%r prompt_len=%d",
+                    variant_id,
+                    effective_cta or slot_cta,
+                    len(image_prompt),
+                )
+                image_prompt = consolidate_image_prompt_for_generation(
+                    image_prompt,
+                    scene_prompt=slot_prompt,
+                    image_hook=on_image_hook,
+                    image_headline=on_image_headline,
+                    cta=effective_cta or slot_cta,
+                    primary_color=brand_primary,
+                    secondary_color=brand_secondary,
+                    brand_name=str(snap.get("brand_name") or brand.name or ""),
+                    product_focus=str(slot.get("product_focus") or "").strip()
+                    if isinstance(slot, dict)
+                    else "",
+                    niche=niche,
+                    industry=industry,
+                )
             image_result = await ai_service.generate_image_asset(
                 prompt=image_prompt,
                 tenant_id=str(tenant_id),

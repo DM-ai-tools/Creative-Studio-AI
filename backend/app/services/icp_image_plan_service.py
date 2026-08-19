@@ -729,15 +729,67 @@ def _jewellery_type_lock(
     secondary_color: str = "",
     font_heading: str = "",
     font_body: str = "",
+    lifestyle_scene: bool = False,
 ) -> str:
     """Jewellery typography — prefer scraped brand colours/fonts over generic champagne gold."""
     primary = _clean_brand_hex(primary_color)
     secondary = _clean_brand_hex(secondary_color)
     heading_font = _clean_brand_font(font_heading)
     body_font = _clean_brand_font(font_body)
-    type_color = primary or secondary or "#D4AF37"
+    gold = primary if primary else "#C9A962"
     headline_font = heading_font or "elegant luxury serif matching the brand website"
     sub_font = body_font or "thin elegant sans-serif matching the brand website"
+
+    if lifestyle_scene:
+        return (
+            " JEWELLERY TYPE LOCK (lifestyle consultation — gold + white on scene): "
+            f"Keep the boutique/consultation photograph — couple, jeweller, and table visible. "
+            f"On-image headline: metallic gold ({gold}) luxury {headline_font}, Title Case. "
+            f"Subline: clean WHITE {sub_font}. "
+            f"CTA pill: solid gold ({gold}) with white bold text — NEVER blue. "
+            "NO product-only pedestal shot. NO full-frame black studio catalog override. "
+            "Do NOT invent a jeweller wordmark — brand logo is composited in post."
+        )
+
+    try:
+        from app.services.social_style_service import social_style_aesthetic_mode
+
+        pseudo_profile = {
+            "effective_primary_color": primary,
+            "effective_secondary_color": secondary,
+        }
+        mode = social_style_aesthetic_mode(pseudo_profile)
+    except Exception:
+        mode = ""
+
+    is_dark_bg = _is_dark_hex(secondary) or mode == "gold_on_dark"
+    is_white_bg = secondary == "#FFFFFF" or mode == "gold_on_white"
+
+    if is_dark_bg and not is_white_bg:
+        return (
+            " JEWELLERY TYPE LOCK (gold on dark — match social feed): "
+            f"solid matte BLACK/dark charcoal background ({secondary or '#0A0A0A'}). "
+            "NO gold-to-cream gradient, NO diagonal split panel, NO blue/navy anywhere. "
+            f"Headline: metallic gold ({gold}) luxury {headline_font}, Title Case — NEVER ALL CAPS. "
+            f"Subline: clean WHITE {sub_font}, sentence case. "
+            f"CTA pill: solid gold ({gold}) with white bold text — NEVER blue. "
+            "Scene: jewellery product hero on dark grey pedestal or black reflective surface, "
+            "dramatic studio lighting — NOT lifestyle desk/office stress scenes. "
+            "Do NOT invent a jeweller wordmark — brand logo is composited in post."
+        )
+
+    if is_white_bg:
+        return (
+            " JEWELLERY TYPE LOCK (gold on white — match social feed): "
+            f"clean white/off-white studio background ({secondary or '#FFFFFF'}). "
+            f"Headline: metallic gold ({gold}) luxury {headline_font}, Title Case. "
+            f"Subline: dark charcoal or gold {sub_font}. "
+            f"CTA pill: solid gold ({gold}) with white text. "
+            "Product hero catalogue shot on white/light surface — NO blue tones, NO gradient split cards. "
+            "Do NOT invent a jeweller wordmark — brand logo is composited in post."
+        )
+
+    type_color = primary or secondary or "#D4AF37"
     colour_note = (
         f"metallic or solid brand colour {type_color} (from website — reflective foil OK if brand uses gold)"
         if primary or secondary
@@ -754,6 +806,21 @@ def _jewellery_type_lock(
         "Place type on a dark romantic third of the frame with enough contrast to read. "
         "Do NOT invent a jeweller wordmark or store name — brand lettering is locked from the Brand Kit."
     )
+
+
+def _is_dark_hex(value: str) -> bool:
+    hex_val = _clean_brand_hex(value)
+    if not hex_val:
+        return False
+    if hex_val in {"#0A0A0A", "#000000", "#1A1A1A", "#111111", "#0F0F0F", "#0F1B3D"}:
+        return True
+    try:
+        r = int(hex_val[1:3], 16)
+        g = int(hex_val[3:5], 16)
+        b = int(hex_val[5:7], 16)
+        return (0.299 * r + 0.587 * g + 0.114 * b) < 70
+    except ValueError:
+        return False
 
 # Image models love hallucinating luxury jeweller houses when asked for gold serif type.
 _FAKE_JEWELLER_BRAND_RE = re.compile(
@@ -824,9 +891,204 @@ def _normalize_product_focus(raw: str) -> str:
     v = (raw or "").strip().lower().replace("-", "_")
     if v in {"product_only", "product_alone", "product_hero", "catalog", "solo"}:
         return "product_only"
+    if v in {"product_with_person", "product_and_person", "product_lifestyle", "product_hero_person"}:
+        return "product_with_person"
     if v in {"with_person", "with_model", "with_people", "lifestyle_person", "person"}:
         return "with_person"
     return ""
+
+
+_LIFESTYLE_SCENE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"couple|jeweller|jeweler|consultation|boutique|sitting across|conversation|"
+    r"design studio|consultation table|bespoke|young couple|friendly jeweller|"
+    r"across from|engaged in conversation|natural wood|viewing tray|"
+    r"real person|model wearing|holding the product|using the product"
+    r")\b"
+)
+
+
+def _prompt_describes_lifestyle_scene(prompt: str) -> bool:
+    text = (prompt or "").strip()
+    if not text:
+        return False
+    if _LIFESTYLE_SCENE_RE.search(text):
+        return True
+    return bool(
+        re.search(
+            r"(?i)\b(?:warm|bright|editorial|authentic|candid)\b.{0,120}\b(?:boutique|store|showroom|table)\b",
+            text,
+        )
+    )
+
+
+def _extract_scene_body(*prompts: str) -> str:
+    """Pull the main photographic scene paragraph from a bloated prompt stack."""
+    for raw in prompts:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        match = re.search(
+            r"(?i)\b(?:warm|bright|editorial|professional|natural|candid|authentic|"
+            r"photograph|photo showing|scene showing|image of)\b[^.]{30,900}\.",
+            text,
+        )
+        if match:
+            scene = match.group(0).strip()
+            if len(scene) >= 40:
+                return scene
+        # Fallback: strip lock prefixes and take first substantial chunk.
+        cleaned = text
+        for marker in (
+            "PRODUCT-ONLY RETAIL SHOT",
+            "WITH-PERSON SHOT",
+            "NICHE PRODUCT LOCK",
+            "JEWELLERY PRODUCT HERO",
+            "JEWELLERY TYPE LOCK",
+            "BRAND IDENTITY LOCK",
+            "BRAND VISUAL LOCK",
+            "SOCIAL FEED",
+            "CLIENT SOCIAL MEDIA",
+            "TEXT-ANCHOR",
+            "ON-IMAGE COPY",
+            "PROP BAN",
+        ):
+            idx = cleaned.find(marker)
+            if idx >= 0:
+                cleaned = cleaned[:idx].strip()
+        cleaned = re.sub(
+            r"(?i)^(?:product-only retail shot|with-person shot)[^.]*\.\s*",
+            "",
+            cleaned,
+        ).strip()
+        if len(cleaned) >= 40:
+            return cleaned[:700].rstrip() + ("…" if len(cleaned) > 700 else "")
+    return ""
+
+
+def consolidate_image_prompt_for_generation(
+    prompt: str,
+    *,
+    scene_prompt: str = "",
+    image_hook: str = "",
+    image_headline: str = "",
+    cta: str = "",
+    primary_color: str = "",
+    secondary_color: str = "",
+    brand_name: str = "",
+    product_focus: str = "",
+    niche: str = "",
+    industry: str = "",
+) -> str:
+    """
+    Replace stacked/conflicting lock blocks with one short coherent prompt.
+    Lifestyle consultation scenes must NOT also get product-only + dark-pedestal locks.
+    """
+    raw = (prompt or "").strip()
+    if not raw:
+        return raw
+
+    scene_source = " ".join(p for p in (scene_prompt, raw) if p).strip()
+    lifestyle = _prompt_describes_lifestyle_scene(scene_source)
+    catalog = _normalize_product_focus(product_focus) == "product_only" and not lifestyle
+    conflict = (
+        ("PRODUCT-ONLY" in raw and lifestyle)
+        or ("gold on dark" in raw.lower() and lifestyle and "consultation" in raw.lower())
+        or ("pedestal" in raw.lower() and lifestyle and "boutique" in raw.lower())
+    )
+    lock_count = sum(
+        1
+        for marker in (
+            "PRODUCT-ONLY",
+            "JEWELLERY TYPE LOCK",
+            "NICHE PRODUCT LOCK",
+            "TEXT-ANCHOR",
+            "SOCIAL FEED",
+            "BRAND VISUAL LOCK",
+        )
+        if marker in raw
+    )
+    if len(raw) < 700 and not conflict and lock_count < 2:
+        return raw
+
+    scene = _extract_scene_body(scene_prompt, raw)
+    gold = _clean_brand_hex(primary_color) or "#C9A962"
+    dark = _clean_brand_hex(secondary_color) or "#0A0A0A"
+    brand = _canonical_brand_lettering(brand_name) or "the brand"
+    hook = (image_hook or "").strip()
+    headline = (image_headline or "").strip()
+    cta_text = (cta or "").strip()
+
+    text_lines: list[str] = []
+    if catalog:
+        header = "PRODUCT-ONLY CATALOG SHOT"
+        if _is_jewellery_niche(niche=niche, industry=industry):
+            header = "PRODUCT-ONLY JEWELLERY CATALOG SHOT"
+        text_lines.append(
+            f"{header} — Premium ecommerce hero. Product fills 60–80% of frame on a clean studio "
+            f"background. Professional lighting, sharp detail. NO people, NO faces, NO hands."
+        )
+        if scene:
+            text_lines.append(scene)
+        text_lines.append(
+            f"Brand Kit logo composited in a white header strip in post — do not draw a fake wordmark."
+        )
+    elif lifestyle and _is_jewellery_niche(niche=niche, industry=industry):
+        text_lines.append(
+            "LIFESTYLE JEWELLERY CONSULTATION — Bright modern jewellery boutique. "
+            "Young couple sits comfortably across from a friendly jeweller at a natural timber "
+            "consultation table — relaxed, genuinely engaged in conversation. "
+            "Solitaire ring, loose diamonds in a viewing tray, and ring sketches visible on the table. "
+            "Warm natural window light, premium Australian boutique aesthetic, authentic and unhurried."
+        )
+        if scene and scene not in text_lines[-1]:
+            text_lines.append(scene)
+        text_lines.append(
+            "The couple, jeweller, and engagement ring must all be visible — ring clearly identifiable. "
+            "NO product-only pedestal shot. NO full-frame black studio catalog composition."
+        )
+    else:
+        if scene:
+            text_lines.append(scene)
+        elif lifestyle:
+            text_lines.append(
+                "Lifestyle scene with real people naturally using or discussing the product — "
+                "authentic emotion, sharp faces, product clearly readable."
+            )
+
+    if hook or headline or cta_text:
+        bits = ["TEXT ON IMAGE ONLY:"]
+        if hook:
+            bits.append(f'Upper: "{hook}"')
+        if headline:
+            bits.append(f'Centre: "{headline}"')
+        if cta_text:
+            bits.append(f'CTA: "{cta_text}"')
+        bits.append(
+            f"Use elegant luxury typography in gold {gold} and white. "
+            "No other readable text. No invented jewellery brand names."
+        )
+        text_lines.append(" ".join(bits))
+    else:
+        text_lines.append(
+            f"Typography: gold ({gold}) + white only for any on-image text. No blue/navy tones."
+        )
+
+    text_lines.append(
+        f'Brand identity: ONLY "{brand}" if a name appears — logo composited in post. '
+        "Do not invent Lusso, Tiffany, Cartier, or other jeweller names."
+    )
+    if lifestyle and not catalog:
+        text_lines.append(
+            f"Colour palette: gold ({gold}) headlines/CTA + white sublines; "
+            f"boutique may be bright/natural — do NOT force full-frame black ({dark}) background."
+        )
+    elif catalog:
+        text_lines.append(
+            f"Accent colours: gold ({gold}) for CTA/headline; clean studio background."
+        )
+
+    return _clamp_prompt(" ".join(text_lines), max_len=2800)
 
 
 def _seed_product_focus(seed: dict | None) -> str:
@@ -855,6 +1117,18 @@ def enforce_product_focus_in_prompt(
     cleaned = (prompt or "").strip()
     if not focus:
         return cleaned
+    if focus == "product_only" and _prompt_describes_lifestyle_scene(cleaned):
+        cleaned = re.sub(
+            r"(?i)PRODUCT-ONLY RETAIL SHOT(?: \(mandatory\))?:[^.]*\.\s*",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"(?i)WITH-PERSON SHOT(?: \(mandatory\))?:[^.]*\.\s*",
+            "",
+            cleaned,
+        )
+        return cleaned.strip()
     if focus == "product_only":
         lock = (
             "PRODUCT-ONLY RETAIL SHOT (mandatory): Premium ecommerce/catalog hero — "
@@ -862,12 +1136,33 @@ def enforce_product_focus_in_prompt(
             "geometric accents (diagonal colour block OK). Professional product lighting, sharp detail. "
             "NO people, NO faces, NO hands, NO models, NO riders — product alone is the entire hero. "
             "Layout like a simple catalog ad: stacked bold headline in brand colours, product model name "
-            "on a lower label bar, optional offer/CTA pill — NOT a pain-led story or lifestyle scene."
+            "on a lower label bar, and a required lower-third CTA pill button when a CTA is provided — "
+            "NOT a pain-led story or lifestyle scene."
         )
         if model:
             lock += (
                 f" Show ONLY this exact product/model: {model}. "
                 "Match real branding, colour, and model name markings on the product if visible on the real item."
+            )
+        elif niche or industry:
+            lock += f" Product category: {niche or industry}."
+        lock += (
+            " Brand Kit logo is composited in a white header strip in post — do not draw a fake wordmark. "
+            "Keep the top ~10% of the frame a simple clean background (no busy diagonal art or headline "
+            "bleeding into the logo zone)."
+        )
+        return f"{lock} {cleaned}".strip()
+    if focus == "product_with_person":
+        lock = (
+            "PRODUCT-HERO + LIFESTYLE PERSON SHOT (mandatory): The product fills 60–70% of the frame "
+            "as the clear hero — sharp detail, professional lighting. A real person (hands, partial body, "
+            "or full figure) naturally interacts with, wears, or uses the product in the scene, adding "
+            "authentic lifestyle context. Person's face or body is visible but secondary to the product. "
+            "Shallow depth of field on the product; person and setting softly support the composition."
+        )
+        if model:
+            lock += (
+                f" The featured product/model must be: {model} — correct shape, colour, and branding."
             )
         elif niche or industry:
             lock += f" Product category: {niche or industry}."
@@ -920,6 +1215,7 @@ def on_image_style_lock(
     secondary_color: str = "",
     font_heading: str = "",
     font_body: str = "",
+    lifestyle_scene: bool = False,
 ) -> str:
     """Typography + colour rules appended to image prompts."""
     primary = _clean_brand_hex(primary_color) or "brand primary colour from Brand Kit"
@@ -933,7 +1229,10 @@ def on_image_style_lock(
         font_body=font_body,
     )
     if resolved_style == "jewellery_luxury":
-        return f"{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)}{brand_visual}"
+        return (
+            f"{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body, lifestyle_scene=lifestyle_scene)}"
+            f"{brand_visual}"
+        )
     headline_type = (
         f'"{heading_font}" serif or sans matching the brand site'
         if heading_font
@@ -1008,12 +1307,14 @@ def enforce_on_image_style_in_prompt(
         industry=industry,
         fashion_retail_promo=fashion_retail_promo,
     )
+    lifestyle = _prompt_describes_lifestyle_scene(cleaned)
     lock = on_image_style_lock(
         resolved,
         primary_color=primary_color,
         secondary_color=secondary_color,
         font_heading=font_heading,
         font_body=font_body,
+        lifestyle_scene=lifestyle,
     )
     return f"{cleaned.rstrip()}{lock}".strip()
 
@@ -1282,7 +1583,10 @@ def enforce_niche_product_focus_in_prompt(
             cleaned,
         )
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-    if "NICHE PRODUCT LOCK" not in cleaned:
+
+    lifestyle_scene = _prompt_describes_lifestyle_scene(cleaned)
+
+    if "NICHE PRODUCT LOCK" not in cleaned and not lifestyle_scene:
         cleaned = f"{cleaned}{_JEWELLERY_PRODUCT_LOCK_FIX}"
     resolved = resolve_on_image_style(on_image_style, niche=niche, industry=industry)
     if resolved == "jewellery_luxury":
@@ -1302,8 +1606,11 @@ def enforce_niche_product_focus_in_prompt(
             cleaned,
         )
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-        cleaned = f"{cleaned}{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)}"
-    if "JEWELLERY PRODUCT HERO" not in cleaned:
+        if not lifestyle_scene:
+            cleaned = f"{cleaned}{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body, lifestyle_scene=False)}"
+        else:
+            cleaned = f"{cleaned}{_jewellery_type_lock(primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body, lifestyle_scene=True)}"
+    if "JEWELLERY PRODUCT HERO" not in cleaned and not lifestyle_scene:
         cleaned = f"{cleaned}{_JEWELLERY_PRODUCT_HERO_LOCK}"
     if brand_name:
         cleaned = enforce_brand_identity_in_prompt(
@@ -2832,6 +3139,40 @@ def _related_image_lines(
     ):
         image_hook = "Tired of tyre-kicker leads?"
         image_headline = "Attract ready-to-act buyers"
+    elif any(
+        k in combined
+        for k in (
+            "google ads",
+            "google ad",
+            "ppc",
+            "pay per click",
+            "paid search",
+            "meta ads",
+            "facebook ads",
+            "digital marketing",
+            "marketing agency",
+            "ad spend",
+            "ad budget",
+        )
+    ):
+        if any(k in combined for k in ("gambl", "guess", "hit-and-miss", "hit and miss", "unpredict")):
+            image_hook = "Google Ads budget gambling?"
+            image_headline = "Predictable leads, not guesswork"
+        elif any(k in combined for k in ("freelancer", "freelance", "in-house", "in house")):
+            image_hook = "Freelancer ads hit-and-miss?"
+            image_headline = "Get a dedicated PPC team"
+        elif any(k in combined for k in ("roi", "report", "partner", "board", "visibility")):
+            image_hook = "Partners want Google Ads ROI?"
+            image_headline = "Reports they can trust"
+        elif any(k in combined for k in ("haemorrhag", "hemorrhag", "bleed", "waste", "burn")):
+            image_hook = "Google Ads haemorrhaging budget?"
+            image_headline = "Zero visibility on real ROI"
+        elif any(k in combined for k in ("pitch", "same pitch", "tired of")):
+            image_hook = "Tired of the same PPC pitch?"
+            image_headline = "Strategy built for your niche"
+        else:
+            image_hook = _billboard_words(hook, 6) or "Google Ads underperforming?"
+            image_headline = _billboard_words(message, 8) or "Get a free strategy review"
     else:
         image_hook = _billboard_words(hook, 6)
         image_headline = _billboard_words(message, 8)
@@ -3123,6 +3464,35 @@ def enforce_realistic_prop_text_in_prompt(
     return cleaned
 
 
+def _strip_conflicting_no_text_locks(prompt: str) -> str:
+    """Remove photo-only / no-overlay bans so burn-in rules are not contradicted."""
+    cleaned = (prompt or "").strip()
+    cleaned = re.sub(r"(?i)\bno text overlay[^.]*\.?", " ", cleaned)
+    cleaned = re.sub(r"(?i)\bno cta button on this (?:card|photograph)[^.]*\.?", " ", cleaned)
+    cleaned = re.sub(r"(?i)\bphoto only — no text[^.]*\.?", " ", cleaned)
+    cleaned = re.sub(r"(?i)\bno text overlays?\.?", " ", cleaned)
+    cleaned = re.sub(r"(?i)\bcaptions and the ad cta live in the carousel ui[^.]*\.?", " ", cleaned)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def _strip_optional_cta_wording(prompt: str) -> str:
+    """
+    Older catalog prompts mark the CTA pill as optional — models skip it when a real CTA exists.
+    """
+    cleaned = (prompt or "").strip()
+    cleaned = re.sub(
+        r"(?i)\boptional offer\s*/\s*cta pill\b",
+        "required lower-third CTA pill button",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\boptional (?:offer/)?cta pill\b",
+        "required lower-third CTA pill button",
+        cleaned,
+    )
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def enforce_on_image_copy_in_prompt(
     prompt: str,
     *,
@@ -3169,12 +3539,11 @@ def enforce_on_image_copy_in_prompt(
     if not hook and not headline and not button:
         return cleaned
 
+    cleaned = _strip_conflicting_no_text_locks(cleaned)
     if button:
-        cleaned = re.sub(
-            r"(?i)\s*No text overlay[^.]*\.",
-            " ",
-            cleaned,
-        )
+        cleaned = _strip_optional_cta_wording(cleaned)
+
+    if button:
         cleaned = re.sub(
             r"(?i)\s*No CTA button on this (?:card|photograph)[^.]*\.",
             " ",
@@ -3220,8 +3589,11 @@ def enforce_on_image_copy_in_prompt(
 
     # CTA pill button visual instruction.
     cta_desc = (
-        f' lower-third pill-shaped button, solid {cta_colour} background, "{button}" in white bold text.'
-        if button else ""
+        f' REQUIRED lower-third pill-shaped CTA button with solid {cta_colour} background, '
+        f'white bold text reading exactly "{button}". The button must be clearly visible and '
+        f"look clickable — never omit the CTA on static ads."
+        if button
+        else ""
     )
 
     # TEXT-ANCHOR sentinel stays so idempotency check works on re-runs,
@@ -3440,10 +3812,12 @@ def _strip_prompt_meta_labels(prompt: str) -> str:
 
 
 def _clamp_prompt(prompt: str, max_len: int = 4000) -> str:
+    from app.services.brand_prompt import clamp_runway_image_prompt
+
     prompt = _strip_prompt_meta_labels((prompt or "").strip())
-    if len(prompt) > max_len:
-        return prompt[: max_len - 1] + "…"
-    return prompt
+    if len(prompt) <= max_len:
+        return prompt
+    return clamp_runway_image_prompt(prompt, max_len=max_len)
 
 
 def _valid_use_cases(ids: list[Any]) -> list[str]:
@@ -4187,10 +4561,18 @@ def _apply_seed_product_focus(
     model = _seed_product_model(seed)
     if not focus:
         return plan
+    if focus == "product_only" and _prompt_describes_lifestyle_scene(plan.prompt or ""):
+        focus = "with_person"
     use_cases = list(plan.use_cases or [])
     if focus == "product_only":
         if "hero_product" not in use_cases:
             use_cases = ["hero_product", *[u for u in use_cases if u != "bs_emotional_using"]][:3]
+    elif focus == "product_with_person":
+        # Product is primary hero; ensure a lifestyle/person use-case is also present.
+        if "hero_product" not in use_cases:
+            use_cases = ["hero_product", *use_cases][:3]
+        if not any(u in use_cases for u in ("product_person", "lifestyle", "bs_emotional_using")):
+            use_cases = [use_cases[0], "product_person", *use_cases[1:]][:3]
     elif focus == "with_person":
         if not any(u in use_cases for u in ("product_person", "bs_emotional_using", "lifestyle")):
             use_cases = ["product_person", *use_cases][:3]
@@ -4236,6 +4618,7 @@ def _pack_icp_plan(
     secondary_color: str = "",
     font_heading: str = "",
     font_body: str = "",
+    brand_name: str = "",
 ) -> dict[str, Any]:
     """Attach campaign-level copy; carousel closers keep CTA, all cards keep on-image hook/headline."""
     campaign_hook = ""
@@ -4410,6 +4793,21 @@ def _pack_icp_plan(
             secondary_color=secondary_color,
             font_heading=font_heading,
             font_body=font_body,
+            brand_name=brand_name,
+        )
+        seed_focus = _seed_product_focus(seed) or _normalize_product_focus(campaign_product_focus)
+        consolidated = consolidate_image_prompt_for_generation(
+            styled_prompt,
+            scene_prompt=v.prompt,
+            image_hook=focused.image_hook or "",
+            image_headline=focused.image_headline or "",
+            cta=focused.cta or "",
+            primary_color=primary_color,
+            secondary_color=secondary_color,
+            brand_name=brand_name,
+            product_focus=seed_focus,
+            niche=niche,
+            industry=industry,
         )
         finalized.append(
             IcpImageVariantPlan(
@@ -4418,7 +4816,7 @@ def _pack_icp_plan(
                 message=focused.message,
                 cta=focused.cta,
                 offer=focused.offer,
-                prompt=styled_prompt,
+                prompt=consolidated,
                 reasoning=focused.reasoning,
                 ad_angle=focused.ad_angle,
                 image_hook=focused.image_hook,
@@ -4459,6 +4857,7 @@ async def generate_icp_image_plan(
     secondary_color: str = "",
     font_heading: str = "",
     font_body: str = "",
+    social_style_profile: dict | None = None,
 ) -> dict[str, Any]:
     """
     Build ICP from industry + niche + objective, then produce N distinct image variant plans.
@@ -4473,6 +4872,14 @@ async def generate_icp_image_plan(
     service_location = (geography or "").strip()
     facts_block = format_brand_facts_for_llm(brand_facts)
     facts_whitelist = brand_facts_whitelist_text(brand_facts)
+    from app.services.social_style_service import format_social_style_for_llm, resolve_effective_brand_colors
+
+    primary_color, secondary_color = resolve_effective_brand_colors(
+        primary_color=primary_color,
+        secondary_color=secondary_color,
+        social_style_profile=social_style_profile,
+    )
+    social_style_block = format_social_style_for_llm(social_style_profile)
     # Business rule: if user didn't pick a location, fall back to scraped service area.
     if not service_location and isinstance(brand_facts, dict):
         areas = [str(a).strip() for a in (brand_facts.get("service_areas") or []) if str(a).strip()]
@@ -4642,6 +5049,7 @@ async def generate_icp_image_plan(
             secondary_color=secondary_color,
             font_heading=font_heading,
             font_body=font_body,
+            brand_name=brand_name,
         )
 
     style_block = _style_enforcement_block(list(dict.fromkeys(angle_assignments)))
@@ -4699,9 +5107,31 @@ async def generate_icp_image_plan(
         ),
         *(
             [
-                "PRODUCT SHOT LOCK (per-variant seeds): When product_focus=product_only, write a catalog/studio "
-                "product hero — NO people. Prefer use_cases hero_product + detail_texture. "
-                "When product_focus=with_person, show a real person with the product (product_person / bs_emotional_using). "
+                "CAMPAIGN PRODUCT + PERSON SHOT (all variants): Product fills 60–70% of the frame as the hero. "
+                "A real person naturally interacts with, wears, or uses the product in the scene — "
+                "person adds lifestyle authenticity but the product is always the primary visual anchor. "
+                "Use use_cases hero_product + product_person or lifestyle together.",
+                "",
+            ]
+            if campaign_product_focus == "product_with_person"
+            else []
+        ),
+        *(
+            [
+                "CAMPAIGN WITH-PERSON SHOT (all variants): Real person is the main subject — "
+                "they naturally use, wear, or hold the product. Sharp face, authentic emotion, "
+                "shallow depth of field. Product must remain clearly visible.",
+                "",
+            ]
+            if campaign_product_focus == "with_person"
+            else []
+        ),
+        *(
+            [
+                "PRODUCT SHOT LOCK (per-variant seeds): "
+                "product_focus=product_only → catalog/studio hero, NO people, use_cases: hero_product + detail_texture. "
+                "product_focus=product_with_person → product fills 60–70% of frame as hero, real person adds lifestyle context in the scene (use_cases: hero_product + product_person/lifestyle). "
+                "product_focus=with_person → real person is the main subject, product clearly visible (use_cases: product_person / bs_emotional_using). "
                 "When product_model is set, that exact model name must appear in the scene and may become image_hook on product-only cards.",
                 "",
             ]
@@ -4741,6 +5171,7 @@ async def generate_icp_image_plan(
             "VERIFIED BRAND FACTS: none provided — do NOT invent rates, review counts, customer volumes, or years of experience.",
             "",
         ] ),
+        *( [social_style_block, ""] if social_style_block else [] ),
         "",
         f"CREATIVE FORMAT: {'mixed static + carousel' if is_mixed else ('carousel (swipe story)' if is_carousel else 'static (standalone ads)')}",
         f"CAMPAIGN LABEL: {campaign_name}",
@@ -5241,8 +5672,10 @@ async def generate_icp_image_plan(
                         primary_color=primary_color,
                     )
                 else:
+                    if not card_is_carousel and not (cta_line or "").strip():
+                        cta_line = (cta or "").strip() or "Shop Now"
                     prompt = enforce_on_image_copy_in_prompt(
-                        prompt,
+                        strip_burned_in_copy_from_prompt(prompt, allow_cta=True),
                         image_hook=image_hook,
                         image_headline=image_headline,
                         cta=cta_line,
@@ -5338,6 +5771,7 @@ async def generate_icp_image_plan(
                     secondary_color=secondary_color,
                     font_heading=font_heading,
                     font_body=font_body,
+                    brand_name=brand_name,
                 )
 
         logger.warning("ICP image plan LLM returned invalid JSON; using fallback variants")
@@ -5383,4 +5817,5 @@ async def generate_icp_image_plan(
         secondary_color=secondary_color,
         font_heading=font_heading,
         font_body=font_body,
+        brand_name=brand_name,
     )

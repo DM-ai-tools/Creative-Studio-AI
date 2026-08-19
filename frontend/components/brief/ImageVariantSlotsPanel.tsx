@@ -16,6 +16,8 @@ import {
   isCarouselSlot,
   isLastCarouselCard,
   labelForUseCase,
+  normalizeProductFocus,
+  productFocusSlotHint,
   type ImageVariantSlot,
   type ProductFocusId,
 } from '@/lib/imageUseCases'
@@ -134,9 +136,9 @@ export default function ImageVariantSlotsPanel({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <div className="flex flex-col gap-0.5 min-w-[220px]">
+          <div className="flex flex-col gap-0.5 min-w-[240px]">
             <label className="text-[9px] font-bold uppercase tracking-widest text-navy">
-              Shot style (all variants)
+              Default shot style (override all)
             </label>
             <select
               value={productFocus || ''}
@@ -175,16 +177,11 @@ export default function ImageVariantSlotsPanel({
       </div>
       {productFocus ? (
         <p className="text-[10px] text-sky-800 -mt-2">
-          {PRODUCT_FOCUS_OPTIONS.find((o) => o.value === productFocus)?.label ===
-          'Product alone — catalog / studio hero'
-            ? 'Every variant: product-only catalog hero — no people in frame.'
-            : productFocus === 'with_person'
-              ? 'Every variant: person/model with the product (e.g. kid on bike).'
-              : null}
+          Override active — all variants will use this shot style unless a slot has its own selection.
         </p>
       ) : (
         <p className="text-[10px] text-mid -mt-2">
-          Shot style Auto — AI picks product-only vs with-person per variant.
+          Auto — AI picks shot style per variant. You can override each slot individually below, or set a default here to apply to all.
         </p>
       )}
 
@@ -270,15 +267,38 @@ export default function ImageVariantSlotsPanel({
                     Static
                   </span>
                 ) : null}
-                {slot.ad_angle && productFocus !== 'product_only' ? (
-                  <span className="ml-2 text-[10px] font-semibold text-accent normal-case">
-                    {labelForAngle(slot.ad_angle, angleOptions)}
-                  </span>
-                ) : productFocus === 'product_only' ? (
-                  <span className="ml-2 text-[10px] font-semibold text-sky-700 normal-case">
-                    Catalog hero
-                  </span>
-                ) : null}
+                {(() => {
+                  const eff = slot.product_focus || productFocus || ''
+                  if (eff === 'product_only') {
+                    return (
+                      <span className="ml-2 text-[10px] font-semibold text-sky-700 normal-case">
+                        Catalog hero
+                      </span>
+                    )
+                  }
+                  if (eff === 'product_with_person') {
+                    return (
+                      <span className="ml-2 text-[10px] font-semibold text-teal-700 normal-case">
+                        Product + person
+                      </span>
+                    )
+                  }
+                  if (eff === 'with_person') {
+                    return (
+                      <span className="ml-2 text-[10px] font-semibold text-violet-700 normal-case">
+                        Person-led
+                      </span>
+                    )
+                  }
+                  if (slot.ad_angle) {
+                    return (
+                      <span className="ml-2 text-[10px] font-semibold text-accent normal-case">
+                        {labelForAngle(slot.ad_angle, angleOptions)}
+                      </span>
+                    )
+                  }
+                  return null
+                })()}
                 {slot.prompt ? (
                   <span className="ml-2 text-teal-600 font-semibold text-[11px] normal-case">
                     ✓ Prompt ready
@@ -399,6 +419,58 @@ export default function ImageVariantSlotsPanel({
                   ))}
                 </datalist>
               ) : null}
+            </div>
+
+            {/* Per-slot shot style — overrides the global default for this variant */}
+            <div>
+              <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1">
+                Shot style (this variant)
+              </label>
+              <div className="flex items-center gap-2 flex-wrap">
+                {PRODUCT_FOCUS_OPTIONS.map((opt) => {
+                  const slotFocus = slot.product_focus ?? ''
+                  const effectiveFocus = slotFocus !== '' ? slotFocus : (productFocus || '')
+                  const isSlotSet = slotFocus !== ''
+                  const isSelected = isSlotSet ? slotFocus === opt.value : (!productFocus && opt.value === '')
+                  return (
+                    <button
+                      key={opt.value || 'auto'}
+                      type="button"
+                      onClick={() =>
+                        updateSlot(index, {
+                          product_focus: opt.value === '' && !productFocus
+                            ? ''
+                            : normalizeProductFocus(opt.value) || '',
+                        })
+                      }
+                      className={`text-[10px] font-semibold px-2.5 py-1 rounded-full border transition-colors ${
+                        isSelected
+                          ? 'bg-sky-600 text-white border-sky-600'
+                          : 'bg-white text-charcoal border-border hover:border-sky-400'
+                      }`}
+                    >
+                      {opt.value === '' ? 'Auto' : opt.label.split(' — ')[0].split(' / ')[0].split(' +')[0]}
+                    </button>
+                  )
+                })}
+                {slot.product_focus ? (
+                  <button
+                    type="button"
+                    onClick={() => updateSlot(index, { product_focus: '' })}
+                    className="text-[10px] text-mid underline hover:text-charcoal"
+                  >
+                    Reset to default
+                  </button>
+                ) : null}
+              </div>
+              {(() => {
+                const hint = productFocusSlotHint(
+                  slot.product_focus || productFocus || ''
+                )
+                return hint ? (
+                  <p className="mt-1 text-[10px] text-sky-700 italic">{hint}</p>
+                ) : null
+              })()}
             </div>
 
             {carouselCard ? (

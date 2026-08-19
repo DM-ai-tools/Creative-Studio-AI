@@ -89,10 +89,15 @@ def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, A
 
     fonts: dict = {}
     logo_on_light = ""
+    social_style_profile: dict | None = None
     if kit and isinstance(kit.fonts, dict):
         fonts = kit.fonts
     if kit and isinstance(kit.logo_variations, dict):
         logo_on_light = str(kit.logo_variations.get("on_light") or "")
+    if isinstance(brand.voice_rules, dict):
+        raw_social = brand.voice_rules.get("social_style_profile")
+        if isinstance(raw_social, dict):
+            social_style_profile = raw_social
 
     # Also include full logo_variations so resolve_video_logo_urls can pick it up
     logo_variations: dict = {}
@@ -111,6 +116,7 @@ def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, A
         "logo_variations": logo_variations or None,
         "font_heading": fonts.get("heading", ""),
         "font_body": fonts.get("body", ""),
+        "social_style_profile": social_style_profile,
     }
 
 

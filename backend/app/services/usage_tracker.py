@@ -249,6 +249,26 @@ def record_firecrawl(*, success: bool, url: str = "", error: str | None = None) 
     )
 
 
+def record_sociavault(
+    *,
+    success: bool,
+    platform: str = "",
+    handle: str = "",
+    post_count: int = 0,
+    error: str | None = None,
+) -> None:
+    record_usage(
+        provider="sociavault",
+        model=platform or "social",
+        operation="fetch_social_style",
+        credits=float(post_count or 1) if success else 0,
+        cost_usd=0.01 * max(1, post_count) if success else 0,
+        success=success,
+        error=error,
+        extra={"platform": platform, "handle": handle[:120]} if platform or handle else None,
+    )
+
+
 def record_meta_export(*, success: bool, variant_count: int = 0, error: str | None = None) -> None:
     record_usage(
         provider="meta",

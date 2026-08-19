@@ -19,6 +19,7 @@ import BriefImageVariantsEditor, {
   slotsFromBrief,
 } from '@/components/brief/BriefImageVariantsEditor'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, heygenSettingsFromApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
@@ -111,6 +112,7 @@ export default function BriefDetailPage() {
   const focusedFromCreateRef = useRef(false)
   const pollStartedAtRef = useRef<number | null>(null)
   const [pollTimedOut, setPollTimedOut] = useState(false)
+  const [activeTab, setActiveTab] = useState<'brief' | 'creative_studio'>('brief')
 
   const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
     cacheKey: 'generation/catalog-v6',
@@ -613,6 +615,7 @@ export default function BriefDetailPage() {
       />
 
       <div className="p-5 space-y-4">
+        {/* Status row */}
         <div className="flex items-center gap-3 flex-wrap">
           <Badge variant={statusBadgeVariant}>{brief.status}</Badge>
           <span className="text-xs text-lt">Formats: {brief.formats?.join(', ')}</span>
@@ -623,6 +626,48 @@ export default function BriefDetailPage() {
           </span>
         </div>
 
+        {/* ── Tab switcher ── */}
+        <div className="flex gap-1 border-b border-border pb-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab('brief')}
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
+              activeTab === 'brief'
+                ? 'border-accent text-navy bg-surface-elevated'
+                : 'border-transparent text-mid hover:text-navy hover:border-border'
+            }`}
+          >
+            Brief
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('creative_studio')}
+            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
+              activeTab === 'creative_studio'
+                ? 'border-accent text-navy bg-surface-elevated'
+                : 'border-transparent text-mid hover:text-navy hover:border-border'
+            }`}
+          >
+            <span className="text-[10px]">◆</span>
+            Creative Studio
+            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
+              NEW
+            </span>
+          </button>
+        </div>
+
+        {/* ── Creative Studio tab panel ── */}
+        {activeTab === 'creative_studio' && (
+          <CreativeStudioTab
+            briefTitle={brief.title}
+            brandName={brand?.name}
+            productName={brief.product_name}
+            initialPrompt={String((brief.key_benefits as Record<string, unknown>)?.image_prompt_override ?? '')}
+          />
+        )}
+
+        {/* ── Brief tab panel ── */}
+        {activeTab === 'brief' && <>
         {pollTimedOut && (
           <div className="text-sm rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 space-y-2">
             <p className="font-medium text-amber-800">
@@ -879,6 +924,7 @@ export default function BriefDetailPage() {
             onView={setSelectedVariant}
           />
         </div>
+        </>}
       </div>
 
       <Modal

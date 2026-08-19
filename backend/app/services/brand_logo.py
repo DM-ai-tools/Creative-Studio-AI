@@ -128,6 +128,49 @@ def resolve_video_logo_urls(
     return default_url or None, resolved_on_light
 
 
+_RASTER_LOGO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+
+
+def _is_raster_logo_path(path: Path | None) -> bool:
+    return bool(path and path.is_file() and path.suffix.lower() in _RASTER_LOGO_SUFFIXES)
+
+
+def resolve_overlay_logo_paths(
+    logo_url: str | None,
+    logo_on_light_url: str | None = None,
+) -> tuple[Path | None, Path | None]:
+    """
+    Resolve readable raster logo files for still-image compositing.
+    SVG/unsupported formats fall back to on_light PNG or repo default assets.
+    """
+    primary = logo_local_path(logo_url)
+    on_light = logo_local_path(logo_on_light_url) if logo_on_light_url else None
+
+    if primary and not _is_raster_logo_path(primary):
+        logger.warning(
+            "Primary logo is not raster (%s) — trying on-light / fallback for image overlay",
+            primary.suffix.lower(),
+        )
+        primary = None
+    if on_light and not _is_raster_logo_path(on_light):
+        on_light = None
+
+    if not primary and on_light:
+        primary = on_light
+        on_light = None
+
+    if not primary:
+        for candidate in _default_logo_file_candidates():
+            if _is_raster_logo_path(candidate):
+                logger.warning(
+                    "Brand logo unreadable for overlay — using fallback %s",
+                    candidate.name,
+                )
+                return candidate, on_light
+
+    return primary, on_light
+
+
 def persist_remote_logo_url(
     logo_url: str | None,
     *,

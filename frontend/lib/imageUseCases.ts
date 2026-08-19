@@ -72,7 +72,7 @@ export type ImageVariantSlot = {
   retail_promo?: boolean
   aspect_ratio?: string
   /** Retail / ecommerce: product-only catalog shot vs person with product. */
-  product_focus?: 'product_only' | 'with_person' | ''
+  product_focus?: 'product_only' | 'with_person' | 'product_with_person' | ''
   /** Specific product/model from scraped catalog (e.g. NEO + 20 2026). */
   product_model?: string
   /** ISO timestamp when AI plan was last generated for this variant. */
@@ -128,17 +128,32 @@ export function emptyImageVariantSlot(): ImageVariantSlot {
   }
 }
 
+/** Returns a human-readable hint for each product_focus value shown inside a slot card. */
+export function productFocusSlotHint(focus: string | undefined): string | null {
+  switch (focus) {
+    case 'product_only':
+      return 'Product-only catalog hero — no people in frame.'
+    case 'product_with_person':
+      return 'Product fills 60–70% of frame; person adds lifestyle context in the scene.'
+    case 'with_person':
+      return 'Person / model is the main subject — product clearly visible.'
+    default:
+      return null
+  }
+}
+
 export const PRODUCT_FOCUS_OPTIONS = [
   { value: '', label: 'Auto (AI decides)' },
   { value: 'product_only', label: 'Product alone — catalog / studio hero' },
-  { value: 'with_person', label: 'With person / model / kid' },
+  { value: 'product_with_person', label: 'Product hero + person for lifestyle context' },
+  { value: 'with_person', label: 'Person / model is the main subject' },
 ] as const
 
-export type ProductFocusId = 'product_only' | 'with_person'
+export type ProductFocusId = 'product_only' | 'product_with_person' | 'with_person'
 
 export function normalizeProductFocus(value: unknown): ImageVariantSlot['product_focus'] {
   const s = String(value ?? '').trim()
-  if (s === 'product_only' || s === 'with_person') return s
+  if (s === 'product_only' || s === 'with_person' || s === 'product_with_person') return s
   return ''
 }
 

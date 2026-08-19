@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.services.file_service import file_service
 from app.services.logo_overlay import apply_logo_overlay_to_file
 from app.services.media.base import ImageGenerationProvider
+from app.services.brand_prompt import clamp_runway_image_prompt
 from app.services.media.openai_image_catalog import (
     openai_configured,
     resolve_openai_image_model,
@@ -65,9 +66,16 @@ class OpenAIImageProvider(ImageGenerationProvider):
             }
 
         size = _size_for(api_model, format_type)
+        prompt_limit = 32_000 if api_model.startswith("gpt-image") else 4_000
+        clamp_model = "gpt_image_2" if api_model.startswith("gpt-image") else None
+        safe_prompt = clamp_runway_image_prompt(
+            prompt or "",
+            max_len=prompt_limit,
+            model=clamp_model,
+        )
         payload: dict = {
             "model": api_model,
-            "prompt": (prompt or "")[:4000],
+            "prompt": safe_prompt,
             "size": size,
         }
         if api_model.startswith("dall-e"):
@@ -142,6 +150,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
                     content_type=content_type,
                 )
                 final_url = saved["file_url"]
+                logo_applied = False
                 if logo_url and final_url:
                     overlaid = apply_logo_overlay_to_file(
                         final_url,
@@ -150,7 +159,10 @@ class OpenAIImageProvider(ImageGenerationProvider):
                         logo_on_light_url=logo_on_light_url,
                         format_type=format_type,
                     )
-                    if overlaid:
+                    if overlaid and overlaid != final_url:
+                        final_url = overlaid
+                        logo_applied = True
+                    elif overlaid:
                         final_url = overlaid
                 return {
                     "status": "done",
@@ -158,7 +170,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
                     "prompt": prompt,
                     "url": final_url,
                     "provider": "openai",
-                    "logo_applied": bool(logo_url and final_url),
+                    "logo_applied": logo_applied,
                 }
         except Exception as exc:
             logger.exception("OpenAI image generation failed")

@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     FIRECRAWL_API_KEY: str = ""
     FIRECRAWL_BASE_URL: str = "https://api.firecrawl.dev/v2"
 
+    # SociaVault — fetch client social feed for visual style reference (one-time per brand)
+    SOCIAVAULT_API_KEY: str = ""
+    SOCIAVAULT_BASE_URL: str = "https://api.sociavault.com"
+
     META_APP_ID: str = ""
     META_APP_SECRET: str = ""
     META_ACCESS_TOKEN: str = ""

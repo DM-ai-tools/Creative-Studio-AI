@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -99,6 +100,66 @@ async def update_brand(
     db: AsyncSession = Depends(get_db),
 ):
     return await BrandService.update_brand(db, brand_id, current_user.tenant_id, data)
+
+
+class FetchSocialStyleRequest(BaseModel):
+    handle_or_url: str = Field(..., min_length=2, description="Instagram/Facebook URL or @handle")
+    platform: str = Field(default="", description="instagram | facebook — auto-detected from URL if empty")
+
+
+class FetchSocialStyleResponse(BaseModel):
+    brand_id: str
+    social_style_profile: dict
+    message: str = "Social style saved to Brand Kit for AI image prompts."
+
+
+@router.post("/{brand_id}/fetch-social-style", response_model=FetchSocialStyleResponse)
+async def fetch_brand_social_style(
+    brand_id: UUID,
+    data: FetchSocialStyleRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    One-time SociaVault fetch: pull public posts from Instagram/Facebook,
+    analyze visual ad style, store in brand.voice_rules.social_style_profile.
+    """
+    from app.services.social_style_service import fetch_and_analyze_social_style
+    from app.services.usage_tracker import record_sociavault
+
+    brand = await BrandService.get_brand(db, brand_id, current_user.tenant_id)
+    try:
+        profile = await fetch_and_analyze_social_style(
+            platform=data.platform,
+            handle_or_url=data.handle_or_url.strip(),
+            brand_name=brand.name,
+        )
+    except ValueError as exc:
+        record_sociavault(success=False, error=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        record_sociavault(success=False, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Could not fetch social style: {exc}") from exc
+
+    voice_rules = dict(brand.voice_rules or {})
+    voice_rules["social_style_profile"] = profile
+    voice_rules["social_style_fetched_at"] = profile.get("fetched_at")
+    updated = await BrandService.update_brand(
+        db,
+        brand_id,
+        current_user.tenant_id,
+        BrandUpdate(voice_rules=voice_rules),
+    )
+    record_sociavault(
+        success=True,
+        platform=str(profile.get("platform") or ""),
+        handle=str(profile.get("handle") or ""),
+        post_count=int(profile.get("post_count_analyzed") or 0),
+    )
+    return FetchSocialStyleResponse(
+        brand_id=str(updated.id),
+        social_style_profile=profile,
+    )
 
 
 @router.delete("/{brand_id}", status_code=204)

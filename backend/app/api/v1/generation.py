@@ -489,6 +489,10 @@ class IcpImagePlanRequest(BaseModel):
     secondary_color: str = Field(default="", description="Brand secondary hex from website / Brand Kit")
     font_heading: str = Field(default="", description="Heading font family from website / Brand Kit")
     font_body: str = Field(default="", description="Body font family from website / Brand Kit")
+    social_style_profile: dict | None = Field(
+        default=None,
+        description="Client social feed visual style (SociaVault) — match their posted ad look.",
+    )
 
 
 class IcpImagePlanResponse(BaseModel):
@@ -534,6 +538,7 @@ async def icp_image_plan(
         secondary_color=data.secondary_color,
         font_heading=data.font_heading,
         font_body=data.font_body,
+        social_style_profile=data.social_style_profile,
     )
     return IcpImagePlanResponse(**result)
 

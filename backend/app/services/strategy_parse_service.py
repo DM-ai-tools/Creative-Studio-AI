@@ -285,6 +285,46 @@ def _map_angle(raw: str) -> str:
     return ""
 
 
+def _normalize_parsed_product_focus(raw: str, prompt: str = "") -> str:
+    """Map an LLM-returned product_focus string to one of our canonical values.
+
+    Also performs a lightweight heuristic on the visual prompt text so that
+    even if the LLM omits the field, obvious graphic / stat cards get
+    'product_only' and person-centric concepts get 'with_person'.
+    """
+    v = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if v in {"product_only", "product_alone", "product_hero", "catalog", "solo"}:
+        return "product_only"
+    if v in {"product_with_person", "product_and_person", "product_lifestyle", "product_hero_person"}:
+        return "product_with_person"
+    if v in {"with_person", "with_model", "with_people", "lifestyle_person", "person"}:
+        return "with_person"
+    # Heuristic fallback from prompt text when LLM left it blank.
+    p = (prompt or "").lower()
+    if v == "" and p:
+        _graphic_signals = (
+            "graphic", "icon", "badge", "stat", "number", "clean background",
+            "white background", "minimal", "3 steps", "3-step", "process card",
+            "logo", "wordmark",
+        )
+        _person_hero_signals = (
+            "couple", "jeweller", "jeweler", "consultation", "boutique",
+            "sitting across", "person", "people", "model", "woman", "man",
+            "homeowner", "technician", "tradie", "customer", "client",
+        )
+        _product_lifestyle_signals = (
+            "hand", "ring on", "wearing", "wrist", "collarbone", "finger",
+            "necklace on", "bracelet on", "held by", "in hand",
+        )
+        if any(s in p for s in _product_lifestyle_signals):
+            return "product_with_person"
+        if any(s in p for s in _person_hero_signals):
+            return "with_person"
+        if any(s in p for s in _graphic_signals):
+            return "product_only"
+    return ""
+
+
 def _normalize_variant(item: dict[str, Any], fallback_cta: str, fallback_offer: str) -> dict[str, Any]:
     fmt = _normalize_format(str(item.get("format") or "static")) or "static"
     angle = _map_angle(str(item.get("ad_angle") or item.get("theme") or ""))
@@ -303,6 +343,8 @@ def _normalize_variant(item: dict[str, Any], fallback_cta: str, fallback_offer: 
     if "cta" in item:
         cta_val = str(item.get("cta") or "").strip()[:80]
     else:
+        cta_val = ""
+    if not cta_val:
         cta_val = str(fallback_cta or "").strip()[:80]
     return {
         "id": str(item.get("id") or "").strip(),
@@ -327,6 +369,7 @@ def _normalize_variant(item: dict[str, Any], fallback_cta: str, fallback_offer: 
         "product_name": str(item.get("product_name") or item.get("product") or "").strip()[:120],
         "post_type": str(item.get("post_type") or "").strip()[:80],
         "design_notes": str(item.get("design_notes") or "").strip()[:1200],
+        "product_focus": _normalize_parsed_product_focus(str(item.get("product_focus") or ""), prompt),
     }
 
 
@@ -983,6 +1026,109 @@ def _extract_organic_posts_from_markdown(markdown: str) -> list[dict[str, Any]]:
     return variants
 
 
+_EDM_SECTION_RE = re.compile(
+    r"(?im)^\*\*(?P<title>.+?)\s+EDM\s+(?P<num>\d+)\s*/\s*(?P<total>\d+)\*\*\s*$"
+)
+
+
+def _extract_md_table_field(section: str, field: str) -> str:
+    """Read a value from markdown table rows like | **CTA button:** | SHOP NOW |."""
+    patterns = (
+        rf"(?im)\|\s*\*\*{re.escape(field)}:?\*\*\s*\|\s*(?P<val>[^|\n]+?)\s*\|",
+        rf"(?im)\*\*{re.escape(field)}:?\*\*\s*\|\s*(?P<val>[^|\n]+?)\s*\|",
+    )
+    for pat in patterns:
+        m = re.search(pat, section or "")
+        if not m:
+            continue
+        val = _clean_md_block(m.group("val"))
+        if val and not val.lower().startswith("[insert"):
+            return val[:120]
+    inline = re.search(rf"(?i)\b{re.escape(field)}\s*:?\s*(?P<val>[^\n|]+)", section or "")
+    if inline:
+        val = _clean_md_block(inline.group("val"))
+        if val and not val.lower().startswith("[insert"):
+            return val[:120]
+    return ""
+
+
+def _map_edm_angle(purpose: str, banner: str) -> str:
+    hay = f"{purpose} {banner}".lower()
+    if any(k in hay for k in ("trust", "authority", "thousands", "rated")):
+        return "social_proof"
+    if any(k in hay for k in ("replenish", "restock", "running low", "stock")):
+        return "offer_urgency"
+    if any(k in hay for k in ("spotlight", "hero product", "back in stock")):
+        return "product_hero"
+    if any(k in hay for k in ("industry", "hospitality", "school", "medical", "office")):
+        return "educational"
+    return "social_proof"
+
+
+def _extract_edms_from_markdown(markdown: str) -> list[dict[str, Any]]:
+    """
+    Deterministic parse for client EDM calendars, e.g. Bulk Buys August 2026 EDM 1/12 … 12/12.
+    Each EDM becomes one static variant with its own CTA button from the MD table.
+    """
+    text = markdown or ""
+    headers = list(_EDM_SECTION_RE.finditer(text))
+    if len(headers) < 2:
+        return []
+
+    variants: list[dict[str, Any]] = []
+    for hi, hm in enumerate(headers):
+        edm_n = int(hm.group("num"))
+        edm_total = int(hm.group("total"))
+        start = hm.end()
+        end = headers[hi + 1].start() if hi + 1 < len(headers) else len(text)
+        section = text[start:end]
+
+        banner = _extract_md_table_field(section, "Banner text")
+        subject = _extract_md_table_field(section, "Subject line")
+        preview = _extract_md_table_field(section, "Preview line")
+        purpose = _extract_md_table_field(section, "Purpose")
+        body = _extract_md_table_field(section, "Body copy")
+        cta = _extract_md_table_field(section, "CTA button") or _extract_md_table_field(section, "CTA")
+        if not cta:
+            body_cta = re.search(r"(?i)\bCTA:\s*(?P<val>[^\n\[]+)", section or "")
+            if body_cta:
+                cta = _clean_md_block(body_cta.group("val"))[:80]
+
+        hook = banner or subject or preview
+        message = purpose or preview or subject or body[:220]
+        image_hook = banner or subject or preview
+        image_headline = preview or subject or banner
+
+        prompt_parts: list[str] = []
+        if purpose:
+            prompt_parts.append(f"PURPOSE: {purpose}")
+        if banner:
+            prompt_parts.append(f"BANNER: {banner}")
+        if body:
+            prompt_parts.append(f"BODY: {body[:800]}")
+        if cta:
+            prompt_parts.append(f"CTA BUTTON (burn on image): {cta}")
+        prompt = "\n\n".join(prompt_parts).strip() or hook
+
+        variants.append(
+            {
+                "id": f"EDM{edm_n}",
+                "format": "static",
+                "ad_angle": _map_edm_angle(purpose, banner),
+                "use_cases": ["hero_product", "lifestyle"],
+                "hook": hook[:240],
+                "message": message[:600],
+                "image_hook": (image_hook or hook)[:80],
+                "image_headline": (image_headline or hook)[:100],
+                "cta": cta[:80],
+                "offer": "",
+                "prompt": prompt[:4000],
+                "reasoning": f"EDM {edm_n}/{edm_total}: {purpose[:140] or subject[:140] or banner[:140]}",
+            }
+        )
+    return variants
+
+
 def _strategy_parse_model() -> str:
     return (
         settings.OPENROUTER_MODEL_STRATEGY_PARSE
@@ -1343,6 +1489,7 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
         raise ValueError("OPENROUTER_API_KEY is not configured")
 
     organic_raw = _extract_organic_posts_from_markdown(text)
+    edm_raw = _extract_edms_from_markdown(text)
     parse_model = _strategy_parse_model()
 
     from app.services.image_prompt_service import _get_openrouter_client
@@ -1369,12 +1516,19 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
         "Each Carousel creative becomes ONE variant PER CARD (Card 1, Card 2, …). "
         "If the doc says 4 creatives × 6 cards, emit ~24 carousel variants — never one collage. "
         "carousel_index is 1-based WITHIN that creative; carousel_total is THAT creative's card count. "
-        "cta is blank on every card except the LAST card of EACH creative "
+        "cta is blank on every CAROUSEL card except the LAST card of EACH creative "
         "(e.g. Creative 1 Card 6 AND Creative 2 Card 6 both get the CTA). "
+        "For STATIC image variants, EVERY variant MUST include its own cta from the document "
+        "(CTA button / CTA row / banner CTA line) — static ads always burn a CTA pill on the image. "
         "variant prompt = copy the document's visual direction / concept verbatim and SHORT "
         "(≤ 160 characters — do not expand into a full image prompt yet). "
         "hook = short on-ad line from the doc (≤ 120 chars); "
         "message = primary text / body copy from the doc (≤ 220 chars). "
+        "product_focus: read the visual concept description and assign one of: "
+        "  'product_only'        — product isolated on clean/studio background, NO people (e.g. graphic, stat card, catalog shot). "
+        "  'product_with_person' — product is the main visual hero (fills most of frame) AND a real person is present adding lifestyle context (e.g. ring on hand, person using product, product worn by model). "
+        "  'with_person'         — person/human is the primary subject, product is visible but secondary (e.g. couple conversation, testimonial face, person-centric lifestyle). "
+        "  ''                    — cannot determine from the visual description (leave blank). "
         "Keep every string compact — large strategy files must still fit in one JSON response.\n"
         "Schema: {\n"
         '  "brand_name": "", "industry": "", "niche": "", "geography": "",\n'
@@ -1386,11 +1540,38 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
         '    "use_cases": ["lifestyle"], "hook": "", "message": "", "image_hook": "",\n'
         '    "image_headline": "", "cta": "", "offer": "", "prompt": "",\n'
         '    "reasoning": "", "creative_type": "photo", "carousel_index": null,\n'
-        '    "carousel_total": null}]\n'
+        '    "carousel_total": null, "product_focus": ""}]\n'
         "}"
     )
 
-    if len(organic_raw) >= 2:
+    if len(edm_raw) >= 2:
+        logger.info(
+            "Strategy MD: detected %s EDM sections — using deterministic parse + Gemini brief metadata",
+            len(edm_raw),
+        )
+        try:
+            data = await _llm_parse_brief_metadata(text, filename=filename)
+        except Exception:
+            logger.exception("Strategy brief metadata LLM failed; using heuristics")
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if not str(data.get("brand_name") or "").strip():
+            m = re.search(r"(?im)^\*\*(Bulk Buys|.+?)\s+EDM", text)
+            if m:
+                data["brand_name"] = _clean_md_block(m.group(1))[:120]
+        if not str(data.get("industry") or "").strip():
+            data["industry"] = "Retail"
+        if not str(data.get("niche") or "").strip():
+            data["niche"] = "Workplace supplies"
+        if not str(data.get("objective_id") or "").strip():
+            data["objective_id"] = "conversions"
+        if not data.get("formats"):
+            data["formats"] = ["static"]
+        if not str(data.get("cta") or "").strip() and edm_raw:
+            data["cta"] = str(edm_raw[0].get("cta") or "").strip()[:80]
+        variants_raw = edm_raw
+    elif len(organic_raw) >= 2:
         logger.info(
             "Strategy MD: detected %s ORGANIC POST sections — using deterministic parse + Gemini brief metadata",
             len(organic_raw),
@@ -1500,8 +1681,10 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
     offer = str(data.get("offer") or "").strip()[:160]
     variants = [_normalize_variant(v, cta, offer) for v in variants_raw if isinstance(v, dict)]
     variants = [v for v in variants if v["prompt"] or v["hook"] or v["message"]]
-    # Prefer deterministic ORGANIC POST / CREATIVE structure over LLM invention.
-    if len(organic_raw) >= 2 and len(organic_raw) >= len(variants):
+    # Prefer deterministic EDM / ORGANIC POST structure over LLM invention.
+    if len(edm_raw) >= 2 and len(edm_raw) >= len(variants):
+        variants = [_normalize_variant(v, cta, offer) for v in edm_raw]
+    elif len(organic_raw) >= 2 and len(organic_raw) >= len(variants):
         variants = [_normalize_variant(v, cta, offer) for v in organic_raw]
     # Prefer MD structure (CREATIVE 1/2/3… each with Card 1..N) over LLM invention.
     variants = _prefer_structured_creatives(text, variants, cta)
@@ -1519,6 +1702,8 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
     # Re-apply per-creative CTA after explode (index==total within each group).
     for v in variants:
         if (v.get("format") or "") != "carousel":
+            if not str(v.get("cta") or "").strip():
+                v["cta"] = cta
             continue
         try:
             idx = int(v.get("carousel_index") or 0)

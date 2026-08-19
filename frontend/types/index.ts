@@ -299,6 +299,8 @@ export interface StrategyVariantPlan {
   product_name?: string
   post_type?: string
   design_notes?: string
+  /** Per-variant shot style detected from the strategy document visual concept. */
+  product_focus?: string
 }
 
 export interface StrategyParseResult {
@@ -347,6 +349,40 @@ export interface BrandFacts {
   do_not_claim?: string[]
   source_summary?: string
   confidence?: string
+}
+
+export interface SocialStyleVisualThemes {
+  color_palette?: string[]
+  layout_patterns?: string[]
+  typography_style?: string
+  image_composition?: string
+  cta_style?: string
+  mood?: string
+  recurring_elements?: string[]
+  avoid?: string[]
+}
+
+export interface SocialStyleProfile {
+  platform?: string
+  handle?: string
+  profile_url?: string
+  fetched_at?: string
+  provider?: string
+  post_count_analyzed?: number
+  sample_image_urls?: string[]
+  visual_themes?: SocialStyleVisualThemes | string[]
+  caption_tone?: string
+  content_mix?: string | Record<string, number>
+  prompt_guidance?: string
+  effective_primary_color?: string
+  effective_secondary_color?: string
+  aesthetic_mode?: 'gold_on_dark' | 'gold_on_white' | string
+  post_summaries?: Array<{
+    caption?: string
+    post_type?: string
+    image_url?: string
+    design_notes?: string
+  }>
 }
 
 export interface WebsiteBrandFetchResult {

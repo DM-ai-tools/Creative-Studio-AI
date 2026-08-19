@@ -18,6 +18,7 @@ import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
 import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
 import {
   emptyImageVariantSlot,
   isCarouselSlot,
@@ -26,6 +27,7 @@ import {
   chunkSlotIndicesForGeneration,
   relatedOnImageLines,
   resizeImageVariantSlots,
+  normalizeProductFocus,
   type ImageVariantSlot,
   type ProductFocusId,
 } from '@/lib/imageUseCases'
@@ -57,7 +59,7 @@ import {
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
 import { assignAnglesToVariants } from '@/lib/adAngles'
-import type { AdFormat, Brand, BrandFacts, CatalogOption, PerformanceStatsContext, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
+import type { AdFormat, Brand, BrandFacts, CatalogOption, PerformanceStatsContext, SocialStyleProfile, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
 
 const schema = z
   .object({
@@ -103,6 +105,143 @@ function brandFactsFromVoiceRules(voiceRules: unknown): BrandFacts | null {
   const facts = (voiceRules as Record<string, unknown>).brand_facts
   if (!facts || typeof facts !== 'object') return null
   return facts as BrandFacts
+}
+
+function socialStyleFromVoiceRules(voiceRules: unknown): SocialStyleProfile | null {
+  if (!voiceRules || typeof voiceRules !== 'object') return null
+  const profile = (voiceRules as Record<string, unknown>).social_style_profile
+  if (!profile || typeof profile !== 'object') return null
+  return profile as SocialStyleProfile
+}
+
+function summarizeSocialStyle(profile: SocialStyleProfile | null | undefined): string {
+  if (!profile) return ''
+  const bits: string[] = []
+  if (profile.platform && profile.handle) {
+    bits.push(`${profile.platform} @${profile.handle.replace(/^@/, '')}`)
+  }
+  if (profile.prompt_guidance?.trim()) {
+    bits.push(profile.prompt_guidance.trim())
+  }
+  if (profile.post_count_analyzed != null) {
+    bits.push(`${profile.post_count_analyzed} posts analyzed`)
+  }
+  return bits.join(' · ')
+}
+
+const SOCIAL_NAMED_COLORS: Record<string, string> = {
+  black: '#0A0A0A',
+  dark: '#0A0A0A',
+  charcoal: '#1A1A1A',
+  gold: '#C9A962',
+  golden: '#C9A962',
+  champagne: '#D4AF37',
+  bronze: '#B8860B',
+  white: '#FFFFFF',
+  navy: '#0F1B3D',
+  blue: '#2563EB',
+}
+
+function normalizeSocialHex(value: string | undefined): string {
+  const raw = (value || '').trim()
+  if (/^#[0-9A-Fa-f]{6}$/.test(raw)) return raw.toUpperCase()
+  const match = raw.match(/#[0-9A-Fa-f]{6}/)
+  return match ? match[0].toUpperCase() : ''
+}
+
+function parseSocialColorToken(token: string): string {
+  const hex = normalizeSocialHex(token)
+  if (hex) return hex
+  const lower = token.toLowerCase()
+  for (const [name, namedHex] of Object.entries(SOCIAL_NAMED_COLORS)) {
+    if (lower.includes(name)) return namedHex
+  }
+  return ''
+}
+
+function isDarkSocialHex(value: string): boolean {
+  const hex = normalizeSocialHex(value)
+  if (!hex) return false
+  if (['#0A0A0A', '#000000', '#1A1A1A', '#111111', '#0F0F0F'].includes(hex)) return true
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return 0.299 * r + 0.587 * g + 0.114 * b < 70
+}
+
+function isGoldSocialColor(value: string): boolean {
+  const lower = value.toLowerCase()
+  return ['gold', 'champagne', 'bronze', 'gilded'].some((k) => lower.includes(k))
+}
+
+function resolveSocialStyleColors(profile: SocialStyleProfile | null | undefined): {
+  cta: string
+  background: string
+} {
+  if (!profile) return { cta: '', background: '' }
+
+  let cta = normalizeSocialHex(profile.effective_primary_color)
+  let background = normalizeSocialHex(profile.effective_secondary_color)
+  if (cta || background) return { cta, background }
+
+  const themes = profile.visual_themes
+  const paletteRaw = Array.isArray(themes)
+    ? themes
+    : themes && typeof themes === 'object' && Array.isArray(themes.color_palette)
+      ? themes.color_palette
+      : []
+
+  const parsed = paletteRaw.map((item) => parseSocialColorToken(String(item))).filter(Boolean)
+  const guidance = [
+    profile.prompt_guidance || '',
+    themes && typeof themes === 'object' && !Array.isArray(themes) ? themes.typography_style || '' : '',
+    themes && typeof themes === 'object' && !Array.isArray(themes) ? themes.cta_style || '' : '',
+    paletteRaw.join(' '),
+  ]
+    .join(' ')
+    .toLowerCase()
+
+  if (
+    guidance.includes('black and gold') ||
+    guidance.includes('black & gold') ||
+    guidance.includes('gold on black') ||
+    guidance.includes('black background')
+  ) {
+    cta = cta || '#C9A962'
+    background = background || '#0A0A0A'
+  }
+
+  for (const color of parsed) {
+    if (isGoldSocialColor(color) || ['#C9A962', '#D4AF37', '#B8860B'].includes(color)) {
+      cta = cta || color
+    } else if (isDarkSocialHex(color)) {
+      background = background || color
+    } else if (color !== '#FFFFFF' && !cta) {
+      cta = color
+    } else if (!background) {
+      background = color
+    }
+  }
+
+  return { cta, background }
+}
+
+function socialStyleAestheticLabel(profile: SocialStyleProfile | null | undefined): string {
+  if (!profile) return ''
+  const mode = (profile.aesthetic_mode || '').toLowerCase()
+  if (mode === 'gold_on_dark') return 'Gold on dark'
+  if (mode === 'gold_on_white') return 'Gold on white'
+  const colors = resolveSocialStyleColors(profile)
+  if (colors.cta && colors.background === '#0A0A0A') return 'Gold on dark'
+  if (colors.cta && colors.background === '#FFFFFF') return 'Gold on white'
+  if (colors.cta && colors.background) return 'Gold accent'
+  return ''
+}
+
+function hasSocialStyleSummary(profile: SocialStyleProfile | null | undefined): boolean {
+  if (!profile) return false
+  const colors = resolveSocialStyleColors(profile)
+  return Boolean(summarizeSocialStyle(profile) || colors.cta || colors.background)
 }
 
 function summarizeBrandFacts(facts: BrandFacts | null | undefined): string {
@@ -300,7 +439,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     ttlMs: API_CACHE_TTL.catalog,
   })
 
-  const [mediaType, setMediaType] = useState<'image' | 'video'>('image')
+  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio'>('image')
   const [imageVariantSlots, setImageVariantSlots] = useState<ImageVariantSlot[]>([
     emptyImageVariantSlot(),
     emptyImageVariantSlot(),
@@ -316,6 +455,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
   const [websiteBrand, setWebsiteBrand] = useState<WebsiteBrandFetchResult | null>(null)
   const [fetchingWebsiteBrand, setFetchingWebsiteBrand] = useState(false)
+  const [socialHandleUrl, setSocialHandleUrl] = useState('')
+  const [fetchingSocialStyle, setFetchingSocialStyle] = useState(false)
   const [strategyParsed, setStrategyParsed] = useState<StrategyParseResult | null>(null)
   const [parsingStrategy, setParsingStrategy] = useState(false)
   const [strategyFileName, setStrategyFileName] = useState('')
@@ -443,7 +584,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const websiteUrlField = watch('website_url')
 
   useEffect(() => {
-    if (mediaType !== 'image') return
+    if (mediaType !== 'image' && mediaType !== 'creative_studio') return
+    if (mediaType === 'creative_studio') return
     setImageVariantSlots((prev) =>
       resizeImageVariantSlots(prev, Number(targetVariantCount) || 1)
     )
@@ -499,6 +641,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     if (websiteBrand?.brand_facts) return websiteBrand.brand_facts
     return brandFactsFromVoiceRules(selectedBrand?.voice_rules)
   }, [websiteBrand, selectedBrand])
+
+  const resolvedSocialStyle: SocialStyleProfile | null = useMemo(() => {
+    return socialStyleFromVoiceRules(selectedBrand?.voice_rules)
+  }, [selectedBrand])
+
+  const resolvedSocialStyleColors = useMemo(
+    () => resolveSocialStyleColors(resolvedSocialStyle),
+    [resolvedSocialStyle]
+  )
+
+  useEffect(() => {
+    const profile = socialStyleFromVoiceRules(selectedBrand?.voice_rules)
+    if (profile?.profile_url) {
+      setSocialHandleUrl(profile.profile_url)
+    } else if (profile?.handle) {
+      setSocialHandleUrl(profile.handle.startsWith('@') ? profile.handle : `@${profile.handle}`)
+    }
+  }, [selectedBrand?.id])
 
   const resolvedBrandVisuals = useMemo(() => {
     const voiceRules = (selectedBrand?.voice_rules || {}) as Record<string, unknown>
@@ -696,6 +856,47 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }
   }
 
+  const handleFetchSocialStyle = async () => {
+    const brandId = (watch('brand_id') || selectedBrand?.id || '').trim()
+    const handleOrUrl = socialHandleUrl.trim()
+    if (!brandId) {
+      toast.error('Select or fetch a brand first (website fetch saves to Brand Kit).')
+      return
+    }
+    if (handleOrUrl.length < 2) {
+      toast.error('Enter an Instagram or Facebook URL or @handle')
+      return
+    }
+    setFetchingSocialStyle(true)
+    try {
+      const result = await brandsApi.fetchSocialStyle(brandId, { handle_or_url: handleOrUrl })
+      patchApiCache<Brand[]>('brands', (current) => {
+        const prior = current ?? brands ?? []
+        const idx = prior.findIndex((b) => b.id === brandId)
+        if (idx < 0) return prior
+        const voiceRules = {
+          ...((prior[idx].voice_rules as Record<string, unknown>) || {}),
+          social_style_profile: result.social_style_profile,
+          social_style_fetched_at: result.social_style_profile.fetched_at,
+        }
+        const next = [...prior]
+        next[idx] = { ...prior[idx], voice_rules: voiceRules }
+        return next
+      })
+      await refetchBrands({ background: true })
+      const posts = result.social_style_profile.post_count_analyzed ?? 0
+      toast.success(
+        posts > 0
+          ? `Social style saved — ${posts} posts analyzed for image prompts`
+          : 'Social style saved to Brand Kit'
+      )
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not fetch social style')
+    } finally {
+      setFetchingSocialStyle(false)
+    }
+  }
+
   const handleParseStrategy = async (file: File) => {
     const lower = file.name.toLowerCase()
     const allowed = ['.md', '.txt', '.markdown', '.doc', '.docx']
@@ -782,6 +983,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           image_hook: photoOnly ? '' : (v.image_hook || '').trim(),
           image_headline: photoOnly ? '' : (v.image_headline || '').trim(),
           product_model: (v.product_name || '').trim() || undefined,
+          product_focus: normalizeProductFocus(v.product_focus) || undefined,
           prompt: (v.prompt || '').trim(),
           reasoning: (v.reasoning || '').trim(),
         }
@@ -864,7 +1066,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   }, [wantsVideo, wantsImageOnly])
 
   // When user picks Image → force static/carousel formats; when Video → keep what they had or default to reel
+  // Creative Studio tab is a standalone panel — don't touch formats.
   useEffect(() => {
+    if (mediaType === 'creative_studio') return
     if (mediaType === 'image') {
       const fmts = watch('formats') ?? []
       const imageFmts = fmts.filter((f) => !isVideoFormat(f))
@@ -1063,7 +1267,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       photo_only: Boolean(slot.photo_only && !slot.retail_promo && !src?.retail_promo),
       retail_promo: Boolean(slot.retail_promo || src?.retail_promo),
       aspect_ratio: slot.aspect_ratio || src?.aspect_ratio || undefined,
-      product_focus: imageProductFocus || slot.product_focus || undefined,
+      product_focus: slot.product_focus || imageProductFocus || undefined,
       cta: (slot.cta || src?.cta || '').trim(),
     }
   }
@@ -1101,10 +1305,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
         geography: (d.geography ?? '').trim() || undefined,
         brand_facts: resolvedBrandFacts ?? undefined,
-        product_focus: imageProductFocus || undefined,
+        social_style_profile: resolvedSocialStyle ?? undefined,
+        product_focus: (slot.product_focus || imageProductFocus) || undefined,
         ...resolvedBrandVisuals,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
-        hook_frameworks: catalogShot
+        hook_frameworks: (slot.product_focus || imageProductFocus) === 'product_only'
           ? []
           : slotAngle
             ? [slotAngle]
@@ -1218,7 +1423,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       for (let ci = 0; ci < chunks.length; ci++) {
         const indices = chunks[ci]
         const chunkAngle = variantAngleAssignments[indices[0]]
-        const catalogShot = imageProductFocus === 'product_only'
+        const chunkSlot = slots[indices[0]]
+        const chunkEffectiveFocus = chunkSlot?.product_focus || imageProductFocus || ''
+        const catalogShot = chunkEffectiveFocus === 'product_only'
         if (chunks.length > 1) {
           toast.loading(
             `Batch ${ci + 1}/${chunks.length} — ${indices.length} card${indices.length !== 1 ? 's' : ''}…`,
@@ -1239,7 +1446,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           offer: imageCampaignOffer.trim() || undefined,
           geography: (d.geography ?? '').trim() || undefined,
           brand_facts: resolvedBrandFacts ?? undefined,
-          product_focus: imageProductFocus || undefined,
+          social_style_profile: resolvedSocialStyle ?? undefined,
+          product_focus: chunkEffectiveFocus || undefined,
           ...resolvedBrandVisuals,
           image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
           hook_frameworks: catalogShot
@@ -1611,6 +1819,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   photo_only: s.photo_only || undefined,
                   retail_promo: s.retail_promo || undefined,
                   aspect_ratio: s.aspect_ratio || undefined,
+                  product_focus: s.product_focus || undefined,
+                  product_model: s.product_model?.trim() || undefined,
                   generated_at: s.generated_at ?? undefined,
                 })),
                 ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
@@ -1736,7 +1946,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-charcoal tracking-tight">Create Brief</h1>
           <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full">
-            {mediaType === 'image' ? 'Image' : 'Video'}
+            {mediaType === 'image' ? 'Image' : mediaType === 'video' ? 'Video' : 'Creative Studio'}
           </span>
         </div>
         <Button type="submit" form="brief-form" variant="outline" size="sm" disabled={isSubmitting}>
@@ -1744,25 +1954,31 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         </Button>
       </header>
 
-      {/* Image / Video tabs */}
+      {/* Image / Video / Creative Studio tabs */}
       <div className="sticky top-[65px] z-10 border-b border-border bg-white/90 backdrop-blur-md">
         <div className="w-full max-w-[1600px] mx-auto px-6 md:px-8 flex gap-1">
           {([
-            { id: 'image' as const, label: 'Image', hint: 'Static & carousel ads' },
-            { id: 'video' as const, label: 'Video', hint: 'Portrait & landscape' },
+            { id: 'image' as const,            label: 'Image',           hint: 'Static & carousel ads' },
+            { id: 'video' as const,            label: 'Video',           hint: 'Portrait & landscape' },
+            { id: 'creative_studio' as const,  label: 'Creative Studio', hint: 'Cinematic scene builder', badge: 'NEW' },
           ]).map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setMediaType(tab.id)}
-              className={`relative px-5 py-3 text-sm font-semibold transition-colors ${
+              className={`relative flex items-center gap-1.5 px-5 py-3 text-sm font-semibold transition-colors ${
                 mediaType === tab.id
                   ? 'text-charcoal'
                   : 'text-mid hover:text-charcoal'
               }`}
             >
               {tab.label}
-              <span className="hidden sm:inline text-mid font-normal text-[11px] ml-1.5">
+              {'badge' in tab && tab.badge && (
+                <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-accent/15 text-accent border border-accent/20 leading-none">
+                  {tab.badge}
+                </span>
+              )}
+              <span className="hidden sm:inline text-mid font-normal text-[11px] ml-0.5">
                 · {tab.hint}
               </span>
               {mediaType === tab.id && (
@@ -1773,10 +1989,14 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         </div>
       </div>
 
+      {mediaType === 'creative_studio' && (
+        <CreativeStudioTab />
+      )}
+
       <form
         id="brief-form"
         onSubmit={handleSubmit(onSubmit, onInvalid)}
-        className="w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4"
+        className={`w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4 ${mediaType === 'creative_studio' ? 'hidden' : ''}`}
       >
         <div className="space-y-4">
           {brandSource === 'brand' && !hasBrands && (
@@ -2000,6 +2220,111 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 <p className="text-[10px] text-mid">
                   These facts feed ICP + image prompts. Missing items will not be invented in ad copy.
                 </p>
+              </div>
+            )}
+
+            {(watch('brand_id') || selectedBrand) && (
+              <div className="rounded-xl border border-border bg-surface-elevated/80 p-3 space-y-2">
+                <p className="text-xs font-bold text-navy uppercase tracking-wide">
+                  Social media visual style
+                </p>
+                <p className="text-[10px] text-mid">
+                  One-time fetch from Instagram or Facebook — saved to Brand Kit and used when AI writes
+                  image prompts so generated ads match how the client posts on social.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+                  <div className="flex-1">
+                    <Input
+                      label="Instagram / Facebook"
+                      placeholder="@handle or https://instagram.com/brand"
+                      value={socialHandleUrl}
+                      onChange={(e) => setSocialHandleUrl(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 mb-0.5"
+                    isLoading={fetchingSocialStyle}
+                    onClick={() => void handleFetchSocialStyle()}
+                  >
+                    Fetch social style
+                  </Button>
+                </div>
+                {resolvedSocialStyle && hasSocialStyleSummary(resolvedSocialStyle) && (
+                  <div className="rounded-lg border border-accent/20 bg-accent/5 p-2.5 space-y-2">
+                    <p className="text-[11px] font-semibold text-charcoal">
+                      Saved style reference
+                      {resolvedSocialStyle.fetched_at ? (
+                        <span className="ml-1 font-normal text-mid">
+                          · {new Date(resolvedSocialStyle.fetched_at).toLocaleDateString()}
+                        </span>
+                      ) : null}
+                    </p>
+                    {summarizeSocialStyle(resolvedSocialStyle) ? (
+                      <p className="text-[11px] text-charcoal leading-relaxed">
+                        {summarizeSocialStyle(resolvedSocialStyle)}
+                      </p>
+                    ) : null}
+                    {(resolvedSocialStyleColors.cta || resolvedSocialStyleColors.background) && (
+                      <div className="rounded-md border border-border/60 bg-white/70 p-2 space-y-1.5">
+                        <p className="text-[10px] font-semibold text-navy uppercase tracking-wide">
+                          Colours AI will use
+                          {socialStyleAestheticLabel(resolvedSocialStyle) ? (
+                            <span className="ml-2 normal-case tracking-normal text-accent font-bold">
+                              · {socialStyleAestheticLabel(resolvedSocialStyle)}
+                            </span>
+                          ) : null}
+                        </p>
+                        <p className="text-[10px] text-mid leading-relaxed">
+                          From social feed — overrides Brand Kit website colours when they differ.
+                        </p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-2">
+                          {resolvedSocialStyleColors.cta ? (
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className="w-6 h-6 shrink-0 rounded-full border border-border shadow-sm"
+                                style={{ background: resolvedSocialStyleColors.cta }}
+                                title={resolvedSocialStyleColors.cta}
+                              />
+                              <span className="text-[10px] text-charcoal">
+                                CTA &amp; headline ·{' '}
+                                <span className="font-mono">{resolvedSocialStyleColors.cta}</span>
+                              </span>
+                            </div>
+                          ) : null}
+                          {resolvedSocialStyleColors.background ? (
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className="w-6 h-6 shrink-0 rounded-full border border-border shadow-sm"
+                                style={{ background: resolvedSocialStyleColors.background }}
+                                title={resolvedSocialStyleColors.background}
+                              />
+                              <span className="text-[10px] text-charcoal">
+                                Background ·{' '}
+                                <span className="font-mono">{resolvedSocialStyleColors.background}</span>
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                        {resolvedBrandVisuals.primary_color &&
+                        resolvedSocialStyleColors.cta &&
+                        normalizeSocialHex(resolvedBrandVisuals.primary_color) &&
+                        normalizeSocialHex(resolvedBrandVisuals.primary_color) !==
+                          resolvedSocialStyleColors.cta ? (
+                          <p className="text-[10px] text-mid">
+                            Brand Kit website colour{' '}
+                            <span className="font-mono">
+                              {normalizeSocialHex(resolvedBrandVisuals.primary_color)}
+                            </span>{' '}
+                            is ignored for image prompts — social feed palette wins.
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
