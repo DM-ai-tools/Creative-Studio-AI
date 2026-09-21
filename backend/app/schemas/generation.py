@@ -12,6 +12,10 @@ class GenerationModelOption(BaseModel):
     # Optional: when video, cost is cost_usd * duration seconds.
     cost_unit: str | None = None  # "image" | "second" | None
     estimated_seconds: int | None = None
+    # Provider-style credits (Higgsfield-like). Video = per second; image = per still.
+    credits: float | None = None
+    # Longest one-shot video (seconds) without multi-clip stitch.
+    max_duration_seconds: int | None = None
 
 
 class CatalogOption(BaseModel):
@@ -29,6 +33,7 @@ class GenerationCatalogResponse(BaseModel):
     copy_models: list[GenerationModelOption]
     image_models: list[GenerationModelOption]
     video_models: list[GenerationModelOption]
+    prompt_llm_models: list[GenerationModelOption] = []
     heygen_avatar_options: list[CatalogOption] = []
     """Standalone public looks (e.g. Vespri) — not Sofia/Florin pose libraries."""
     heygen_avatar_featured: list[CatalogOption] = []

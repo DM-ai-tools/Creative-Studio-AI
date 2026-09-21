@@ -13,12 +13,14 @@ import Select from '@/components/ui/Select'
 import TextArea from '@/components/ui/TextArea'
 import { ChipToggle, ChipToggleGroup } from '@/components/ui/ChipToggle'
 import BriefSection from '@/components/brief/BriefSection'
+import ReferenceImagesPanel from '@/components/brief/ReferenceImagesPanel'
 import AdAngleSelector from '@/components/brief/AdAngleSelector'
 import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
 import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
 import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
+import HeroAiImageTab from '@/components/brief/HeroAiImageTab'
 import {
   emptyImageVariantSlot,
   isCarouselSlot,
@@ -31,6 +33,7 @@ import {
   type ImageVariantSlot,
   type ProductFocusId,
 } from '@/lib/imageUseCases'
+import { IMAGE_VISUAL_STYLE_OPTIONS, type ImageVisualStyleId } from '@/lib/imageVisualStyles'
 import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCard'
 import { findVespriAvatar, HEYGEN_VESPRI_AVATAR_ID } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
@@ -59,7 +62,21 @@ import {
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
 import { assignAnglesToVariants } from '@/lib/adAngles'
-import type { AdFormat, Brand, BrandFacts, CatalogOption, PerformanceStatsContext, SocialStyleProfile, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
+import type { AdFormat, Brand, BrandFacts, BrandKit, BriefReferenceImage, CatalogOption, CompetitorCandidate, CompetitorSocialInsight, PerformanceStatsContext, SocialStyleProfile, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
+import {
+  buildCompetitorCandidateOptions,
+  buildSavedCompetitorOptions,
+  buildSavedSocialAccountOptions,
+  candidateInputValue,
+  competitorAccountLabel,
+  competitorCandidatesFromBrand,
+  competitorInputValue,
+  competitorInsightsFromBrand,
+  socialStyleAccountLabel,
+  socialStyleFromBrand,
+  socialStyleInputValue,
+  summarizeCompetitorInsight,
+} from '@/lib/socialStyle'
 
 const schema = z
   .object({
@@ -426,10 +443,9 @@ function PillRadio({
   )
 }
 
-export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
+export default function BriefComposer(_props: BriefComposerProps) {
   const router = useRouter()
   const { activeBrandId, setActiveBrandId } = useActiveBrand()
-  const preferredBrandId = defaultBrandId || activeBrandId || undefined
   const { data: brands, refetch: refetchBrands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands',
     ttlMs: API_CACHE_TTL.brands,
@@ -439,7 +455,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     ttlMs: API_CACHE_TTL.catalog,
   })
 
-  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio'>('image')
+  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio' | 'hero_ai_image'>('image')
   const [imageVariantSlots, setImageVariantSlots] = useState<ImageVariantSlot[]>([
     emptyImageVariantSlot(),
     emptyImageVariantSlot(),
@@ -451,16 +467,30 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const [imageCampaignHook, setImageCampaignHook] = useState('')
   const [imageCampaignHeadline, setImageCampaignHeadline] = useState('')
   const [imageProductFocus, setImageProductFocus] = useState<ProductFocusId | ''>('')
+  const [imageVisualStyle, setImageVisualStyle] = useState<ImageVisualStyleId>('')
   const [suggestingAngles, setSuggestingAngles] = useState(false)
   const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
   const [websiteBrand, setWebsiteBrand] = useState<WebsiteBrandFetchResult | null>(null)
   const [fetchingWebsiteBrand, setFetchingWebsiteBrand] = useState(false)
+  const [brandSearch, setBrandSearch] = useState('')
   const [socialHandleUrl, setSocialHandleUrl] = useState('')
+  const [briefSocialStyle, setBriefSocialStyle] = useState<SocialStyleProfile | null>(null)
   const [fetchingSocialStyle, setFetchingSocialStyle] = useState(false)
+  const [competitorHandleUrl, setCompetitorHandleUrl] = useState('')
+  const [useCompetitorInsights, setUseCompetitorInsights] = useState(false)
+  const [fetchingCompetitor, setFetchingCompetitor] = useState(false)
+  const [discoveringCompetitors, setDiscoveringCompetitors] = useState(false)
+  const [selectedBrandKit, setSelectedBrandKit] = useState<BrandKit | null>(null)
+  const [selectedSocialAccountKey, setSelectedSocialAccountKey] = useState('')
+  const [socialAccountModeNew, setSocialAccountModeNew] = useState(false)
+  const [selectedCompetitorKey, setSelectedCompetitorKey] = useState('')
+  const [competitorModeNew, setCompetitorModeNew] = useState(true)
   const [strategyParsed, setStrategyParsed] = useState<StrategyParseResult | null>(null)
   const [parsingStrategy, setParsingStrategy] = useState(false)
   const [strategyFileName, setStrategyFileName] = useState('')
   const [strategyFilePending, setStrategyFilePending] = useState<File | null>(null)
+  const [briefReferenceImages, setBriefReferenceImages] = useState<BriefReferenceImage[]>([])
+  const [exactProductReference, setExactProductReference] = useState(false)
   const [imageRatio, setImageRatio] = useState<string>('1:1')
   const [imageRatioCustom, setImageRatioCustom] = useState<string>('')
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings>({
@@ -471,6 +501,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     heygenAvatarId: '',
     heygenVoiceId: '',
     higgsfieldVoicePreset: 'serene_female',
+    promptLlmModel: '',
   })
   const [heygenSettings, setHeygenSettings] = useState<HeyGenVideoSettings>(defaultHeyGenSettings())
   const [approvedAvatarScript, setApprovedAvatarScript] = useState<string | null>(null)
@@ -512,7 +543,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   } = useForm<FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
-      brand_id: preferredBrandId ?? '',
+      // A new brief must start without inheriting the previously active brand.
+      // The user must search for and select a brand explicitly.
+      brand_id: '',
       title: '',
       niche: '',
       brand_source: 'brand',
@@ -529,16 +562,6 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   })
 
   const watchedBrandId = watch('brand_id')
-
-  useEffect(() => {
-    if (defaultBrandId) {
-      setValue('brand_id', defaultBrandId)
-      return
-    }
-    if (!(watchedBrandId || '').trim() && preferredBrandId) {
-      setValue('brand_id', preferredBrandId)
-    }
-  }, [defaultBrandId, preferredBrandId, watchedBrandId, setValue])
 
   useEffect(() => {
     if (!catalog) return
@@ -566,6 +589,11 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         prev.higgsfieldVoicePreset ||
         catalog.higgsfield_voice_options?.[0]?.id ||
         'serene_female',
+      promptLlmModel:
+        prev.promptLlmModel ||
+        catalog.prompt_llm_models?.find((m) => m.label.includes('(default)'))?.id ||
+        catalog.prompt_llm_models?.[0]?.id ||
+        '',
     }))
   }, [catalog, setValue, watch])
 
@@ -636,29 +664,204 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
   const brandOptions = (brands ?? []).map((brand) => ({ value: brand.id, label: brand.name }))
   const hasBrands = brandOptions.length > 0
   const selectedBrand = (brands ?? []).find((brand) => brand.id === watch('brand_id'))
+  const currentReferenceContext = {
+    brand_id: (watch('brand_id') || '').trim(),
+    industry: (watch('title') || '').trim(),
+    niche: (watch('niche') || '').trim(),
+    product_name: (watch('product_name') || '').trim(),
+  }
+
+  // A URL-fetched product is a one-use-case reference. Do not let it leak
+  // into a later niche, product, industry, or brand context in this brief.
+  useEffect(() => {
+    setBriefReferenceImages((previous) => {
+      const next = previous.filter((ref) => {
+        // Legacy URL references have no context metadata, so they are unsafe
+        // to carry into another use case and are removed from active refs.
+        if (ref.is_product_reference && !ref.product_reference_context) return false
+        if (!ref.is_product_reference || !ref.product_reference_context) return true
+        const saved = ref.product_reference_context
+        return (
+          (saved.brand_id || '') === currentReferenceContext.brand_id &&
+          (saved.industry || '') === currentReferenceContext.industry &&
+          (saved.niche || '') === currentReferenceContext.niche &&
+          (saved.product_name || '') === currentReferenceContext.product_name
+        )
+      })
+      return next.length === previous.length ? previous : next
+    })
+  }, [
+    currentReferenceContext.brand_id,
+    currentReferenceContext.industry,
+    currentReferenceContext.niche,
+    currentReferenceContext.product_name,
+  ])
+
+  const matchingBrands = useMemo(() => {
+    const query = brandSearch.trim().toLowerCase()
+    if (!query) return []
+    return (brands ?? []).filter((brand) => brand.name.toLowerCase().includes(query))
+  }, [brandSearch, brands])
+
+  useEffect(() => {
+    if (selectedBrand) setBrandSearch(selectedBrand.name)
+  }, [selectedBrand?.id, selectedBrand?.name])
 
   const resolvedBrandFacts: BrandFacts | null = useMemo(() => {
     if (websiteBrand?.brand_facts) return websiteBrand.brand_facts
     return brandFactsFromVoiceRules(selectedBrand?.voice_rules)
   }, [websiteBrand, selectedBrand])
 
-  const resolvedSocialStyle: SocialStyleProfile | null = useMemo(() => {
-    return socialStyleFromVoiceRules(selectedBrand?.voice_rules)
-  }, [selectedBrand])
+  const brandSavedSocialStyle: SocialStyleProfile | null = useMemo(() => {
+    return socialStyleFromBrand(selectedBrand, selectedBrandKit)
+  }, [selectedBrand, selectedBrandKit])
 
-  const resolvedSocialStyleColors = useMemo(
-    () => resolveSocialStyleColors(resolvedSocialStyle),
-    [resolvedSocialStyle]
+  const brandSavedCompetitors: CompetitorSocialInsight[] = useMemo(() => {
+    return competitorInsightsFromBrand(selectedBrand, selectedBrandKit)
+  }, [selectedBrand, selectedBrandKit])
+
+  const brandSavedCompetitorCandidates: CompetitorCandidate[] = useMemo(() => {
+    return competitorCandidatesFromBrand(selectedBrand, selectedBrandKit)
+  }, [selectedBrand, selectedBrandKit])
+
+  const savedSocialAccountOptions = useMemo(() => {
+    const base = buildSavedSocialAccountOptions(brands ?? [])
+    const saved = socialStyleFromBrand(selectedBrand, selectedBrandKit)
+    const brandId = (selectedBrand?.id || '').trim()
+    const handle = (saved?.handle || '').replace(/^@/, '').trim()
+    if (brandId && handle && saved) {
+      const key = `${brandId}::${handle}`
+      if (!base.some((o) => o.value === key)) {
+        base.push({
+          value: key,
+          brandId,
+          profile: saved,
+          label: `${selectedBrand?.name ?? 'Brand'} — ${socialStyleAccountLabel(saved)}`,
+        })
+        base.sort((a, b) => a.label.localeCompare(b.label))
+      }
+    }
+    return base
+  }, [brands, selectedBrand, selectedBrandKit])
+
+  const savedCompetitorOptions = useMemo(
+    () => buildSavedCompetitorOptions(brandSavedCompetitors),
+    [brandSavedCompetitors]
   )
 
+  const competitorCandidateOptions = useMemo(() => {
+    const analyzedKeys = new Set(
+      brandSavedCompetitors.map(
+        (i) =>
+          `${(i.platform || 'social').toLowerCase()}::${(i.handle || '').replace(/^@/, '').trim()}`
+      )
+    )
+    const filtered = brandSavedCompetitorCandidates.filter((c) => {
+      const key = `${(c.platform || 'facebook').toLowerCase()}::${(c.handle || '').replace(/^@/, '').trim()}`
+      return key !== '::' && !analyzedKeys.has(key)
+    })
+    return buildCompetitorCandidateOptions(filtered)
+  }, [brandSavedCompetitorCandidates, brandSavedCompetitors])
+
+  const allCompetitorDropdownOptions = useMemo(
+    () => [
+      ...competitorCandidateOptions.map((o) => ({ value: o.value, label: o.label })),
+      ...savedCompetitorOptions.map((o) => ({ value: o.value, label: o.label })),
+      { value: '__new__', label: '+ Analyze new competitor manually…' },
+    ],
+    [competitorCandidateOptions, savedCompetitorOptions]
+  )
+
+  const selectedSavedSocialAccount = useMemo(
+    () => savedSocialAccountOptions.find((o) => o.value === selectedSocialAccountKey) ?? null,
+    [savedSocialAccountOptions, selectedSocialAccountKey]
+  )
+
+  const selectedSavedCompetitor = useMemo(
+    () => savedCompetitorOptions.find((o) => o.value === selectedCompetitorKey) ?? null,
+    [savedCompetitorOptions, selectedCompetitorKey]
+  )
+
+  const selectedCompetitorCandidate = useMemo(
+    () => competitorCandidateOptions.find((o) => o.value === selectedCompetitorKey) ?? null,
+    [competitorCandidateOptions, selectedCompetitorKey]
+  )
+
+  const canDiscoverCompetitors = Boolean(
+    (watch('brand_id') || selectedBrand?.id || '').trim() &&
+      (watch('geography') || '').trim().length >= 2 &&
+      (socialHandleUrl.trim() || brandSavedSocialStyle?.handle || brandSavedSocialStyle?.profile_url)
+  )
+
+  const activeSocialStyle: SocialStyleProfile | null = briefSocialStyle ?? brandSavedSocialStyle
+
+  const briefSocialStyleColors = useMemo(
+    () => resolveSocialStyleColors(activeSocialStyle),
+    [activeSocialStyle]
+  )
+
+  // Load Brand Kit (canonical store for social + competitor data) when brand changes.
   useEffect(() => {
-    const profile = socialStyleFromVoiceRules(selectedBrand?.voice_rules)
-    if (profile?.profile_url) {
-      setSocialHandleUrl(profile.profile_url)
-    } else if (profile?.handle) {
-      setSocialHandleUrl(profile.handle.startsWith('@') ? profile.handle : `@${profile.handle}`)
+    const brandId = (watchedBrandId || selectedBrand?.id || '').trim()
+    if (!brandId) {
+      setSelectedBrandKit(null)
+      return
     }
-  }, [selectedBrand?.id])
+    let cancelled = false
+    void brandsApi
+      .getKit(brandId)
+      .then((kit) => {
+        if (!cancelled) setSelectedBrandKit(kit)
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedBrandKit(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [watchedBrandId, selectedBrand?.id])
+
+  // Brand switch: sync dropdown + handle from saved Brand Kit data.
+  useEffect(() => {
+    const saved = socialStyleFromBrand(selectedBrand, selectedBrandKit)
+    const handle = (saved?.handle || '').replace(/^@/, '').trim()
+    const brandId = (selectedBrand?.id || '').trim()
+    if (brandId && handle) {
+      const key = `${brandId}::${handle}`
+      setSelectedSocialAccountKey(key)
+      setSocialAccountModeNew(false)
+      setSocialHandleUrl(socialStyleInputValue(saved))
+    } else if (savedSocialAccountOptions.length > 0) {
+      setSelectedSocialAccountKey(savedSocialAccountOptions[0].value)
+      setSocialAccountModeNew(false)
+      setSocialHandleUrl(socialStyleInputValue(savedSocialAccountOptions[0].profile))
+    } else {
+      setSelectedSocialAccountKey('')
+      setSocialAccountModeNew(true)
+      setSocialHandleUrl('')
+    }
+    setBriefSocialStyle(null)
+
+    const competitors = competitorInsightsFromBrand(selectedBrand, selectedBrandKit)
+    const candidates = competitorCandidatesFromBrand(selectedBrand, selectedBrandKit)
+    if (competitors.length > 0) {
+      const first = buildSavedCompetitorOptions(competitors)[0]
+      setSelectedCompetitorKey(first?.value ?? '')
+      setCompetitorModeNew(false)
+      setUseCompetitorInsights(true)
+    } else if (candidates.length > 0) {
+      const first = buildCompetitorCandidateOptions(candidates)[0]
+      setSelectedCompetitorKey(first?.value ?? '')
+      setCompetitorModeNew(false)
+      setCompetitorHandleUrl(candidateInputValue(first?.candidate))
+      setUseCompetitorInsights(false)
+    } else {
+      setSelectedCompetitorKey('')
+      setCompetitorModeNew(true)
+      setUseCompetitorInsights(false)
+    }
+    setCompetitorHandleUrl('')
+  }, [watchedBrandId, selectedBrand, selectedBrandKit, savedSocialAccountOptions.length])
 
   const resolvedBrandVisuals = useMemo(() => {
     const voiceRules = (selectedBrand?.voice_rules || {}) as Record<string, unknown>
@@ -884,6 +1087,19 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         return next
       })
       await refetchBrands({ background: true })
+      try {
+        const kit = await brandsApi.getKit(brandId)
+        setSelectedBrandKit(kit)
+      } catch {
+        /* optional */
+      }
+      setBriefSocialStyle(result.social_style_profile)
+      setSocialHandleUrl(socialStyleInputValue(result.social_style_profile))
+      const savedHandle = (result.social_style_profile.handle || '').replace(/^@/, '').trim()
+      if (savedHandle) {
+        setSelectedSocialAccountKey(`${brandId}::${savedHandle}`)
+        setSocialAccountModeNew(false)
+      }
       const posts = result.social_style_profile.post_count_analyzed ?? 0
       toast.success(
         posts > 0
@@ -894,6 +1110,173 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       toast.error(extractApiError(err) || 'Could not fetch social style')
     } finally {
       setFetchingSocialStyle(false)
+    }
+  }
+
+  const handleDiscoverCompetitors = async () => {
+    const brandId = (watch('brand_id') || selectedBrand?.id || '').trim()
+    const handleOrUrl = socialHandleUrl.trim()
+    if (!brandId) {
+      toast.error('Select or fetch a brand first.')
+      return
+    }
+    if (!handleOrUrl && !brandSavedSocialStyle?.handle && !brandSavedSocialStyle?.profile_url) {
+      toast.error('Fetch client social style first (Facebook or Instagram URL).')
+      return
+    }
+    const geography = (watch('geography') ?? '').trim()
+    if (geography.length < 2) {
+      toast.error('Set Service Location first (e.g. Melbourne VIC) — competitors are local only.')
+      return
+    }
+    setDiscoveringCompetitors(true)
+    try {
+      const result = await brandsApi.discoverCompetitors(brandId, {
+        handle_or_url: handleOrUrl || undefined,
+        industry: (watch('title') ?? '').trim(),
+        niche: (watch('niche') ?? '').trim(),
+        geography: (watch('geography') ?? '').trim(),
+      })
+      patchApiCache<Brand[]>('brands', (current) => {
+        const prior = current ?? brands ?? []
+        const idx = prior.findIndex((b) => b.id === brandId)
+        if (idx < 0) return prior
+        const voiceRules = {
+          ...((prior[idx].voice_rules as Record<string, unknown>) || {}),
+          competitor_candidates: result.competitor_candidates,
+        }
+        const next = [...prior]
+        next[idx] = { ...prior[idx], voice_rules: voiceRules }
+        return next
+      })
+      await refetchBrands({ background: true })
+      try {
+        const kit = await brandsApi.getKit(brandId)
+        setSelectedBrandKit(kit)
+      } catch {
+        /* optional */
+      }
+      const first = buildCompetitorCandidateOptions(result.competitor_candidates)[0]
+      if (first) {
+        setSelectedCompetitorKey(first.value)
+        setCompetitorModeNew(false)
+        setCompetitorHandleUrl(candidateInputValue(first.candidate))
+      }
+      toast.success(
+        result.competitor_candidates.length
+          ? `Found ${result.competitor_candidates.length} competitors near ${geography} — select one, then Analyze & save`
+          : 'No competitors found'
+      )
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not fetch competitors')
+    } finally {
+      setDiscoveringCompetitors(false)
+    }
+  }
+
+  const handleFetchCompetitorSocial = async () => {
+    const brandId = (watch('brand_id') || selectedBrand?.id || '').trim()
+    const handleOrUrl = competitorHandleUrl.trim()
+    if (!brandId) {
+      toast.error('Select or fetch a brand first.')
+      return
+    }
+    if (handleOrUrl.length < 2) {
+      toast.error('Enter a competitor Instagram or Facebook URL or @handle')
+      return
+    }
+    setFetchingCompetitor(true)
+    try {
+      const result = await brandsApi.fetchCompetitorSocial(brandId, {
+        handle_or_url: handleOrUrl,
+        industry: (watch('title') ?? '').trim(),
+        niche: (watch('niche') ?? '').trim(),
+      })
+      patchApiCache<Brand[]>('brands', (current) => {
+        const prior = current ?? brands ?? []
+        const idx = prior.findIndex((b) => b.id === brandId)
+        if (idx < 0) return prior
+        const voiceRules = {
+          ...((prior[idx].voice_rules as Record<string, unknown>) || {}),
+          competitor_social_insights: result.competitor_social_insights,
+        }
+        const next = [...prior]
+        next[idx] = { ...prior[idx], voice_rules: voiceRules }
+        return next
+      })
+      await refetchBrands({ background: true })
+      try {
+        const kit = await brandsApi.getKit(brandId)
+        setSelectedBrandKit(kit)
+      } catch {
+        /* optional */
+      }
+      setUseCompetitorInsights(true)
+      setCompetitorHandleUrl(competitorInputValue(result.competitor_insight))
+      const compHandle = (result.competitor_insight.handle || '').replace(/^@/, '').trim()
+      const compPlatform = (result.competitor_insight.platform || 'social').toLowerCase()
+      if (compHandle) {
+        setSelectedCompetitorKey(`${compPlatform}::${compHandle}`)
+        setCompetitorModeNew(false)
+      }
+      const posts = result.competitor_insight.post_count_analyzed ?? 0
+      toast.success(
+        posts > 0
+          ? `Competitor saved — ${posts} posts analyzed for posting logic`
+          : 'Competitor analysis saved to Brand Kit'
+      )
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not analyze competitor')
+    } finally {
+      setFetchingCompetitor(false)
+    }
+  }
+
+  const handleDeleteCompetitor = async (insight: CompetitorSocialInsight) => {
+    const brandId = (watch('brand_id') || selectedBrand?.id || '').trim()
+    const handle = (insight.handle || '').replace(/^@/, '')
+    if (!brandId || !handle) return
+    try {
+      const result = await brandsApi.deleteCompetitorSocial(brandId, {
+        handle,
+        platform: insight.platform || '',
+      })
+      patchApiCache<Brand[]>('brands', (current) => {
+        const prior = current ?? brands ?? []
+        const idx = prior.findIndex((b) => b.id === brandId)
+        if (idx < 0) return prior
+        const voiceRules = {
+          ...((prior[idx].voice_rules as Record<string, unknown>) || {}),
+          competitor_social_insights: result.competitor_social_insights,
+        }
+        const next = [...prior]
+        next[idx] = { ...prior[idx], voice_rules: voiceRules }
+        return next
+      })
+      await refetchBrands({ background: true })
+      try {
+        const kit = await brandsApi.getKit(brandId)
+        setSelectedBrandKit(kit)
+      } catch {
+        /* optional */
+      }
+      if (result.competitor_social_insights.length === 0) {
+        setUseCompetitorInsights(false)
+        setSelectedCompetitorKey('')
+        setCompetitorModeNew(true)
+        setCompetitorHandleUrl('')
+      } else {
+        const remaining = buildSavedCompetitorOptions(result.competitor_social_insights)
+        const next = remaining[0]
+        if (next) {
+          setSelectedCompetitorKey(next.value)
+          setCompetitorModeNew(false)
+          setCompetitorHandleUrl(competitorInputValue(next.insight))
+        }
+      }
+      toast.success('Competitor removed')
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Could not remove competitor')
     }
   }
 
@@ -958,6 +1341,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       }
 
       const campaignCta = (result.cta || '').trim()
+      const hasPerVariantCta = result.variants.some((v) => Boolean((v.cta || '').trim()))
       const shells = result.variants.slice(0, count).map((v) => {
         const card = Number(v.carousel_index || 0)
         const total = Number(v.carousel_total || 0)
@@ -977,7 +1361,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           retail_promo: retailPromo || undefined,
           aspect_ratio: (v.aspect_ratio || '').trim() || undefined,
           use_cases: v.use_cases?.length ? v.use_cases : retailPromo ? ['lifestyle', 'product_person'] : [],
-          cta: photoOnly ? '' : ((v.cta || '').trim() || campaignCta),
+          cta: photoOnly
+            ? ''
+            : ((v.cta || '').trim() || (hasPerVariantCta ? '' : campaignCta)),
           hook: (v.hook || '').trim(),
           message: (v.message || '').trim(),
           image_hook: photoOnly ? '' : (v.image_hook || '').trim(),
@@ -1056,6 +1442,28 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         { value: 'veo-3.1', label: 'Veo 3.1 (Runway)' },
       ]),
     [catalog?.video_models]
+  )
+  const promptLlmSelect = useMemo(
+    () =>
+      buildModelSelectGroups(catalog?.prompt_llm_models, [
+        {
+          value: 'anthropic/claude-sonnet-4.6',
+          label: 'Claude Sonnet 4.6 (default)',
+        },
+      ]),
+    [catalog?.prompt_llm_models]
+  )
+
+  const referenceImagesPayload = useMemo(
+    () =>
+      briefReferenceImages.map((r) => ({
+        asset_id: r.asset_id,
+        file_url: r.file_url,
+        analysis: r.analysis ?? {},
+        is_product_reference: Boolean(r.is_product_reference),
+        product_reference_context: r.product_reference_context,
+      })),
+    [briefReferenceImages],
   )
 
   const submitLabel = useMemo(() => {
@@ -1305,7 +1713,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         offer: imageCampaignOffer.trim() || slot.offer.trim() || undefined,
         geography: (d.geography ?? '').trim() || undefined,
         brand_facts: resolvedBrandFacts ?? undefined,
-        social_style_profile: resolvedSocialStyle ?? undefined,
+        brand_id: (d.brand_id || selectedBrand?.id || '').trim() || undefined,
+        social_style_profile: activeSocialStyle ?? undefined,
+        use_competitor_insights: useCompetitorInsights,
+        ...(useCompetitorInsights && brandSavedCompetitors.length > 0
+          ? { competitor_social_insights: brandSavedCompetitors }
+          : {}),
+        image_visual_style: imageVisualStyle || undefined,
         product_focus: (slot.product_focus || imageProductFocus) || undefined,
         ...resolvedBrandVisuals,
         image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
@@ -1324,12 +1738,16 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 !(d.formats ?? []).includes('static')
               ? 'carousel'
               : 'static',
+        // Always send per-slot seed so the backend gets the slot's prompt,
+        // product_focus, ad_angle even when the brief was loaded from DB
+        // (strategyParsed is only set after a fresh MD upload this session).
+        strategy_variants: [strategySeedForSlot(index, slot)],
         ...(strategyParsed
-          ? {
-              strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '',
-              strategy_variants: [strategySeedForSlot(index, slot)],
-            }
+          ? { strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '' }
           : {}),
+        ...(referenceImagesPayload.length ? { reference_images: referenceImagesPayload } : {}),
+        exact_product_reference: exactProductReference,
+        llm_model: genSettings.promptLlmModel || undefined,
       })
       const variant = plan.variants[0]
       if (!variant) {
@@ -1359,22 +1777,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 message,
                 image_hook: photoOnly
                   ? ''
-                  : variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
-                    ? variant.image_hook
-                    : derived.image_hook || s.image_hook,
+                  : s.image_hook.trim() ||
+                    (variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                      ? variant.image_hook
+                      : derived.image_hook),
                 image_headline: photoOnly
                   ? ''
-                  : variant.image_headline &&
-                      !isIncompleteOnImageLine(variant.image_headline)
-                    ? variant.image_headline
-                    : derived.image_headline || s.image_headline,
+                  : s.image_headline.trim() ||
+                    (variant.image_headline &&
+                    !isIncompleteOnImageLine(variant.image_headline)
+                      ? variant.image_headline
+                      : derived.image_headline),
                 cta: photoOnly
                   ? ''
                   : carouselCard
                     ? lastCarousel
-                      ? variant.cta || plan.campaign_cta || s.cta || (d.cta ?? '')
+                      ? s.cta || variant.cta || plan.campaign_cta || (d.cta ?? '')
                       : ''
-                    : variant.cta || s.cta,
+                    : s.cta || variant.cta || '',
                 offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
                 prompt: variant.prompt || s.prompt,
                 reasoning: variant.reasoning || '',
@@ -1402,7 +1822,7 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
     }
     const slots = imageVariantSlots
     const chunks =
-      slots.length > 10 ? chunkSlotIndicesForGeneration(slots) : [slots.map((_, i) => i)]
+      slots.length > 5 ? chunkSlotIndicesForGeneration(slots) : [slots.map((_, i) => i)]
 
     setGeneratingAllSlots(true)
     toast.loading(
@@ -1424,7 +1844,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         const indices = chunks[ci]
         const chunkAngle = variantAngleAssignments[indices[0]]
         const chunkSlot = slots[indices[0]]
-        const chunkEffectiveFocus = chunkSlot?.product_focus || imageProductFocus || ''
+        // Build the effective focus per slot in this chunk.
+        // If every slot shares the same focus we can safely send a campaign-level
+        // override; if they differ, we send undefined so the backend relies purely
+        // on the per-seed product_focus values (set in strategySeedForSlot).
+        const chunkFocusValues = indices.map(
+          (i) => (slots[i]?.product_focus || imageProductFocus || '') as string
+        )
+        const allSameChunkFocus = chunkFocusValues.every((f) => f === chunkFocusValues[0])
+        const chunkEffectiveFocus = allSameChunkFocus ? chunkFocusValues[0] : ''
         const catalogShot = chunkEffectiveFocus === 'product_only'
         if (chunks.length > 1) {
           toast.loading(
@@ -1446,7 +1874,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           offer: imageCampaignOffer.trim() || undefined,
           geography: (d.geography ?? '').trim() || undefined,
           brand_facts: resolvedBrandFacts ?? undefined,
-          social_style_profile: resolvedSocialStyle ?? undefined,
+          brand_id: (d.brand_id || selectedBrand?.id || '').trim() || undefined,
+          social_style_profile: activeSocialStyle ?? undefined,
+        use_competitor_insights: useCompetitorInsights,
+        ...(useCompetitorInsights && brandSavedCompetitors.length > 0
+          ? { competitor_social_insights: brandSavedCompetitors }
+          : {}),
+          image_visual_style: imageVisualStyle || undefined,
           product_focus: chunkEffectiveFocus || undefined,
           ...resolvedBrandVisuals,
           image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
@@ -1465,12 +1899,15 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               : (d.formats ?? []).includes('carousel')
                 ? 'carousel'
                 : 'static',
+          // Always send per-slot seeds — slots store prompt, product_focus,
+          // ad_angle from the MD parse even when the brief is opened from DB.
+          strategy_variants: indices.map((i) => strategySeedForSlot(i, slots[i])),
           ...(strategyParsed
-            ? {
-                strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '',
-                strategy_variants: indices.map((i) => strategySeedForSlot(i, slots[i])),
-              }
+            ? { strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '' }
             : {}),
+          ...(referenceImagesPayload.length ? { reference_images: referenceImagesPayload } : {}),
+        exact_product_reference: exactProductReference,
+          llm_model: genSettings.promptLlmModel || undefined,
         })
 
         if (plan.icp_text?.trim()) icpText = plan.icp_text.trim()
@@ -1497,22 +1934,24 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               message,
               image_hook: photoOnly
                 ? ''
-                : variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
-                  ? variant.image_hook
-                  : derived.image_hook || s.image_hook,
+                : s.image_hook.trim() ||
+                  (variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                    ? variant.image_hook
+                    : derived.image_hook),
               image_headline: photoOnly
                 ? ''
-                : variant.image_headline &&
-                    !isIncompleteOnImageLine(variant.image_headline)
-                  ? variant.image_headline
-                  : derived.image_headline || s.image_headline,
+                : s.image_headline.trim() ||
+                  (variant.image_headline &&
+                  !isIncompleteOnImageLine(variant.image_headline)
+                    ? variant.image_headline
+                    : derived.image_headline),
               cta: photoOnly
                 ? ''
                 : carouselCard
                   ? lastCarousel
-                    ? variant.cta || plan.campaign_cta || s.cta || (d.cta ?? '')
+                    ? s.cta || variant.cta || plan.campaign_cta || (d.cta ?? '')
                     : ''
-                  : variant.cta || s.cta,
+                  : s.cta || variant.cta || '',
               offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
               prompt: variant.prompt || s.prompt,
               reasoning: variant.reasoning || '',
@@ -1796,7 +2235,9 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           ...(mediaType === 'image'
             ? {
                 image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+                use_competitor_insights: useCompetitorInsights,
                 ...(imageProductFocus ? { product_focus: imageProductFocus } : {}),
+                ...(imageVisualStyle ? { image_visual_style: imageVisualStyle } : {}),
                 ...(imageCampaignHook.trim() ? { campaign_hook: imageCampaignHook.trim() } : {}),
                 ...(imageCampaignHeadline.trim()
                   ? { campaign_headline: imageCampaignHeadline.trim() }
@@ -1824,6 +2265,10 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                   generated_at: s.generated_at ?? undefined,
                 })),
                 ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
+                ...(referenceImagesPayload.length
+                  ? { reference_images: referenceImagesPayload }
+                  : {}),
+                exact_product_reference: exactProductReference,
                 // Back-compat for older readers: first slot as shared fields
                 ...(imageVariantSlots[0]?.use_cases?.length
                   ? { image_use_cases: imageVariantSlots[0].use_cases }
@@ -1946,7 +2391,13 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-charcoal tracking-tight">Create Brief</h1>
           <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full">
-            {mediaType === 'image' ? 'Image' : mediaType === 'video' ? 'Video' : 'Creative Studio'}
+            {mediaType === 'image'
+              ? 'Image'
+              : mediaType === 'video'
+                ? 'Video'
+                : mediaType === 'hero_ai_image'
+                  ? 'Hero AI Image'
+                  : 'Creative Studio'}
           </span>
         </div>
         <Button type="submit" form="brief-form" variant="outline" size="sm" disabled={isSubmitting}>
@@ -1960,7 +2411,8 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
           {([
             { id: 'image' as const,            label: 'Image',           hint: 'Static & carousel ads' },
             { id: 'video' as const,            label: 'Video',           hint: 'Portrait & landscape' },
-            { id: 'creative_studio' as const,  label: 'Creative Studio', hint: 'Cinematic scene builder', badge: 'NEW' },
+            { id: 'hero_ai_image' as const,   label: 'Hero AI Image',   hint: 'Upload and burn exact copy' },
+            { id: 'creative_studio' as const,  label: 'Creative Studio', hint: 'Chat playground · Seedance', badge: 'NEW' },
           ]).map((tab) => (
             <button
               key={tab.id}
@@ -1990,13 +2442,38 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
       </div>
 
       {mediaType === 'creative_studio' && (
-        <CreativeStudioTab />
+        <CreativeStudioTab
+          brandId={(watch('brand_id') || selectedBrand?.id || '').trim() || undefined}
+          brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
+          productName={watch('product_name') || ''}
+          briefTitle={watch('title') || undefined}
+        />
+      )}
+
+      {mediaType === 'hero_ai_image' && (
+        <HeroAiImageTab
+          brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
+          industry={watch('title') || selectedBrand?.industry || ''}
+          niche={watch('niche') || ''}
+          productName={watch('product_name') || ''}
+          imageModel={genSettings.imageModel || 'openai-gpt-image-2'}
+          brandId={(watch('brand_id') || '').trim()}
+          brands={brands ?? []}
+          onBrandChange={(brandId) => setValue('brand_id', brandId, { shouldValidate: true })}
+          logoUrl={selectedBrand?.logo_url}
+          logoOnLightUrl={
+            typeof selectedBrandKit?.logo_variations?.on_light === 'string'
+              ? selectedBrandKit.logo_variations.on_light
+              : undefined
+          }
+          briefTitle={watch('title') || 'Hero AI Image'}
+        />
       )}
 
       <form
         id="brief-form"
         onSubmit={handleSubmit(onSubmit, onInvalid)}
-        className={`w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4 ${mediaType === 'creative_studio' ? 'hidden' : ''}`}
+        className={`w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4 ${mediaType === 'creative_studio' || mediaType === 'hero_ai_image' ? 'hidden' : ''}`}
       >
         <div className="space-y-4">
           {brandSource === 'brand' && !hasBrands && (
@@ -2077,6 +2554,39 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               {...register('niche')}
             />
 
+            {mediaType === 'image' && (
+              <div>
+                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
+                  Visual style <span className="font-normal normal-case text-mid">(optional)</span>
+                </p>
+                <p className="text-[10px] text-mid mb-2">
+                  Scroll-stopping cartoon/sketch ads: problem character + competitor failures scattered,
+                  hero product fresh as the answer — works for retail, trade, health, drinks, any industry.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {IMAGE_VISUAL_STYLE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value || 'auto'}
+                      type="button"
+                      onClick={() => setImageVisualStyle(opt.value)}
+                      className={`px-3 py-2 text-xs font-semibold rounded-full border transition-all text-left ${
+                        imageVisualStyle === opt.value
+                          ? 'border-accent/50 bg-accent/10 text-charcoal'
+                          : 'border-border text-mid hover:border-accent/30'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {IMAGE_VISUAL_STYLE_OPTIONS.find((o) => o.value === imageVisualStyle)?.hint ? (
+                  <p className="mt-2 text-[10px] text-mid leading-relaxed">
+                    {IMAGE_VISUAL_STYLE_OPTIONS.find((o) => o.value === imageVisualStyle)?.hint}
+                  </p>
+                ) : null}
+              </div>
+            )}
+
             {/* Service Location — AU state/city picker below Niche */}
             <div>
               <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Service Location</p>
@@ -2132,14 +2642,52 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               </div>
 
               {brandSource === 'brand' ? (
-                <Select
-                  label="Brand"
-                  options={brandOptions}
-                  placeholder={hasBrands ? 'Select brand' : 'No brands'}
-                  disabled={!hasBrands}
-                  error={errors.brand_id?.message}
-                  {...register('brand_id')}
-                />
+                <div className="relative">
+                  <Input
+                    label="Brand"
+                    placeholder={hasBrands ? 'Type brand name to search' : 'No brands available'}
+                    value={brandSearch}
+                    disabled={!hasBrands}
+                    error={errors.brand_id?.message}
+                    onChange={(event) => {
+                      const value = event.target.value
+                      setBrandSearch(value)
+                      if (value.trim().toLowerCase() !== (selectedBrand?.name || '').trim().toLowerCase()) {
+                        setValue('brand_id', '', { shouldValidate: true })
+                      }
+                    }}
+                  />
+                  <input type="hidden" {...register('brand_id')} />
+                  {brandSearch.trim() &&
+                    matchingBrands.length > 0 &&
+                    (!selectedBrand ||
+                      selectedBrand.name.trim().toLowerCase() !==
+                        brandSearch.trim().toLowerCase()) && (
+                    <div className="absolute z-20 left-0 right-0 top-full mt-1 max-h-52 overflow-y-auto rounded-xl border border-border bg-white shadow-lg">
+                      {matchingBrands.map((brand) => (
+                        <button
+                          key={brand.id}
+                          type="button"
+                          className="block w-full px-4 py-2.5 text-left text-sm text-charcoal hover:bg-accent/10"
+                          onClick={() => {
+                            setBrandSearch(brand.name)
+                            setValue('brand_id', brand.id, {
+                              shouldDirty: true,
+                              shouldValidate: true,
+                            })
+                          }}
+                        >
+                          {brand.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {brandSearch.trim() &&
+                    matchingBrands.length === 0 &&
+                    !selectedBrand && (
+                    <p className="mt-1 text-[11px] text-mid">No matching brand found.</p>
+                  )}
+                </div>
               ) : (
                 <div className="space-y-3">
                   <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
@@ -2204,6 +2752,19 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
               )}
             </div>
 
+            {mediaType === 'image' && (
+              <ReferenceImagesPanel
+                brandId={(watch('brand_id') || selectedBrand?.id || '').trim() || undefined}
+                brandName={selectedBrand?.name ?? websiteBrand?.brand_name ?? ''}
+                industry={(watch('title') || selectedBrand?.industry || '').trim()}
+                niche={(watch('niche') || '').trim()}
+                productName={(watch('product_name') || '').trim()}
+                selected={briefReferenceImages}
+                onChange={setBriefReferenceImages}
+                onExactProductChange={setExactProductReference}
+              />
+            )}
+
             {resolvedBrandFacts && summarizeBrandFacts(resolvedBrandFacts) && (
               <div className="rounded-xl border border-border bg-surface-elevated/80 p-3 space-y-1.5">
                 <p className="text-xs font-bold text-navy uppercase tracking-wide">
@@ -2224,107 +2785,332 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
             )}
 
             {(watch('brand_id') || selectedBrand) && (
-              <div className="rounded-xl border border-border bg-surface-elevated/80 p-3 space-y-2">
+              <div className="rounded-xl border border-border bg-surface-elevated/80 p-3 space-y-3">
                 <p className="text-xs font-bold text-navy uppercase tracking-wide">
                   Social media visual style
                 </p>
                 <p className="text-[10px] text-mid">
-                  One-time fetch from Instagram or Facebook — saved to Brand Kit and used when AI writes
-                  image prompts so generated ads match how the client posts on social.
+                  Fetch from Instagram or Facebook — saved to Brand Kit for this brand. AI uses the saved
+                  account and style automatically on every brief.
                 </p>
-                <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
-                  <div className="flex-1">
-                    <Input
-                      label="Instagram / Facebook"
-                      placeholder="@handle or https://instagram.com/brand"
-                      value={socialHandleUrl}
-                      onChange={(e) => setSocialHandleUrl(e.target.value)}
-                    />
+                {brandSavedSocialStyle && hasSocialStyleSummary(brandSavedSocialStyle) ? (
+                  <div className="rounded-lg border border-accent/20 bg-accent/5 p-2.5 space-y-1.5">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-navy">
+                      Active for this brand
+                    </p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-[11px] font-semibold text-charcoal">
+                        {socialStyleAccountLabel(brandSavedSocialStyle)}
+                        {brandSavedSocialStyle.fetched_at ? (
+                          <span className="ml-1 font-normal text-mid">
+                            · {new Date(brandSavedSocialStyle.fetched_at).toLocaleDateString()}
+                          </span>
+                        ) : null}
+                        {brandSavedSocialStyle.post_count_analyzed != null ? (
+                          <span className="ml-1 font-normal text-mid">
+                            · {brandSavedSocialStyle.post_count_analyzed} posts
+                          </span>
+                        ) : null}
+                      </p>
+                      {brandSavedSocialStyle.profile_url ? (
+                        <a
+                          href={brandSavedSocialStyle.profile_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[10px] text-accent hover:underline shrink-0"
+                        >
+                          View profile
+                        </a>
+                      ) : null}
+                    </div>
+                    {summarizeSocialStyle(brandSavedSocialStyle) ? (
+                      <p className="text-[11px] text-charcoal leading-relaxed line-clamp-3">
+                        {summarizeSocialStyle(brandSavedSocialStyle)}
+                      </p>
+                    ) : null}
                   </div>
+                ) : null}
+                <Select
+                  label="Saved social accounts"
+                  placeholder={
+                    savedSocialAccountOptions.length > 0
+                      ? 'Select saved account'
+                      : 'No saved accounts yet'
+                  }
+                  value={socialAccountModeNew ? '__new__' : selectedSocialAccountKey}
+                  onChange={(e) => {
+                    const val = e.target.value
+                    if (val === '__new__') {
+                      setSocialAccountModeNew(true)
+                      setSelectedSocialAccountKey('')
+                      setSocialHandleUrl('')
+                      return
+                    }
+                    setSocialAccountModeNew(false)
+                    setSelectedSocialAccountKey(val)
+                    const picked = savedSocialAccountOptions.find((o) => o.value === val)
+                    if (picked) {
+                      setSocialHandleUrl(socialStyleInputValue(picked.profile))
+                    }
+                  }}
+                  options={[
+                    ...savedSocialAccountOptions.map((o) => ({
+                      value: o.value,
+                      label: o.label,
+                    })),
+                    { value: '__new__', label: '+ Add new account…' },
+                  ]}
+                />
+                {selectedSavedSocialAccount && !socialAccountModeNew ? (
+                  <div className="rounded-lg border border-border/70 bg-white/60 p-2.5 space-y-1">
+                    <p className="text-[10px] text-mid">
+                      Selected · {selectedSavedSocialAccount.label}
+                    </p>
+                    {summarizeSocialStyle(selectedSavedSocialAccount.profile) ? (
+                      <p className="text-[11px] text-charcoal leading-relaxed line-clamp-2">
+                        {summarizeSocialStyle(selectedSavedSocialAccount.profile)}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+                  {(socialAccountModeNew || savedSocialAccountOptions.length === 0) && (
+                    <div className="flex-1">
+                      <Input
+                        label="New Instagram / Facebook account"
+                        placeholder="@yourbrand"
+                        value={socialHandleUrl}
+                        onChange={(e) => setSocialHandleUrl(e.target.value)}
+                      />
+                    </div>
+                  )}
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="shrink-0 mb-0.5"
+                    className={`shrink-0 mb-0.5 ${socialAccountModeNew || savedSocialAccountOptions.length === 0 ? '' : 'sm:ml-auto'}`}
                     isLoading={fetchingSocialStyle}
                     onClick={() => void handleFetchSocialStyle()}
                   >
-                    Fetch social style
+                    {brandSavedSocialStyle ? 'Refresh social style' : 'Fetch social style'}
                   </Button>
                 </div>
-                {resolvedSocialStyle && hasSocialStyleSummary(resolvedSocialStyle) && (
+                {activeSocialStyle && hasSocialStyleSummary(activeSocialStyle) && briefSocialStyle ? (
                   <div className="rounded-lg border border-accent/20 bg-accent/5 p-2.5 space-y-2">
                     <p className="text-[11px] font-semibold text-charcoal">
-                      Saved style reference
-                      {resolvedSocialStyle.fetched_at ? (
+                      Updated this session
+                      {briefSocialStyle.fetched_at ? (
                         <span className="ml-1 font-normal text-mid">
-                          · {new Date(resolvedSocialStyle.fetched_at).toLocaleDateString()}
+                          · {new Date(briefSocialStyle.fetched_at).toLocaleDateString()}
                         </span>
                       ) : null}
                     </p>
-                    {summarizeSocialStyle(resolvedSocialStyle) ? (
+                    {summarizeSocialStyle(briefSocialStyle) ? (
                       <p className="text-[11px] text-charcoal leading-relaxed">
-                        {summarizeSocialStyle(resolvedSocialStyle)}
+                        {summarizeSocialStyle(briefSocialStyle)}
                       </p>
                     ) : null}
-                    {(resolvedSocialStyleColors.cta || resolvedSocialStyleColors.background) && (
+                    {(briefSocialStyleColors.cta || briefSocialStyleColors.background) && (
                       <div className="rounded-md border border-border/60 bg-white/70 p-2 space-y-1.5">
                         <p className="text-[10px] font-semibold text-navy uppercase tracking-wide">
                           Colours AI will use
-                          {socialStyleAestheticLabel(resolvedSocialStyle) ? (
+                          {socialStyleAestheticLabel(activeSocialStyle) ? (
                             <span className="ml-2 normal-case tracking-normal text-accent font-bold">
-                              · {socialStyleAestheticLabel(resolvedSocialStyle)}
+                              · {socialStyleAestheticLabel(activeSocialStyle)}
                             </span>
                           ) : null}
                         </p>
-                        <p className="text-[10px] text-mid leading-relaxed">
-                          From social feed — overrides Brand Kit website colours when they differ.
-                        </p>
                         <div className="flex flex-wrap gap-x-4 gap-y-2">
-                          {resolvedSocialStyleColors.cta ? (
+                          {briefSocialStyleColors.cta ? (
                             <div className="flex items-center gap-2 min-w-0">
                               <span
                                 className="w-6 h-6 shrink-0 rounded-full border border-border shadow-sm"
-                                style={{ background: resolvedSocialStyleColors.cta }}
-                                title={resolvedSocialStyleColors.cta}
+                                style={{ background: briefSocialStyleColors.cta }}
+                                title={briefSocialStyleColors.cta}
                               />
                               <span className="text-[10px] text-charcoal">
                                 CTA &amp; headline ·{' '}
-                                <span className="font-mono">{resolvedSocialStyleColors.cta}</span>
+                                <span className="font-mono">{briefSocialStyleColors.cta}</span>
                               </span>
                             </div>
                           ) : null}
-                          {resolvedSocialStyleColors.background ? (
+                          {briefSocialStyleColors.background ? (
                             <div className="flex items-center gap-2 min-w-0">
                               <span
                                 className="w-6 h-6 shrink-0 rounded-full border border-border shadow-sm"
-                                style={{ background: resolvedSocialStyleColors.background }}
-                                title={resolvedSocialStyleColors.background}
+                                style={{ background: briefSocialStyleColors.background }}
+                                title={briefSocialStyleColors.background}
                               />
                               <span className="text-[10px] text-charcoal">
                                 Background ·{' '}
-                                <span className="font-mono">{resolvedSocialStyleColors.background}</span>
+                                <span className="font-mono">{briefSocialStyleColors.background}</span>
                               </span>
                             </div>
                           ) : null}
                         </div>
-                        {resolvedBrandVisuals.primary_color &&
-                        resolvedSocialStyleColors.cta &&
-                        normalizeSocialHex(resolvedBrandVisuals.primary_color) &&
-                        normalizeSocialHex(resolvedBrandVisuals.primary_color) !==
-                          resolvedSocialStyleColors.cta ? (
-                          <p className="text-[10px] text-mid">
-                            Brand Kit website colour{' '}
-                            <span className="font-mono">
-                              {normalizeSocialHex(resolvedBrandVisuals.primary_color)}
-                            </span>{' '}
-                            is ignored for image prompts — social feed palette wins.
-                          </p>
-                        ) : null}
                       </div>
                     )}
                   </div>
-                )}
+                ) : null}
+
+                <div className="border-t border-border/60 pt-3 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-bold text-navy uppercase tracking-wide">
+                      Competitor social analysis (optional)
+                    </p>
+                    <label className="flex items-center gap-2 text-[11px] text-charcoal cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="rounded border-border"
+                        checked={useCompetitorInsights}
+                        disabled={brandSavedCompetitors.length === 0}
+                        onChange={(e) => setUseCompetitorInsights(e.target.checked)}
+                      />
+                      Use saved competitor logic in image prompts
+                    </label>
+                  </div>
+                  <p className="text-[10px] text-mid">
+                    Click <strong>Fetch competitors</strong> to suggest accounts near your{' '}
+                    <strong>Service Location</strong> (city + state + nearby states only — not worldwide).
+                    Select one, then <strong>Analyze &amp; save</strong>.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!canDiscoverCompetitors}
+                      isLoading={discoveringCompetitors}
+                      onClick={() => void handleDiscoverCompetitors()}
+                    >
+                      Fetch competitors
+                    </Button>
+                    {!canDiscoverCompetitors ? (
+                      <span className="text-[10px] text-mid self-center">
+                        Set Service Location and fetch client social style first
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-mid self-center">
+                        Scoped to {(watch('geography') || '').trim()}
+                      </span>
+                    )}
+                  </div>
+                  <Select
+                    label="Competitor accounts"
+                    placeholder={
+                      allCompetitorDropdownOptions.length > 1
+                        ? 'Select suggested or analyzed competitor'
+                        : 'Fetch competitors or add manually'
+                    }
+                    value={competitorModeNew ? '__new__' : selectedCompetitorKey}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      if (val === '__new__') {
+                        setCompetitorModeNew(true)
+                        setSelectedCompetitorKey('')
+                        setCompetitorHandleUrl('')
+                        return
+                      }
+                      setCompetitorModeNew(false)
+                      setSelectedCompetitorKey(val)
+                      const analyzed = savedCompetitorOptions.find((o) => o.value === val)
+                      if (analyzed) {
+                        setCompetitorHandleUrl(competitorInputValue(analyzed.insight))
+                        return
+                      }
+                      const suggested = competitorCandidateOptions.find((o) => o.value === val)
+                      if (suggested) {
+                        setCompetitorHandleUrl(candidateInputValue(suggested.candidate))
+                      }
+                    }}
+                    options={allCompetitorDropdownOptions}
+                  />
+                  {selectedCompetitorCandidate && !competitorModeNew ? (
+                    <div className="rounded-lg border border-amber-200/80 bg-amber-50/80 p-2.5 space-y-1">
+                      <p className="text-[11px] font-semibold text-charcoal">
+                        {selectedCompetitorCandidate.candidate.name ||
+                          selectedCompetitorCandidate.candidate.handle}{' '}
+                        <span className="font-normal text-amber-800">· suggested, not analyzed yet</span>
+                      </p>
+                      {selectedCompetitorCandidate.candidate.reason ? (
+                        <p className="text-[10px] text-charcoal leading-relaxed">
+                          {selectedCompetitorCandidate.candidate.reason}
+                        </p>
+                      ) : null}
+                      <p className="text-[10px] text-mid">
+                        Click <strong>Analyze &amp; save</strong> to fetch their posts and save posting logic
+                        to Brand Kit.
+                      </p>
+                    </div>
+                  ) : null}
+                  {selectedSavedCompetitor && !competitorModeNew ? (
+                    <div className="rounded-lg border border-border/70 bg-white/60 p-2.5 space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-[11px] font-semibold text-charcoal">
+                          {competitorAccountLabel(selectedSavedCompetitor.insight)}
+                          {selectedSavedCompetitor.insight.fetched_at ? (
+                            <span className="ml-1 font-normal text-mid">
+                              ·{' '}
+                              {new Date(
+                                selectedSavedCompetitor.insight.fetched_at
+                              ).toLocaleDateString()}
+                            </span>
+                          ) : null}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          {selectedSavedCompetitor.insight.profile_url ? (
+                            <a
+                              href={selectedSavedCompetitor.insight.profile_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[10px] text-accent hover:underline"
+                            >
+                              View
+                            </a>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="text-[10px] text-red-600 hover:underline"
+                            onClick={() =>
+                              void handleDeleteCompetitor(selectedSavedCompetitor.insight)
+                            }
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                      {summarizeCompetitorInsight(selectedSavedCompetitor.insight) ? (
+                        <p className="text-[10px] text-charcoal leading-relaxed">
+                          {summarizeCompetitorInsight(selectedSavedCompetitor.insight)}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+                    {(competitorModeNew ||
+                      selectedCompetitorCandidate ||
+                      (savedCompetitorOptions.length === 0 && competitorCandidateOptions.length === 0)) && (
+                      <div className="flex-1">
+                        <Input
+                          label="Competitor Instagram / Facebook"
+                          placeholder="@competitor or facebook.com/page"
+                          value={competitorHandleUrl}
+                          onChange={(e) => setCompetitorHandleUrl(e.target.value)}
+                        />
+                      </div>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0 mb-0.5 sm:ml-auto"
+                      isLoading={fetchingCompetitor}
+                      onClick={() => void handleFetchCompetitorSocial()}
+                    >
+                      Analyze &amp; save
+                    </Button>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -2878,6 +3664,12 @@ export default function BriefComposer({ defaultBrandId }: BriefComposerProps) {
                 catalogProducts={resolvedBrandFacts?.products ?? []}
                 productFocus={imageProductFocus}
                 onProductFocusChange={setImageProductFocus}
+                promptLlmModel={genSettings.promptLlmModel}
+                onPromptLlmModelChange={(value) =>
+                  setGenSettings((prev) => ({ ...prev, promptLlmModel: value }))
+                }
+                promptLlmOptions={promptLlmSelect.options}
+                promptLlmGroups={promptLlmSelect.groups}
               />
             </BriefSection>
           )}

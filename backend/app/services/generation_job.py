@@ -24,6 +24,7 @@ from app.services.icp_image_plan_service import (
     enforce_no_spurious_circled_paper_prop,
     enforce_on_image_copy_in_prompt,
     enforce_on_image_style_in_prompt,
+    enforce_image_visual_style_in_prompt,
     enforce_product_focus_in_prompt,
     consolidate_image_prompt_for_generation,
     _prompt_describes_lifestyle_scene,
@@ -224,26 +225,49 @@ def _append_social_style_to_prompt(image_prompt: str, snap: dict[str, Any]) -> s
         format_social_style_for_llm,
         format_social_style_scene_lock,
         resolve_effective_brand_colors,
+        social_style_applies_color_override,
+        _guidance_is_stale_gold_template,
     )
 
-    block = format_social_style_for_llm(profile)
+    brand_primary = str(snap.get("primary_color") or "")
+    brand_secondary = str(snap.get("secondary_color") or "")
+
+    block = format_social_style_for_llm(
+        profile,
+        brand_primary=brand_primary,
+        brand_secondary=brand_secondary,
+    )
     scene_lock = format_social_style_scene_lock(
         profile,
         lifestyle_scene=_prompt_describes_lifestyle_scene(image_prompt),
+        brand_primary=brand_primary,
+        brand_secondary=brand_secondary,
     )
     if scene_lock and scene_lock not in block:
         block = f"{block} {scene_lock}" if block else scene_lock
     if not block:
         guidance = str(profile.get("prompt_guidance") or "").strip()
-        if not guidance:
+        if not guidance or (
+            _guidance_is_stale_gold_template(guidance)
+            and not social_style_applies_color_override(
+                profile, brand_primary=brand_primary, brand_secondary=brand_secondary
+            )
+        ):
+            if brand_primary:
+                return (
+                    f"{image_prompt.rstrip()} Use Brand Kit primary {brand_primary} for CTA pill "
+                    "and headline accent — NOT gold unless Brand Kit uses gold."
+                )
             return image_prompt
         block = f"Match client social feed style: {guidance}"
     primary, secondary = resolve_effective_brand_colors(
-        primary_color=str(snap.get("primary_color") or ""),
-        secondary_color=str(snap.get("secondary_color") or ""),
+        primary_color=brand_primary,
+        secondary_color=brand_secondary,
         social_style_profile=profile,
     )
-    if primary or secondary:
+    if social_style_applies_color_override(
+        profile, brand_primary=brand_primary, brand_secondary=brand_secondary
+    ) and (primary or secondary):
         colour_line = " Use social feed colours:"
         if primary:
             colour_line += f" CTA pill + headline accent {primary}."
@@ -251,6 +275,56 @@ def _append_social_style_to_prompt(image_prompt: str, snap: dict[str, Any]) -> s
             colour_line += f" Background/frame {secondary}."
         colour_line += " Do NOT use off-brand blue if feed is black/gold."
         block = f"{block}{colour_line}"
+    elif brand_primary:
+        block = (
+            f"{block} Use Brand Kit primary {brand_primary} for CTA pill and headline accent — "
+            "NOT gold unless Brand Kit uses gold."
+        )
+    return f"{image_prompt.rstrip()} {block}"
+
+
+def _reference_images_from_kb(kb_models: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = kb_models.get("reference_images")
+    if not isinstance(raw, list):
+        return []
+    return [r for r in raw if isinstance(r, dict)]
+
+
+def _exact_product_reference_from_kb(kb_models: dict[str, Any]) -> str | None:
+    if not kb_models.get("exact_product_reference"):
+        return None
+    for ref in _reference_images_from_kb(kb_models):
+        if ref.get("is_product_reference") and str(ref.get("file_url") or "").strip():
+            return str(ref["file_url"]).strip()
+    return None
+
+
+def _append_reference_images_to_prompt(
+    image_prompt: str,
+    kb_models: dict[str, Any],
+) -> str:
+    from app.services.reference_image_service import append_reference_guidance_to_prompt
+
+    refs = _reference_images_from_kb(kb_models)
+    return append_reference_guidance_to_prompt(image_prompt, refs)
+
+
+def _append_competitor_insights_to_prompt(
+    image_prompt: str,
+    snap: dict[str, Any],
+    *,
+    brief_dict: dict[str, Any] | None = None,
+) -> str:
+    """Append competitor posting strategy when enabled on the brief."""
+    kb = (brief_dict or {}).get("key_benefits") or {}
+    if not isinstance(kb, dict) or not kb.get("use_competitor_insights"):
+        return image_prompt
+    insights = snap.get("competitor_social_insights")
+    from app.services.competitor_social_service import format_competitor_insights_for_llm
+
+    block = format_competitor_insights_for_llm(insights if isinstance(insights, list) else [])
+    if not block:
+        return image_prompt
     return f"{image_prompt.rstrip()} {block}"
 
 
@@ -302,6 +376,7 @@ async def run_brief_generation_job(
         try:
             brief = await BriefService.get_brief(db, brief_id, tenant_id)
             brand = await BrandService.get_brand(db, brief.brand_id, tenant_id)
+            brand = await BrandService.repair_brand_logo_if_needed(db, brand, tenant_id)
 
             formats = data.formats or brief.formats or ["static"]
             kb_models = dict(brief.key_benefits) if isinstance(brief.key_benefits, dict) else {}
@@ -415,6 +490,9 @@ async def run_brief_generation_job(
                 "image_use_cases",
                 "image_prompt_override",
                 "image_variants",
+                "image_visual_style",
+                "product_focus",
+                "reference_images",
             ):
                 if _kb_key in kb_models and _kb_key not in brief_dict:
                     brief_dict[_kb_key] = kb_models[_kb_key]
@@ -673,6 +751,7 @@ async def run_brief_generation_job(
                         img_logo, img_logo_light = resolve_video_logo_urls(
                             brand=snap,
                             brief=brief_dict,
+                            tenant_id=str(tenant_id),
                         )
 
                         # ── Intelligent LLM pipeline ───────────────────────────────────────
@@ -874,7 +953,8 @@ async def run_brief_generation_job(
                                         or _billboard_words(str(copy.get("headline") or ""), 8),
                                     }
                                     plan = await select_and_build_image_plan(
-                                        variant_brief, snap, copy=image_copy
+                                        variant_brief, snap, copy=image_copy,
+                                        variant_index=variant_index,
                                     )
                                     if fmt == "carousel" and not carousel_last:
                                         image_prompt = enforce_on_image_copy_in_prompt(
@@ -1102,7 +1182,16 @@ async def run_brief_generation_job(
                                 font_heading=str(snap.get("font_heading") or ""),
                                 font_body=str(snap.get("font_body") or ""),
                             )
+                        campaign_image_visual_style = str(
+                            kb_models.get("image_visual_style")
+                            or brief_dict.get("image_visual_style")
+                            or "auto"
+                        ).strip()
                         image_prompt = _append_social_style_to_prompt(image_prompt, snap)
+                        image_prompt = _append_reference_images_to_prompt(image_prompt, kb_models)
+                        image_prompt = _append_competitor_insights_to_prompt(
+                            image_prompt, snap, brief_dict=brief_dict
+                        )
                         image_prompt = _lock_brand_name_on_prompt(
                             image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
                         )
@@ -1164,6 +1253,19 @@ async def run_brief_generation_job(
                                 niche=_niche,
                                 industry=_ind,
                             )
+                        # AFTER consolidate — otherwise flat_cartoon lock is stripped and photos win
+                        if campaign_image_visual_style and campaign_image_visual_style != "auto":
+                            image_prompt = enforce_image_visual_style_in_prompt(
+                                image_prompt,
+                                image_visual_style=campaign_image_visual_style,
+                            )
+                        if burn_logo_on_still and img_logo:
+                            image_prompt = (
+                                f"{image_prompt.rstrip()} "
+                                "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "
+                                "white strip in post. Do NOT leave empty white margin at the top and do NOT draw "
+                                "any brand name, wordmark, or fake logo."
+                            )
                         if burn_logo_on_still and not img_logo:
                             logger.warning(
                                 "Brief %s variant=%s: no brand logo resolved — upload PNG/JPG on Brand Kit",
@@ -1186,7 +1288,49 @@ async def run_brief_generation_job(
                             format_type=fmt,
                             logo_url=img_logo if burn_logo_on_still else None,
                             logo_on_light_url=img_logo_light if burn_logo_on_still else None,
+                            reference_image_url=_exact_product_reference_from_kb(kb_models),
                         )
+                        img_step = pipeline["image"]
+                        refs_used = _reference_images_from_kb(kb_models)
+                        if isinstance(img_step, dict) and refs_used:
+                            img_step["reference_images_used"] = [
+                                {
+                                    "asset_id": r.get("asset_id"),
+                                    "file_url": r.get("file_url"),
+                                }
+                                for r in refs_used[:5]
+                                if isinstance(r, dict)
+                            ]
+                        if (
+                            isinstance(img_step, dict)
+                            and burn_logo_on_still
+                            and (snap.get("logo_url") or snap.get("logo_on_light_url"))
+                            and not img_logo
+                        ):
+                            img_step["logo_warning"] = (
+                                "Brand Kit has a logo saved but it could not be composited — "
+                                "ensure PNG/JPG files exist on Brand Kit (SVG/remote URLs may fail)."
+                            )
+                        if (
+                            isinstance(img_step, dict)
+                            and burn_logo_on_still
+                            and img_logo
+                            and img_step.get("status") == "done"
+                            and not img_step.get("logo_applied")
+                        ):
+                            img_step["logo_warning"] = (
+                                "Brand Kit logo was resolved but overlay did not apply — "
+                                "check backend logs or re-save the brand."
+                            )
+                        if (
+                            isinstance(img_step, dict)
+                            and img_step.get("status") == "failed"
+                            and not str(img_step.get("error") or "").strip()
+                        ):
+                            img_step["error"] = (
+                                "OpenAI image generation failed (no detail). "
+                                "Retry, or switch to GPT Image 1 Mini — not a Runway issue."
+                            )
                     else:
                         pipeline["image"] = {"status": "skipped", "model": image_model}
 
@@ -1563,7 +1707,11 @@ async def run_regenerate_variant_image(
                     primary_color=brand_primary,
                 )
 
-            img_logo, img_logo_light = resolve_video_logo_urls(brand=snap, brief=brief_dict)
+            img_logo, img_logo_light = resolve_video_logo_urls(
+                brand=snap,
+                brief=brief_dict,
+                tenant_id=str(tenant_id),
+            )
             burn_logo = fmt not in {"reel", "video"}
 
             pipeline["image"] = {
@@ -1650,7 +1798,16 @@ async def run_regenerate_variant_image(
                     font_heading=str(snap.get("font_heading") or ""),
                     font_body=str(snap.get("font_body") or ""),
                 )
+            campaign_image_visual_style = str(
+                kb_models.get("image_visual_style")
+                or brief_dict.get("image_visual_style")
+                or "auto"
+            ).strip()
             image_prompt = _append_social_style_to_prompt(image_prompt, snap)
+            image_prompt = _append_reference_images_to_prompt(image_prompt, kb_models)
+            image_prompt = _append_competitor_insights_to_prompt(
+                image_prompt, snap, brief_dict=brief_dict
+            )
             image_prompt = _lock_brand_name_on_prompt(
                 image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
             )
@@ -1693,6 +1850,19 @@ async def run_regenerate_variant_image(
                     niche=niche,
                     industry=industry,
                 )
+            # AFTER consolidate — keep flat_cartoon / clay / sketch on every retry
+            if campaign_image_visual_style and campaign_image_visual_style != "auto":
+                image_prompt = enforce_image_visual_style_in_prompt(
+                    image_prompt,
+                    image_visual_style=campaign_image_visual_style,
+                )
+            if burn_logo and img_logo:
+                image_prompt = (
+                    f"{image_prompt.rstrip()} "
+                    "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "
+                    "white strip in post. Do NOT leave empty white margin at the top and do NOT draw "
+                    "any brand name, wordmark, or fake logo."
+                )
             image_result = await ai_service.generate_image_asset(
                 prompt=image_prompt,
                 tenant_id=str(tenant_id),
@@ -1700,7 +1870,17 @@ async def run_regenerate_variant_image(
                 format_type=fmt,
                 logo_url=img_logo if burn_logo else None,
                 logo_on_light_url=img_logo_light if burn_logo else None,
+                reference_image_url=_exact_product_reference_from_kb(kb_models),
             )
+            if (
+                isinstance(image_result, dict)
+                and image_result.get("status") == "failed"
+                and not str(image_result.get("error") or "").strip()
+            ):
+                image_result["error"] = (
+                    "OpenAI image generation failed (no detail). "
+                    "Retry, or switch to GPT Image 1 Mini — not a Runway issue."
+                )
 
             # Re-load in case of concurrent edits
             variant = await VariantService.get_variant(db, variant_id, tenant_id)
@@ -1737,7 +1917,10 @@ async def run_regenerate_variant_image(
                     **(prev or {}),
                     "status": "failed",
                     "url": None,
-                    "error": "Image regeneration failed — check model settings / Runway credits, then retry.",
+                    "error": (
+                        "Image regeneration failed — check OpenAI image model settings "
+                        "and API credits, then retry."
+                    ),
                 }
                 params["pipeline"] = pipeline
                 variant.generation_params = params

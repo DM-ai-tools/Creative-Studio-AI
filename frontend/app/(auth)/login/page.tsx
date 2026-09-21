@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -14,18 +14,27 @@ import Input from '@/components/ui/Input'
 import { useAuth } from '@/hooks/useAuth'
 
 const schema = z.object({
-  email: z.string().min(1, 'Email or username is required').refine(
-    (value) => value === 'admin' || z.string().email().safeParse(value).success,
-    'Enter a valid email or use admin'
-  ),
+  email: z
+    .string()
+    .min(1, 'Email or username is required')
+    .refine(
+      (value) =>
+        /^[a-zA-Z0-9._-]+$/.test(value) ||
+        z.string().email().safeParse(value).success,
+      'Enter a valid email or username',
+    ),
   password: z.string().min(1, 'Password is required'),
 })
 type FormData = z.infer<typeof schema>
 
 export default function LoginPage() {
   const router = useRouter()
-  const { login } = useAuth()
+  const { login, user, isLoading } = useAuth()
   const [remember, setRemember] = useState(true)
+
+  useEffect(() => {
+    if (!isLoading && user) router.replace('/dashboard')
+  }, [user, isLoading, router])
   const {
     register,
     handleSubmit,
@@ -58,6 +67,10 @@ export default function LoginPage() {
       const msg = axiosErr.response?.data?.detail || 'Login failed'
       toast.error(String(msg))
     }
+  }
+
+  if (isLoading || user) {
+    return null
   }
 
   return (
@@ -115,12 +128,6 @@ export default function LoginPage() {
         <span className="underline decoration-muted/70 underline-offset-2">Privacy Policy</span>.
       </p>
 
-      <p className="mt-10 text-center text-[13px] text-muted">
-        Don&apos;t have account yet?{' '}
-        <Link href="/register" className="font-semibold text-accent-dark hover:underline">
-          Sign up
-        </Link>
-      </p>
     </>
   )
 }

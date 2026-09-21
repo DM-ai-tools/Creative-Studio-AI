@@ -47,6 +47,11 @@ type Props = {
   /** Campaign-level shot style — applies to every variant when generating. */
   productFocus?: ProductFocusId | ''
   onProductFocusChange?: (value: ProductFocusId | '') => void
+  /** OpenRouter LLM for variant prompt generation. */
+  promptLlmModel?: string
+  onPromptLlmModelChange?: (value: string) => void
+  promptLlmOptions?: { value: string; label: string }[]
+  promptLlmGroups?: { label: string; options: { value: string; label: string }[] }[]
 }
 
 function formatGenerationTime(iso: string): string {
@@ -81,6 +86,10 @@ export default function ImageVariantSlotsPanel({
   catalogProducts = [],
   productFocus = '',
   onProductFocusChange,
+  promptLlmModel = '',
+  onPromptLlmModelChange,
+  promptLlmOptions = [],
+  promptLlmGroups,
 }: Props) {
   const [openPicker, setOpenPicker] = useState<number | null>(null)
   const hasCarousel = slots.some((s) => isCarouselSlot(s, formats))
@@ -123,56 +132,117 @@ export default function ImageVariantSlotsPanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-bold text-sky-900">
-            {slots.length} image variant{slots.length !== 1 ? 's' : ''}
-          </p>
-          <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
-            Slots stay empty until you click <strong>Generate AI for all</strong>. Static ads get
-            hook + on-image CTA. Carousel cards are visual + short headline; the campaign CTA
-            burns on the last card of each creative. Change <strong>Target Variants</strong> in step 1
-            to add or remove slots.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <div className="flex flex-col gap-0.5 min-w-[240px]">
-            <label className="text-[9px] font-bold uppercase tracking-widest text-navy">
-              Default shot style (override all)
-            </label>
-            <select
-              value={productFocus || ''}
-              onChange={(e) =>
-                onProductFocusChange?.(e.target.value as ProductFocusId | '')
-              }
-              className="rounded-lg border border-sky-400 bg-white px-2.5 py-1.5 text-xs font-semibold text-charcoal"
-            >
-              {PRODUCT_FOCUS_OPTIONS.map((opt) => (
-                <option key={opt.value || 'auto'} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+      <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 space-y-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-sky-900">
+              {slots.length} image variant{slots.length !== 1 ? 's' : ''}
+            </p>
+            <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
+              Slots stay empty until you click <strong>Generate AI for all</strong>. Static ads get
+              hook + on-image CTA. Carousel cards are visual + short headline; the campaign CTA
+              burns on the last card of each creative. Change <strong>Target Variants</strong> in step 1
+              to add or remove slots.
+            </p>
           </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={generatingIndex != null || Boolean(generatingAll)}
-            onClick={handleDownloadAll}
-          >
-            Download all Excel
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="primary"
-            isLoading={Boolean(generatingAll)}
-            disabled={generatingIndex != null}
-            onClick={() => onGenerateAll()}
-          >
-            Generate AI for all
-          </Button>
+
+          <div className="w-full lg:w-auto lg:min-w-[min(100%,42rem)]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_auto_auto] gap-x-3 gap-y-3 xl:items-end">
+              <div className="flex flex-col gap-1 min-w-0">
+                <label
+                  htmlFor="variant-shot-style"
+                  className="text-[9px] font-bold uppercase tracking-widest text-navy leading-none min-h-[11px]"
+                >
+                  Default shot style (override all)
+                </label>
+                <select
+                  id="variant-shot-style"
+                  value={productFocus || ''}
+                  onChange={(e) =>
+                    onProductFocusChange?.(e.target.value as ProductFocusId | '')
+                  }
+                  className="h-9 w-full rounded-lg border border-sky-400 bg-white px-2.5 text-xs font-semibold text-charcoal"
+                >
+                  {PRODUCT_FOCUS_OPTIONS.map((opt) => (
+                    <option key={opt.value || 'auto'} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 min-w-0">
+                <label
+                  htmlFor="variant-prompt-llm"
+                  className="text-[9px] font-bold uppercase tracking-widest text-navy leading-none min-h-[11px]"
+                >
+                  Prompt LLM (OpenRouter)
+                </label>
+                <select
+                  id="variant-prompt-llm"
+                  value={promptLlmModel}
+                  onChange={(e) => onPromptLlmModelChange?.(e.target.value)}
+                  disabled={Boolean(generatingAll) || generatingIndex != null}
+                  className="h-9 w-full rounded-lg border border-sky-400 bg-white px-2.5 text-xs font-semibold text-charcoal disabled:opacity-60"
+                >
+                  {promptLlmGroups?.length
+                    ? promptLlmGroups.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.options.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))
+                    : promptLlmOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 sm:col-span-1 xl:col-span-1">
+                <span
+                  className="text-[9px] font-bold uppercase tracking-widest text-transparent select-none leading-none min-h-[11px] hidden xl:block"
+                  aria-hidden="true"
+                >
+                  Actions
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={generatingIndex != null || Boolean(generatingAll)}
+                  onClick={handleDownloadAll}
+                  className="h-9 w-full xl:w-auto whitespace-nowrap rounded-lg px-3.5"
+                >
+                  Download all Excel
+                </Button>
+              </div>
+
+              <div className="flex flex-col gap-1 sm:col-span-1 xl:col-span-1">
+                <span
+                  className="text-[9px] font-bold uppercase tracking-widest text-transparent select-none leading-none min-h-[11px] hidden xl:block"
+                  aria-hidden="true"
+                >
+                  Actions
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="primary"
+                  isLoading={Boolean(generatingAll)}
+                  disabled={generatingIndex != null}
+                  onClick={() => onGenerateAll()}
+                  className="h-9 w-full xl:w-auto whitespace-nowrap rounded-lg px-3.5"
+                >
+                  Generate AI for all
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       {productFocus ? (
@@ -181,7 +251,7 @@ export default function ImageVariantSlotsPanel({
         </p>
       ) : (
         <p className="text-[10px] text-mid -mt-2">
-          Auto — AI picks shot style per variant. You can override each slot individually below, or set a default here to apply to all.
+          Auto — AI picks shot style per variant. Choose a prompt LLM above (default: Claude Sonnet).
         </p>
       )}
 

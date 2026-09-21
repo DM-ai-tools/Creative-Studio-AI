@@ -173,6 +173,10 @@ export interface GenerationModelOption {
   cost_usd?: number | null
   cost_unit?: 'image' | 'second' | string | null
   estimated_seconds?: number | null
+  /** Provider-style credits (Higgsfield). Video = per second; image = per still. */
+  credits?: number | null
+  /** Max one-shot video length (seconds) without stitching. */
+  max_duration_seconds?: number | null
 }
 
 export interface MetaStatus {
@@ -201,6 +205,7 @@ export interface GenerationCatalog {
   copy_models: GenerationModelOption[]
   image_models: GenerationModelOption[]
   video_models: GenerationModelOption[]
+  prompt_llm_models?: GenerationModelOption[]
   heygen_avatar_options?: CatalogOption[]
   heygen_avatar_featured?: CatalogOption[]
   heygen_voice_options?: CatalogOption[]
@@ -385,6 +390,35 @@ export interface SocialStyleProfile {
   }>
 }
 
+export interface CompetitorSocialInsight {
+  platform?: string
+  handle?: string
+  profile_url?: string
+  fetched_at?: string
+  provider?: string
+  post_count_analyzed?: number
+  content_mix?: Record<string, number>
+  hook_patterns?: string[]
+  format_patterns?: string[]
+  posting_logic?: string
+  caption_tone?: string
+  prompt_guidance?: string
+  post_summaries?: string[]
+}
+
+/** Suggested competitor — discovered but not yet post-analyzed */
+export interface CompetitorCandidate {
+  name?: string
+  platform?: string
+  handle?: string
+  profile_url?: string
+  reason?: string
+  confidence?: string
+  discovered_at?: string
+  source?: string
+  service_area?: string
+}
+
 export interface WebsiteBrandFetchResult {
   source_url: string
   brand_name: string
@@ -450,6 +484,41 @@ export interface PerformanceStatsContext {
 export interface StatsImageExtractionResult {
   stats: PerformanceStatsContext
   filename: string
+}
+
+export interface ReferenceImageAnalysis {
+  color_palette?: string[]
+  product_description?: string
+  visual_themes?: Record<string, unknown>
+  prompt_guidance?: string
+  summary?: string
+  [key: string]: unknown
+}
+
+export interface ReferenceImageAnalysisResult {
+  file_url?: string | null
+  asset_id?: string | null
+  analysis: ReferenceImageAnalysis
+  summary: string
+  source_url?: string
+  slug?: string
+}
+
+export interface BriefReferenceImage {
+  asset_id?: string
+  file_url: string
+  analysis?: ReferenceImageAnalysis
+  summary?: string
+  is_product_reference?: boolean
+  product_reference_context?: {
+    brand_id?: string
+    industry?: string
+    niche?: string
+    product_name?: string
+  }
+  /** Local blob preview when upload happened before brand was selected */
+  localPreview?: string
+  pendingFile?: File
 }
 
 export interface BodyOutlineSection {
@@ -532,6 +601,7 @@ export interface Asset {
   asset_type: string
   width?: number | null
   height?: number | null
+  metadata?: Record<string, unknown>
   created_at: string
 }
 

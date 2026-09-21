@@ -350,6 +350,10 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
   gap: 0.55rem;
 }
+.hf-nav-actions a {
+  cursor: pointer;
+  text-decoration: none;
+}
 
 .hf-link-quiet {
   font-size: 0.875rem;
@@ -416,6 +420,8 @@ input:focus, textarea:focus, select:focus {
   opacity: 0;
   transform: scale(1.04);
   transition: opacity 0.9s ease, transform 6s ease;
+  pointer-events: none;
+  z-index: 0;
 }
 .hf-hero-slide.is-active {
   opacity: 1;
@@ -425,6 +431,7 @@ input:focus, textarea:focus, select:focus {
 .hf-hero-veil {
   position: absolute;
   inset: 0;
+  z-index: 1;
   background:
     linear-gradient(180deg, rgba(7, 8, 11, 0.45) 0%, rgba(7, 8, 11, 0.15) 35%, rgba(7, 8, 11, 0.88) 100%),
     linear-gradient(90deg, rgba(7, 8, 11, 0.7) 0%, rgba(7, 8, 11, 0.15) 55%, rgba(7, 8, 11, 0.35) 100%);
@@ -434,6 +441,7 @@ input:focus, textarea:focus, select:focus {
 .hf-hero-content {
   position: relative;
   z-index: 2;
+  pointer-events: auto;
   max-width: 1200px;
   margin: 0 auto;
   min-height: 100svh;
@@ -489,6 +497,12 @@ input:focus, textarea:focus, select:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
+  position: relative;
+  z-index: 3;
+}
+.hf-hero-cta a {
+  cursor: pointer;
+  text-decoration: none;
 }
 
 .hf-hero-dots {

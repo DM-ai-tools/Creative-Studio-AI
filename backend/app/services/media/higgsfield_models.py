@@ -84,29 +84,8 @@ HIGGSFIELD_IMAGE_SPECS: list[HiggsfieldModelSpec] = [
     ),
 ]
 
-# Video models (16) — excludes brain_activity (analysis-only)
+# Video models — Kling first (works for 10s on this account), then Seedance, Cinema…
 HIGGSFIELD_VIDEO_SPECS: list[HiggsfieldModelSpec] = [
-    HiggsfieldModelSpec(
-        "veo3_1",
-        "Google Veo 3.1",
-        "higgsfield-ai/dop/standard",
-        "video",
-        requires_image=True,
-    ),
-    HiggsfieldModelSpec(
-        "veo3_1_lite",
-        "Google Veo 3.1 Lite",
-        "higgsfield-ai/dop/lite",
-        "video",
-        requires_image=True,
-    ),
-    HiggsfieldModelSpec(
-        "veo3",
-        "Google Veo 3",
-        "higgsfield-ai/dop/standard",
-        "video",
-        requires_image=True,
-    ),
     HiggsfieldModelSpec(
         "kling3_0",
         "Kling v3.0",
@@ -124,13 +103,63 @@ HIGGSFIELD_VIDEO_SPECS: list[HiggsfieldModelSpec] = [
     HiggsfieldModelSpec(
         "seedance_2_0",
         "Seedance 2.0",
-        "higgsfield-ai/dop/turbo",
+        "bytedance/seedance-2.0/image-to-video",
         "video",
         requires_image=True,
     ),
     HiggsfieldModelSpec(
-        "seedance1_5",
-        "Seedance 1.5 Pro",
+        "cinematic_studio_4_0",
+        "Cinema Studio 4.0",
+        "higgsfield-ai/dop/standard",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "cinematic_studio_3_5",
+        "Cinema Studio 3.5",
+        "higgsfield-ai/dop/standard",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "cinematic_studio_3_0",
+        "Cinema Studio 3.0",
+        "higgsfield-ai/dop/standard",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "cinematic_studio_video",
+        "Cinema Studio 2.5",
+        "higgsfield-ai/dop/standard",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "cinematic_studio_video_v2",
+        "Cinema Studio Video V2",
+        "higgsfield-ai/dop/turbo",
+        "video",
+        requires_image=True,
+    ),
+    # Seedance 1.5 removed — Higgsfield returns model_not_found for all known paths.
+    HiggsfieldModelSpec(
+        "veo3_1",
+        "Google Veo 3.1",
+        "higgsfield-ai/dop/standard",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "veo3_1_lite",
+        "Google Veo 3.1 Lite",
+        "higgsfield-ai/dop/lite",
+        "video",
+        requires_image=True,
+    ),
+    HiggsfieldModelSpec(
+        "veo3",
+        "Google Veo 3",
         "higgsfield-ai/dop/standard",
         "video",
         requires_image=True,
@@ -159,27 +188,6 @@ HIGGSFIELD_VIDEO_SPECS: list[HiggsfieldModelSpec] = [
     HiggsfieldModelSpec(
         "grok_video",
         "Grok Video",
-        "higgsfield-ai/dop/turbo",
-        "video",
-        requires_image=True,
-    ),
-    HiggsfieldModelSpec(
-        "cinematic_studio_3_0",
-        "Cinematic Studio 3.0",
-        "higgsfield-ai/dop/standard",
-        "video",
-        requires_image=True,
-    ),
-    HiggsfieldModelSpec(
-        "cinematic_studio_video",
-        "Cinematic Studio Video",
-        "higgsfield-ai/dop/standard",
-        "video",
-        requires_image=True,
-    ),
-    HiggsfieldModelSpec(
-        "cinematic_studio_video_v2",
-        "Cinematic Studio Video V2",
         "higgsfield-ai/dop/turbo",
         "video",
         requires_image=True,
@@ -260,16 +268,33 @@ def aspect_ratio_for_format(format_type: str) -> str:
     return "1:1"
 
 
-def build_image_arguments(*, prompt: str, format_type: str) -> dict:
+def build_image_arguments(
+    *,
+    prompt: str,
+    format_type: str,
+    resolution: str | None = None,
+) -> dict:
+    # Higgsfield Soul / image APIs accept only 720p or 1080p (not "1k" / "2k").
+    res = (resolution or "1080p").strip().lower()
+    if res in {"1k", "1024", "hd"}:
+        res = "1080p"
+    if res in {"0.5k", "512", "sd"}:
+        res = "720p"
+    if res not in {"720p", "1080p"}:
+        res = "1080p"
     return {
         "prompt": prompt,
         "aspect_ratio": aspect_ratio_for_format(format_type),
-        "resolution": "1k",
+        "resolution": res,
     }
 
 
-SEEDANCE_JOB_TYPES: frozenset[str] = frozenset({"seedance_2_0", "seedance1_5"})
+SEEDANCE_JOB_TYPES: frozenset[str] = frozenset({"seedance_2_0"})
 SEEDANCE_MAX_TOTAL_SECONDS = 90
+# DoP / Cinema Studio / Seedance paths on Higgsfield reliably return ~5s per clip.
+DOP_STITCH_CLIP_SECONDS = 5
+# User request: one continuous clip only — no ffmpeg multi-clip stitch for now.
+VIDEO_CLIP_STITCH_ENABLED = False
 
 
 def is_seedance_video_spec(spec: HiggsfieldModelSpec | None) -> bool:
@@ -279,76 +304,122 @@ def is_seedance_video_spec(spec: HiggsfieldModelSpec | None) -> bool:
 
 
 def seedance_max_clip_seconds(job_set_type: str) -> int:
+    """Max seconds for ONE API clip (no stitch)."""
     job = (job_set_type or "").lower()
     if job == "seedance1_5":
         return 12
     if job == "seedance_2_0":
         return 15
-    return 15
+    if job.startswith("kling"):
+        return 10
+    if job in ("minimax_hailuo",):
+        return 10
+    if job == "marketing_studio_video":
+        return 30
+    # Cinema Studio / Soul Cast / Veo / Wan all ride DoP-style paths that
+    # reliably return ~5s per generation — do not advertise 10/15 for them.
+    if job.startswith("cinematic_studio") or job in ("soul_cast",):
+        return 5
+    if job.startswith("veo") or "dop" in job or job.startswith("wan"):
+        return 5
+    return DOP_STITCH_CLIP_SECONDS
+
+
+def single_clip_max_seconds(job_set_type: str | None) -> int:
+    """Public helper: longest one-shot video this model can return without stitching."""
+    return seedance_max_clip_seconds(job_set_type or "")
+
+
+def supports_dop_clip_stitch(job_set_type: str | None) -> bool:
+    if not VIDEO_CLIP_STITCH_ENABLED:
+        return False
+    job = (job_set_type or "").lower()
+    if job in SEEDANCE_JOB_TYPES:
+        return True
+    if job.startswith("cinematic_studio") or job == "soul_cast":
+        return True
+    if job.startswith("veo") or job.startswith("wan") or "dop" in job:
+        return True
+    return False
 
 
 def resolve_higgsfield_video_duration(
     job_set_type: str, requested: int
 ) -> tuple[int, str | None]:
     """
-    Map UI duration to what each Higgsfield model accepts.
+    Map UI duration to what each Higgsfield model accepts in ONE shot.
+    Stitching is disabled (VIDEO_CLIP_STITCH_ENABLED=False) — longer asks are capped.
     Returns (api_seconds, warning_or_none).
     """
     req = max(2, int(requested or 5))
     job = (job_set_type or "").lower()
+    clip_max = single_clip_max_seconds(job)
 
     if job.startswith("kling"):
         allowed = (5, 10)
-        api = min(allowed, key=lambda x: abs(x - req))
+        api = min(allowed, key=lambda x: abs(x - min(req, 10)))
         warn = None
         if req > 10:
-            warn = f"Kling supports up to 10s; using {api}s (you asked for {req}s)."
+            warn = f"Kling max is 10s in one video — using {api}s (you asked for {req}s)."
         return api, warn
 
     if job in ("minimax_hailuo",):
         allowed = (6, 10)
-        api = min(allowed, key=lambda x: abs(x - req))
+        api = min(allowed, key=lambda x: abs(x - min(req, 10)))
         if req > 10:
-            return api, f"Minimax Hailuo max 10s; using {api}s."
+            return api, f"Minimax Hailuo max 10s — using {api}s."
         return api, None
 
-    if job in ("seedance1_5",):
-        allowed = (4, 8, 12)
-        api = min(allowed, key=lambda x: abs(x - req))
+    if job == "seedance1_5":
+        allowed = (4, 5, 6, 7, 8, 9, 10, 11, 12)
+        api = min(allowed, key=lambda x: abs(x - min(req, 12)))
         if req > 12:
-            return api, f"Seedance 1.5 max 12s; using {api}s."
+            return 12, (
+                f"Seedance 1.5 Pro max is 12s per video (no stitch) — using 12s "
+                f"(you asked for {req}s)."
+            )
         return api, None
 
-    if job in ("seedance_2_0",):
+    if job == "seedance_2_0":
         api = max(2, min(15, req))
         if req > 15:
-            return 15, f"Seedance 2.0 max ~15s; using 15s (you asked for {req}s)."
+            return 15, (
+                f"Seedance 2.0 max is 15s per video (no stitch) — using 15s "
+                f"(you asked for {req}s)."
+            )
         return api, None
 
     if job == "marketing_studio_video":
         api = max(5, min(30, req))
         if req > 30:
-            return 30, f"Marketing Studio max 30s; using 30s."
+            return 30, "Marketing Studio max 30s — using 30s."
         return api, None
 
-    if job in ("cinematic_studio_video", "cinematic_studio_video_v2", "cinematic_studio_3_0"):
-        allowed = (5, 10)
-        api = min(allowed, key=lambda x: abs(x - req))
-        if req > 10:
-            return api, f"Cinematic Studio max 10s; using {api}s."
-        return api, None
+    # Cinema Studio / Soul Cast — DoP backend; one shot is ~5s (not 10/15)
+    if job.startswith("cinematic_studio") or job in ("soul_cast",):
+        if req > 5:
+            return 5, (
+                "Cinema Studio (DoP) returns ~5s per video. "
+                "Using 5s — pick Seedance 2.0 for 10–15s in one file."
+            )
+        return 5, None
 
-    # DoP / Veo-labeled paths (higgsfield-ai/dop/*) — typically 5s per clip
-    if job.startswith("veo") or "dop" in job:
+    # DoP / Veo / Wan — typically one ~5s clip without stitch
+    if job.startswith("veo") or "dop" in job or job.startswith("wan"):
         api = 5
         if req > 5:
             return api, (
-                f"This Higgsfield clip is limited to 5s. For longer ads pick "
-                f"Kling v3.0 or Marketing Studio Video (you asked for {req}s)."
+                f"This model max is ~5s per video (no stitch) — using 5s "
+                f"(you asked for {req}s). Pick Seedance 2.0 for up to 15s."
             )
         return api, None
 
-    api = max(2, min(15, req))
+    api = max(2, min(clip_max, req))
+    if req > clip_max:
+        return api, (
+            f"Model max is {clip_max}s per video (no stitch) — using {api}s "
+            f"(you asked for {req}s)."
+        )
     return api, None
 
 

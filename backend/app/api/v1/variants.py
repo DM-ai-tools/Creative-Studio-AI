@@ -23,6 +23,49 @@ class RegenerateImageRequest(BaseModel):
     image_model: str | None = Field(default=None, description="Image model id from catalog")
 
 
+class CreateFromMediaRequest(BaseModel):
+    """Save a Creative Studio (or other) media URL as a Variant library row."""
+    media_url: str
+    media_mode: str = Field(default="video", description="image | video")
+    aspect: str = "9/16"
+    model: str = "creative-studio"
+    prompt: str = ""
+    duration_seconds: int | None = None
+    seed_image_url: str | None = None
+    brief_id: UUID | None = None
+    brand_id: UUID | None = None
+    brief_title: str | None = None
+    product_name: str = ""
+
+
+@router.post("/from-media", response_model=VariantResponse)
+async def create_variant_from_media(
+    data: CreateFromMediaRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach a finished Creative Studio image/video to the Variants page."""
+    variant = await VariantService.create_from_creative_studio(
+        db,
+        tenant_id=current_user.tenant_id,
+        user_id=current_user.id,
+        brief_id=data.brief_id,
+        brand_id=data.brand_id,
+        media_url=data.media_url,
+        media_mode=data.media_mode,
+        aspect=data.aspect,
+        model=data.model,
+        prompt=data.prompt,
+        duration_seconds=data.duration_seconds,
+        seed_image_url=data.seed_image_url,
+        brief_title=data.brief_title,
+        product_name=data.product_name,
+    )
+    await db.commit()
+    await db.refresh(variant)
+    return _to_variant_response(variant, slim=False)
+
+
 
 def _to_variant_response(variant, *, slim: bool = False) -> VariantResponse:
     data = VariantResponse.model_validate(variant)

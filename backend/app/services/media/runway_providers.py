@@ -88,21 +88,46 @@ async def _download_asset(
 ) -> dict:
     from app.services.http_retry import async_request_with_retry
 
-    download_headers: dict[str, str] | None = None
-    if "runwayml.com" in url:
+    # Presigned S3 URLs break if we add Authorization or re-encode query params.
+    is_signed_s3 = any(
+        marker in url
+        for marker in (
+            "amazonaws.com",
+            "X-Amz-Algorithm=",
+            "X-Amz-Signature=",
+            "AWSAccessKeyId=",
+            "x-amz-signature=",
+        )
+    )
+
+    download_headers: dict[str, str] = {}
+    if "runwayml.com" in url and not is_signed_s3:
         download_headers = {"Authorization": f"Bearer {settings.RUNWAYML_API_KEY}"}
+
     response = await async_request_with_retry(
         client,
         "GET",
         url,
         follow_redirects=True,
         timeout=300.0,
-        headers=download_headers,
-        max_attempts=8,
-        base_delay_sec=3.0,
+        headers=download_headers or None,
+        max_attempts=4 if is_signed_s3 else 8,
+        base_delay_sec=2.0,
         label="Asset download",
     )
-    response.raise_for_status()
+    # Signed S3 often returns 403 XML body — retry once with a bare client (no default headers).
+    if response.status_code == 403 and is_signed_s3:
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as bare:
+            response = await bare.get(url)
+    if response.status_code >= 400:
+        body = (response.text or "")[:400]
+        if "SignatureDoesNotMatch" in body or "AccessDenied" in body:
+            raise RuntimeError(
+                "Could not download Higgsfield media from S3 (signature/access error). "
+                "Usually temporary — retry Generate. If it keeps failing, check Higgsfield credits "
+                f"and API keys. Detail: {body[:180]}"
+            )
+        response.raise_for_status()
     content = response.content
     if len(content) < 32:
         raise ValueError(f"Downloaded asset too small ({len(content)} bytes)")
@@ -134,6 +159,7 @@ class RunwayImageProvider(ImageGenerationProvider):
         format_type: str,
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
+        reference_image_url: str | None = None,
     ) -> dict:
         provider_model = resolve_image_model(model)
         if not runway_configured():
@@ -161,6 +187,7 @@ class RunwayImageProvider(ImageGenerationProvider):
                     kind="image",
                 )
                 final_url = saved["url"]
+                logo_applied = False
                 if logo_url and final_url:
                     overlaid = apply_logo_overlay_to_file(
                         final_url,
@@ -169,7 +196,10 @@ class RunwayImageProvider(ImageGenerationProvider):
                         logo_on_light_url=logo_on_light_url,
                         format_type=format_type,
                     )
-                    if overlaid:
+                    if overlaid and overlaid != final_url:
+                        final_url = overlaid
+                        logo_applied = True
+                    elif overlaid:
                         final_url = overlaid
                 return {
                     "status": "done",
@@ -177,7 +207,7 @@ class RunwayImageProvider(ImageGenerationProvider):
                     "prompt": prompt,
                     "url": final_url,
                     "provider": "runway",
-                    "logo_applied": bool(logo_url and final_url),
+                    "logo_applied": logo_applied,
                 }
         except Exception as exc:
             err = format_runway_error(exc)

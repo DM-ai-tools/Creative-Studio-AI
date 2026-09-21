@@ -1,15 +1,17 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 
+# NullPool avoids asyncpg "Future attached to a different loop" on Windows /
+# uvicorn --reload / Python 3.14 when pooled connections outlive an event loop.
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.APP_ENV == "development",
+    poolclass=NullPool,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
 )
 
 AsyncSessionLocal = async_sessionmaker(

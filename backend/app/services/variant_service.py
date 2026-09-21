@@ -95,7 +95,145 @@ class VariantService:
         await db.flush()
 
     @staticmethod
-    async def get_fatigue_alerts(db: AsyncSession, tenant_id: UUID) -> list[dict]:
+    async def create_from_creative_studio(
+        db: AsyncSession,
+        *,
+        tenant_id: UUID,
+        user_id: UUID | None,
+        brief_id: UUID | None,
+        brand_id: UUID | None,
+        media_url: str,
+        media_mode: str = "video",
+        aspect: str = "9/16",
+        model: str = "creative-studio",
+        prompt: str = "",
+        duration_seconds: int | None = None,
+        seed_image_url: str | None = None,
+        brief_title: str | None = None,
+        product_name: str = "",
+    ) -> Variant:
+        """Persist a Creative Studio still/video as a READY variant for the Variants library."""
+        from app.models.brief import Brief
+        from app.schemas.brief import BriefCreate
+
+        media_url = (media_url or "").strip()
+        if not media_url:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="media_url is required")
+
+        mode = (media_mode or "video").strip().lower()
+        a = (aspect or "9/16").replace(":", "/")
+        if mode == "image":
+            fmt = "static" if a in {"1/1", "4/3"} else "static"
+        elif a in {"16/9"}:
+            fmt = "video"
+        else:
+            fmt = "reel"
+
+        brief: Brief | None = None
+        if brief_id:
+            result = await db.execute(
+                select(Brief).where(Brief.id == brief_id, Brief.tenant_id == tenant_id)
+            )
+            brief = result.scalar_one_or_none()
+            if not brief:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Brief not found")
+        else:
+            if not brand_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Select a brand (or open Creative Studio from an existing brief) to save to Variants.",
+                )
+            title = (brief_title or "").strip() or "Creative Studio"
+            if product_name:
+                title = f"{title} — {product_name}".strip(" —")
+            from app.services.brief_service import BriefService
+
+            brief = await BriefService.create_brief(
+                db,
+                tenant_id,
+                user_id,
+                BriefCreate(
+                    brand_id=brand_id,
+                    title=title[:255],
+                    objective="Creative Studio scene",
+                    target_audience="",
+                    formats=[fmt],
+                    ad_copy_tone="Professional",
+                    cta="Shop Now",
+                    product_name=(product_name or "")[:255],
+                    key_benefits={
+                        "media_type": "creative_studio",
+                        "creative_studio": True,
+                    },
+                ),
+            )
+            brief.status = "READY"
+            brief.variant_count = 1
+
+        pipeline: dict = {}
+        if mode == "image":
+            pipeline["image"] = {
+                "status": "done",
+                "url": media_url,
+                "provider": "higgsfield",
+                "model": model,
+            }
+            pipeline["video"] = {"status": "skipped"}
+        else:
+            pipeline["video"] = {
+                "status": "done",
+                "url": media_url,
+                "provider": "higgsfield",
+                "model": model,
+                "duration_seconds": duration_seconds,
+            }
+            if seed_image_url:
+                pipeline["image"] = {
+                    "status": "done",
+                    "url": seed_image_url,
+                    "provider": "higgsfield",
+                    "role": "seed_frame",
+                }
+            else:
+                pipeline["image"] = {"status": "skipped"}
+
+        hook = (prompt or "").strip()
+        if len(hook) > 280:
+            hook = hook[:277].rsplit(" ", 1)[0] + "…"
+
+        variant = Variant(
+            brief_id=brief.id,
+            brand_id=brief.brand_id,
+            tenant_id=tenant_id,
+            format=fmt,
+            hook=hook or "Creative Studio",
+            headline="Creative Studio",
+            body_copy=(prompt or "")[:4000],
+            cta=brief.cta or "Shop Now",
+            hashtags=[],
+            ai_model=(model or "creative-studio")[:50],
+            generation_params={
+                "format": fmt,
+                "source": "creative_studio",
+                "aspect": aspect,
+                "models": {
+                    "image": model if mode == "image" else None,
+                    "video": model if mode != "image" else None,
+                },
+                "pipeline": pipeline,
+            },
+            status="READY",
+            compliance_status="PENDING",
+            compliance_notes={},
+        )
+        db.add(variant)
+        brief.completed_variants = int(brief.completed_variants or 0) + 1
+        brief.variant_count = max(int(brief.variant_count or 0), brief.completed_variants)
+        if brief.status in {"DRAFT", "PENDING"}:
+            brief.status = "READY"
+        await db.flush()
+        await db.refresh(variant)
+        return variant
         result = await db.execute(
             select(PerformanceRollup, Variant)
             .join(Variant, PerformanceRollup.variant_id == Variant.id)

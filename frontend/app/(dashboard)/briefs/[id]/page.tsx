@@ -68,6 +68,7 @@ function defaultSettingsFromBrief(
     heygenAvatarId: defaultAvatar,
     heygenVoiceId: defaultVoice,
     higgsfieldVoicePreset: (kb.higgsfield_voice_preset as string) || 'serene_female',
+    promptLlmModel: (kb.prompt_llm_model as string) || '',
   }
 }
 
@@ -329,9 +330,17 @@ export default function BriefDetailPage() {
     const wantsImageOnly =
       (brief.formats ?? []).length > 0 &&
       (brief.formats ?? []).every((f) => f === 'static' || f === 'carousel')
-    if (wantsImageOnly && !genSettings.imageModel) {
-      toast.error('Choose an image model in Generation models before generating.')
-      return
+    let imageModelToUse = genSettings.imageModel
+    if (wantsImageOnly && !imageModelToUse) {
+      // Saved briefs can be missing `key_benefits.image_model`.
+      // If so, we auto-pick the first catalog image model so generation still works.
+      const fallbackModel = catalog?.image_models?.[0]?.id
+      if (!fallbackModel) {
+        toast.error('Choose an image model in Generation models before generating.')
+        return
+      }
+      imageModelToUse = fallbackModel
+      setGenSettings((prev) => (prev ? { ...prev, imageModel: fallbackModel } : prev))
     }
     const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
     const pdfMode = kb.script_source === 'pdf'
@@ -369,7 +378,7 @@ export default function BriefDetailPage() {
       const result = await briefsApi.generate(id, {
         formats: brief.formats,
         ai_model: genSettings.copyModel,
-        image_model: genSettings.imageModel || undefined,
+        image_model: imageModelToUse || undefined,
         video_model: genSettings.videoModel,
         ...(wantsVideo ? { video_duration_seconds: genSettings.videoDurationSeconds } : {}),
         ...(wantsVideo && genSettings.videoModel.toLowerCase().startsWith('heygen')
@@ -659,6 +668,8 @@ export default function BriefDetailPage() {
         {/* ── Creative Studio tab panel ── */}
         {activeTab === 'creative_studio' && (
           <CreativeStudioTab
+            briefId={brief.id}
+            brandId={brief.brand_id}
             briefTitle={brief.title}
             brandName={brand?.name}
             productName={brief.product_name}

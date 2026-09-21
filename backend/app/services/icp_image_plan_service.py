@@ -145,6 +145,15 @@ _INDUSTRY_SCENE_POOLS: dict[str, list[str]] = {
         "Over-shoulder whiteboard session circling one priority problem",
         "Environmental wide shot: subject small in frame, workplace context tells the story",
         "Morning light office: focused work moment with tools that fit the ICP (laptop, phone, or industry props as needed)",
+        # Extra diverse scenes added for variation
+        "Before/after split: LEFT problem state with visible pain + concerned expression; RIGHT outcome + relieved confident smile",
+        "Hero product or service result revealed on screen/in-hand — subject reacts with genuine relief or pride",
+        "Outdoor location matching the ICP's world: person in the context where the problem is felt",
+        "Close-up hands-only shot showing the solution in action, warm natural side light",
+        "Social proof moment: 5-star phone review or achievement visible, person and workplace in background",
+        "Contrast pair in one frame: old painful way (left) versus new easy way (right), same subject",
+        "Aspirational result: person experiencing the outcome they want, environment shows the transformation",
+        "Night/evening scene — the problem happens late, subject and device visible with warm indoor glow",
     ],
 }
 
@@ -842,6 +851,15 @@ _FAKE_JEWELLER_BRAND_RE = re.compile(
     r")\b"
 )
 
+# Agency / platform marks must never appear on client ad images.
+_PLATFORM_AGENCY_BRAND_RE = re.compile(
+    r"(?i)\b(?:"
+    r"traffic\s+radius|"
+    r"click\s*trends?|"
+    r"creative\s+studio\s+ai"
+    r")\b"
+)
+
 
 def _is_jewellery_niche(*, niche: str = "", industry: str = "", text: str = "") -> bool:
     if _resolve_niche_category(niche=niche, industry=industry) == "jewellery":
@@ -989,12 +1007,28 @@ def consolidate_image_prompt_for_generation(
         return raw
 
     scene_source = " ".join(p for p in (scene_prompt, raw) if p).strip()
-    lifestyle = _prompt_describes_lifestyle_scene(scene_source)
-    catalog = _normalize_product_focus(product_focus) == "product_only" and not lifestyle
+    # If product_focus is explicitly declared (from the MD seed), it is the
+    # ground truth.  Do NOT let ad copy words like "consultation" or "couples"
+    # override it — those words appear in headline/CTA copy, NOT visual direction.
+    explicit_focus = _normalize_product_focus(product_focus)
+    if explicit_focus == "product_only":
+        lifestyle = False
+        catalog = True
+    elif explicit_focus in ("with_person", "product_with_person"):
+        lifestyle = True
+        catalog = False
+    else:
+        # No explicit focus — fall back to text heuristic only when product_focus
+        # is genuinely unknown.
+        lifestyle = _prompt_describes_lifestyle_scene(scene_source)
+        catalog = False  # product_only must be explicit, not inferred from copy
+    # Conflict = the LLM injected a shot-style lock that contradicts the actual
+    # product_focus.  Only flag when lifestyle is genuinely True (person-centric),
+    # not when "consultation" appears in ad copy for a graphic card.
     conflict = (
         ("PRODUCT-ONLY" in raw and lifestyle)
-        or ("gold on dark" in raw.lower() and lifestyle and "consultation" in raw.lower())
-        or ("pedestal" in raw.lower() and lifestyle and "boutique" in raw.lower())
+        or ("gold on dark" in raw.lower() and lifestyle and not catalog)
+        or ("pedestal" in raw.lower() and lifestyle and not catalog)
     )
     lock_count = sum(
         1
@@ -1008,22 +1042,56 @@ def consolidate_image_prompt_for_generation(
         )
         if marker in raw
     )
-    if len(raw) < 700 and not conflict and lock_count < 2:
+    # Fast path: short clean prompt, no conflicts, very few lock markers.
+    # Also allow longer product_only graphic prompts to pass through early —
+    # they don't need lifestyle re-assembly.
+    if not conflict and lock_count < 2 and (len(raw) < 700 or (catalog and not lifestyle)):
         return raw
 
-    scene = _extract_scene_body(scene_prompt, raw)
-    gold = _clean_brand_hex(primary_color) or "#C9A962"
-    dark = _clean_brand_hex(secondary_color) or "#0A0A0A"
+    # Use the FULL creative content from the LLM-generated prompt (scene_prompt),
+    # not just a regex-extracted sentence.  Strip any lock-block markers that
+    # may have already been injected, then keep the clean creative narrative.
+    _LOCK_STRIP_MARKERS = (
+        "PRODUCT-ONLY RETAIL SHOT", "WITH-PERSON SHOT", "PRODUCT-HERO",
+        "NICHE PRODUCT LOCK", "JEWELLERY PRODUCT HERO", "JEWELLERY TYPE LOCK",
+        "PRODUCT-ONLY JEWELLERY", "BRAND IDENTITY LOCK", "TEXT-ANCHOR",
+        "ON-IMAGE COPY", "BRAND VISUAL LOCK", "SOCIAL FEED",
+        "CLIENT SOCIAL MEDIA", "PROP BAN", "ON-IMAGE TYPE STYLE",
+        "TEXT ON IMAGE ONLY", "PRODUCT-ONLY CATALOG",
+        "VISUAL ART STYLE",
+    )
+    def _creative_body(text: str) -> str:
+        """Return the creative scene portion before the first lock-block marker."""
+        s = (text or "").strip()
+        for mk in _LOCK_STRIP_MARKERS:
+            idx = s.find(mk)
+            if 0 < idx:
+                s = s[:idx].strip()
+        # Also strip leading lock label if the text STARTS with one
+        s = re.sub(r"^(?:" + "|".join(re.escape(m) for m in _LOCK_STRIP_MARKERS) + r")[^:]*:\s*", "", s, flags=re.I).strip()
+        return s
+
+    _creative_raw = _creative_body(scene_prompt)
+    if not _creative_raw:
+        _creative_raw = _creative_body(raw)
+    # Prefer the full creative body; fall back to one-sentence extraction only
+    # when nothing substantial was recovered.
+    if len(_creative_raw) >= 60:
+        scene = _creative_raw[:900].rstrip() + ("…" if len(_creative_raw) > 900 else "")
+    else:
+        scene = _extract_scene_body(scene_prompt, raw)
+
+    accent = _clean_brand_hex(primary_color)
+    sub = _clean_brand_hex(secondary_color)
     brand = _canonical_brand_lettering(brand_name) or "the brand"
     hook = (image_hook or "").strip()
     headline = (image_headline or "").strip()
     cta_text = (cta or "").strip()
+    is_jewellery = _is_jewellery_niche(niche=niche, industry=industry)
 
     text_lines: list[str] = []
     if catalog:
-        header = "PRODUCT-ONLY CATALOG SHOT"
-        if _is_jewellery_niche(niche=niche, industry=industry):
-            header = "PRODUCT-ONLY JEWELLERY CATALOG SHOT"
+        header = "PRODUCT-ONLY JEWELLERY CATALOG SHOT" if is_jewellery else "PRODUCT-ONLY CATALOG SHOT"
         text_lines.append(
             f"{header} — Premium ecommerce hero. Product fills 60–80% of frame on a clean studio "
             f"background. Professional lighting, sharp detail. NO people, NO faces, NO hands."
@@ -1031,20 +1099,19 @@ def consolidate_image_prompt_for_generation(
         if scene:
             text_lines.append(scene)
         text_lines.append(
-            f"Brand Kit logo composited in a white header strip in post — do not draw a fake wordmark."
+            "Brand Kit logo composited in a white header strip in post — do not draw a fake wordmark."
         )
-    elif lifestyle and _is_jewellery_niche(niche=niche, industry=industry):
-        text_lines.append(
-            "LIFESTYLE JEWELLERY CONSULTATION — Bright modern jewellery boutique. "
-            "Young couple sits comfortably across from a friendly jeweller at a natural timber "
-            "consultation table — relaxed, genuinely engaged in conversation. "
-            "Solitaire ring, loose diamonds in a viewing tray, and ring sketches visible on the table. "
-            "Warm natural window light, premium Australian boutique aesthetic, authentic and unhurried."
-        )
-        if scene and scene not in text_lines[-1]:
+    elif lifestyle and is_jewellery:
+        # Use the actual MD / LLM creative scene — never replace with a hardcoded description.
+        if scene:
             text_lines.append(scene)
+        else:
+            text_lines.append(
+                "Authentic jewellery lifestyle scene — real person or couple naturally interacting "
+                "with jewellery in a warmly-lit, premium boutique or lifestyle setting."
+            )
         text_lines.append(
-            "The couple, jeweller, and engagement ring must all be visible — ring clearly identifiable. "
+            "The jewellery piece must be the clear visual hero: beautifully lit, sharp detail. "
             "NO product-only pedestal shot. NO full-frame black studio catalog composition."
         )
     else:
@@ -1064,15 +1131,34 @@ def consolidate_image_prompt_for_generation(
             bits.append(f'Centre: "{headline}"')
         if cta_text:
             bits.append(f'CTA: "{cta_text}"')
-        bits.append(
-            f"Use elegant luxury typography in gold {gold} and white. "
-            "No other readable text. No invented jewellery brand names."
-        )
+        if is_jewellery:
+            gold = accent or "#C9A962"
+            bits.append(
+                f"JEWELLERY TYPOGRAPHY: main headline in flowing gold italic serif / cursive script ({gold}). "
+                "Subline in thin tracked gold sans-serif sentence case. "
+                "CTA as a warm champagne-gold pill button. "
+                "NEVER ALL CAPS, NEVER white Impact font, NEVER corporate blue/navy."
+            )
+        else:
+            bits.append(
+                f"Typography: headline/CTA accent {accent or 'brand primary from Brand Kit'}; "
+                f"supporting text white or {sub or 'brand secondary'}. "
+                "Match brand fonts — NO generic gold serif unless brand palette uses gold."
+            )
         text_lines.append(" ".join(bits))
     else:
-        text_lines.append(
-            f"Typography: gold ({gold}) + white only for any on-image text. No blue/navy tones."
-        )
+        if is_jewellery:
+            gold = accent or "#C9A962"
+            text_lines.append(
+                f"JEWELLERY TYPOGRAPHY: any on-image text in flowing gold italic serif ({gold}). "
+                "Subline in thin tracked gold sans-serif. NO ALL CAPS, NO Impact, NO navy type."
+            )
+        else:
+            text_lines.append(
+                f"Typography: accent {accent or 'brand primary'} for headline/CTA; "
+                f"supporting text white or {sub or 'brand secondary'}. "
+                "No generic gold serif unless brand uses gold."
+            )
 
     text_lines.append(
         f'Brand identity: ONLY "{brand}" if a name appears — logo composited in post. '
@@ -1080,12 +1166,12 @@ def consolidate_image_prompt_for_generation(
     )
     if lifestyle and not catalog:
         text_lines.append(
-            f"Colour palette: gold ({gold}) headlines/CTA + white sublines; "
-            f"boutique may be bright/natural — do NOT force full-frame black ({dark}) background."
+            f"Colour palette: accent {accent or 'brand primary'} for headlines/CTA; "
+            "keep lifestyle scene natural and bright — do NOT force black studio or gold serif."
         )
     elif catalog:
         text_lines.append(
-            f"Accent colours: gold ({gold}) for CTA/headline; clean studio background."
+            f"Accent colours: {accent or 'brand primary'} for CTA/headline; clean studio background."
         )
 
     return _clamp_prompt(" ".join(text_lines), max_len=2800)
@@ -1147,9 +1233,8 @@ def enforce_product_focus_in_prompt(
         elif niche or industry:
             lock += f" Product category: {niche or industry}."
         lock += (
-            " Brand Kit logo is composited in a white header strip in post — do not draw a fake wordmark. "
-            "Keep the top ~10% of the frame a simple clean background (no busy diagonal art or headline "
-            "bleeding into the logo zone)."
+            " Brand Kit logo is composited in a slim white header strip in post — do not draw a fake wordmark. "
+            "Full-bleed creative to the top edge; do NOT add an empty white margin for the logo."
         )
         return f"{lock} {cleaned}".strip()
     if focus == "product_with_person":
@@ -1186,6 +1271,171 @@ _VALID_ON_IMAGE_STYLES = frozenset({
     "fashion_editorial",
     "high_contrast",
 })
+
+_VALID_IMAGE_VISUAL_STYLES = frozenset({
+    "auto",
+    "sketch_illustration",
+    "flat_cartoon",
+    "clay_3d",
+    "3d_metaphor",
+})
+
+_IMAGE_VISUAL_STYLE_SENTINEL = "VISUAL ART STYLE:"
+
+# Universal DTC narrative: problem scene shows FAILED ALTERNATIVES (competitors / wrong
+# solutions), hero product is the fresh answer — NEVER scatter the hero brand on empties.
+_HERO_VS_COMPETITOR_NARRATIVE = (
+    " HERO-vs-COMPETITOR NARRATIVE (mandatory — any industry): the scene shows a person in "
+    "the problem state (exhausted tradie, frustrated homeowner, tired worker, etc.). "
+    "Scattered empty / discarded / failed items around them = GENERIC COMPETITOR products, "
+    "unbranded alternatives, or wrong solutions — NEVER the hero brand's logo, colours, or "
+    "packaging on those discarded items (that would imply our product failed). "
+    "The hero product appears ONCE — fresh, crisp, realistic packshot or product render — "
+    "as the solution (bottom corner or held confidently). Hook = category/competitors "
+    "letting you down, NOT our brand. Works for drinks, retail, HVAC, dental, supplements, "
+    "landscaping, trade — adapt props to the industry."
+)
+
+_PHOTO_LANGUAGE_BAN = (
+    " HARD BAN when this art style is selected: do NOT generate photorealistic photography, "
+    "live-action humans, DSLR/phone UGC, documentary grain, sweat-pore realism, or stock photos. "
+    "Characters must be illustrated / stylised only. Exception: the hero product packshot may "
+    "be a crisp realistic product render nested into the illustrated scene."
+)
+
+
+def resolve_image_visual_style(style: str) -> str:
+    raw = (style or "auto").strip().lower().replace("-", "_")
+    if not raw or raw == "auto":
+        return "auto"
+    return raw if raw in _VALID_IMAGE_VISUAL_STYLES else "auto"
+
+
+def image_visual_style_lock(resolved_style: str) -> str:
+    """Campaign-level illustration / 3D treatment for scroll-stop Meta ads."""
+    if resolved_style == "sketch_illustration":
+        return (
+            f" {_IMAGE_VISUAL_STYLE_SENTINEL} HAND-DRAWN EDITORIAL SKETCH — aged parchment/cream paper "
+            "background with subtle stains and torn edges. Cross-hatching, pencil/ink stippling, and "
+            "sketch shading (NOT photography, NOT flat vector, NOT 3D). Educational diagram layout with "
+            "labeled arrows, ribbon banners, and a single clear metaphorical action in the centre. "
+            "Diagram labels distinguish the problem (competitor/wrong approach) from the hero solution."
+            f"{_HERO_VS_COMPETITOR_NARRATIVE}{_PHOTO_LANGUAGE_BAN}"
+            " Headline in bold clean sans-serif at top."
+        )
+    if resolved_style == "flat_cartoon":
+        return (
+            f" {_IMAGE_VISUAL_STYLE_SENTINEL} FLAT 2D CARTOON ILLUSTRATION — thick black/dark outlines, "
+            "cel-shaded or vector-flat colours, exaggerated cartoon proportions and expressions. "
+            "ENTIRE scene (people, environment, props) must look hand-illustrated / animated — "
+            "like a DTC meme ad or animated storyboard frame. "
+            "Character in exaggerated problem pose (slumped, exhausted, frustrated) in an "
+            "industry-authentic setting. Scattered empties = GENERIC competitor cans/bottles/boxes "
+            "(no hero brand on discarded items). Bottom-right: ONE crisp realistic hero product "
+            "packshot nested into the cartoon (hybrid illustrated scene + real product). "
+            "Bold headline at top targets competitors/category letting you down."
+            f"{_HERO_VS_COMPETITOR_NARRATIVE}{_PHOTO_LANGUAGE_BAN}"
+        )
+    if resolved_style == "clay_3d":
+        return (
+            f" {_IMAGE_VISUAL_STYLE_SENTINEL} 3D CLAY / PIXAR FIGURINE STYLE — stylised toy-like characters "
+            "on clean white studio background with soft shadow. Before/after progression in vertical window "
+            "frames or side-by-side panels with month/size labels. Early panels may show generic failed "
+            "alternatives; final panel: character holds fresh hero product confidently."
+            f"{_HERO_VS_COMPETITOR_NARRATIVE}{_PHOTO_LANGUAGE_BAN}"
+            " Smooth 3D render, rounded proportions — NOT photography."
+        )
+    if resolved_style == "3d_metaphor":
+        return (
+            f" {_IMAGE_VISUAL_STYLE_SENTINEL} SURREAL 3D METAPHOR SCENE — playful symbolic 3D objects "
+            "(balloon animals, clumped shapes, metaphorical body parts) on muted brand-colour background. "
+            "Failed/wrong metaphor elements must NOT carry hero brand marks. Product pouch or packshot "
+            "anchored bottom-centre with thin connector line to metaphor above — the solution."
+            f"{_HERO_VS_COMPETITOR_NARRATIVE}{_PHOTO_LANGUAGE_BAN}"
+            " Bold white/pink sans-serif headline upper-left. NOT realistic photography."
+        )
+    return ""
+
+
+def _strip_photo_language_for_illustration(prompt: str) -> str:
+    """Neutralise photo/UGC phrases that fight cartoon / 3D illustration locks."""
+    text = prompt or ""
+    replacements = (
+        (r"\bphotorealistic\b", "illustrated"),
+        (r"\bphoto-realistic\b", "illustrated"),
+        (r"\bphotography\b", "illustration"),
+        (r"\bphotograph\b", "illustration"),
+        (r"\bdocumentary[- ]style\b", "illustrated narrative"),
+        (r"\bUGC\b", "illustrated"),
+        (r"\bshot on (?:a )?phone\b", "drawn as a cartoon frame"),
+        (r"\bDSLR\b", "illustrated"),
+        (r"\bcandid (?:moment|shot|photo)\b", "cartoon beat"),
+        (r"\breal (?:human|person|people|trainer|athlete)\b", "cartoon character"),
+        (r"\blive[- ]action\b", "illustrated"),
+        (r"\bstock photo\b", "cartoon scene"),
+        (r"\bprofessional stock\b", "stylised cartoon"),
+        (r"\bsweaty\b", "cartoon-stressed"),
+        (r"\bpore[- ]level\b", ""),
+        (r"\bhyper[- ]real\b", "stylised"),
+    )
+    for pattern, repl in replacements:
+        text = re.sub(pattern, repl, text, flags=re.I)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def enforce_image_visual_style_in_prompt(prompt: str, *, image_visual_style: str = "auto") -> str:
+    cleaned = (prompt or "").strip()
+    if not cleaned:
+        return cleaned
+    resolved = resolve_image_visual_style(image_visual_style)
+    if resolved == "auto":
+        return cleaned
+    if _IMAGE_VISUAL_STYLE_SENTINEL in cleaned:
+        cleaned = re.sub(
+            r"\s*VISUAL ART STYLE:.*?(?=\s*(?:ON-IMAGE TYPE STYLE:|TEXT-ANCHOR:|BRAND IDENTITY LOCK:|BRAND VISUAL LOCK:|$))",
+            " ",
+            cleaned,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    # Drop weak LLM prefixes like "FLAT 2D CARTOON ILLUSTRATION:" that still describe photos
+    cleaned = re.sub(
+        r"^(?:FLAT 2D CARTOON ILLUSTRATION|HAND-DRAWN EDITORIAL SKETCH|"
+        r"3D CLAY / PIXAR FIGURINE STYLE|SURREAL 3D METAPHOR SCENE)\s*:\s*",
+        "",
+        cleaned,
+        flags=re.I,
+    ).strip()
+    lock = image_visual_style_lock(resolved)
+    if not lock:
+        return cleaned
+    cleaned = _strip_photo_language_for_illustration(cleaned)
+    # PREFIX so the image model sees art style before any leftover photo cues
+    return f"{lock.strip()} {cleaned}".strip()
+
+
+def format_image_visual_style_for_llm(image_visual_style: str) -> str:
+    resolved = resolve_image_visual_style(image_visual_style)
+    if resolved == "auto":
+        return ""
+    labels = {
+        "sketch_illustration": "Hand-drawn sketch / cross-hatch editorial diagram",
+        "flat_cartoon": "Flat 2D cartoon illustration with bold outlines",
+        "clay_3d": "3D clay / Pixar figurine animation style",
+        "3d_metaphor": "Surreal 3D metaphor illustration (symbolic objects + product hero)",
+    }
+    label = labels.get(resolved, resolved)
+    return (
+        f"CAMPAIGN VISUAL ART STYLE (mandatory for ALL variants): {label}. "
+        "Every variant prompt MUST describe this illustration/3D treatment — NEVER lifestyle photography, "
+        "NEVER documentary/UGC phone-camera realism, NEVER photoreal humans. "
+        "Write the scene as cartoon / sketch / clay / 3D metaphor characters and environments. "
+        "Only the hero product packshot may be realistic. "
+        "CRITICAL NARRATIVE: scattered empty/discarded items = competitors or wrong solutions ONLY — "
+        "never the hero brand on failed props. Hero product = one fresh realistic packshot as the answer. "
+        "Adapt to any industry (retail, trade, dental, HVAC, supplements, energy drinks, landscaping)."
+    )
+
 
 _ON_IMAGE_STYLE_SENTINEL = "ON-IMAGE TYPE STYLE:"
 
@@ -1256,7 +1506,8 @@ def on_image_style_lock(
         return (
             f" {_ON_IMAGE_STYLE_SENTINEL} Bold performance ad typography — white ALL CAPS sans-serif "
             "headline with strong drop shadow for scroll-stop contrast. Subline in white sans-serif "
-            f"sentence case. CTA pill in solid {primary} with white bold sans. "
+            f"sentence case. CTA pill in solid brand primary {primary} with white bold sans. "
+            f"Accent/highlight words use {primary} — never default to gold (#C9A962). "
             "NO gold serif, NO luxury jeweller script."
             f"{brand_visual}"
         )
@@ -1269,7 +1520,9 @@ def on_image_style_lock(
     return (
         f" {_ON_IMAGE_STYLE_SENTINEL} Modern retail ad typography — {headline_rule}. "
         f"Subline in lighter white {sub_type if body_font else 'sans-serif'}. Dark charcoal gradient "
-        f"lower-third behind text blocks. CTA pill uses {primary} with white bold sans-serif. "
+        f"lower-third behind text blocks. CTA pill uses brand primary {primary} with white bold sans-serif. "
+        f"Headline/CTA accent colour MUST be {primary} — never gold, champagne, or metallic serif unless "
+        f"{primary} is a gold tone. "
         "NO champagne gold serif, NO luxury jeweller script, NO gold foil lettering."
         f"{brand_visual}"
     )
@@ -1524,6 +1777,7 @@ def enforce_brand_identity_in_prompt(
         return name
 
     cleaned = _FAKE_JEWELLER_BRAND_RE.sub(_keep_or_replace, cleaned)
+    cleaned = _PLATFORM_AGENCY_BRAND_RE.sub(name, cleaned)
     # Category nav must never be treated as a store wordmark.
     if "shop diamonds" not in name_l:
         cleaned = re.sub(
@@ -1547,6 +1801,8 @@ def enforce_brand_identity_in_prompt(
         "Do NOT invent or render any other jeweller/store name — especially not Lusso, "
         "Lusso Diamonds, Shop Dimad, She Diamond, Shop Diamonds (website category, not the brand), "
         "Tiffany, Cartier, or any lookalike luxury house. "
+        "Do NOT render Traffic Radius, ClickTrends, or any agency/platform logo or wordmark — "
+        f'only "{name}" is allowed. '
         "The real Brand Kit logo is composited in post — do not draw a second fake logo. "
         "Collection names and nav labels must never appear as the store name."
     )
@@ -2881,7 +3137,7 @@ Output ONLY valid JSON:
       "image_headline": "max 8 words, catchy, same idea as message",
       "cta": "2-4 word button text unique to this variant",
       "offer": "caption follow-up in 2–3 sentences, never burned on the image",
-      "prompt": "art-directed image prompt, one paragraph 120-260 words. For before_after: describe clear LEFT before / RIGHT after comparison. For other angles: single moment, single setting, single emotion.",
+      "prompt": "Art-directed image generation prompt, 120-260 words. The prompt MUST be grounded in THIS variant's specific creative concept (from seed scene / post_type / use case) — not a generic lifestyle shot. TWO types: (A) PHOTOGRAPHY — describe the single emotional moment: subject pose/action, setting details, lighting, depth-of-field, what the viewer feels seeing it. (B) GRAPHIC / STAT / QUOTE CARD — describe the layout, exact text content, icons/illustration style, background colour, typography, and any inset image. Never default to a consultation room photo for a graphic card.",
       "reasoning": "one sentence: name the industry-specific location/object visible in the background (the setting cue), what a stranger would say the image shows with text removed (must match the single_message), and how the copy reinforces it"
     }}
   ]
@@ -2893,7 +3149,11 @@ Rules:
 - When AD STYLES / HOOK FRAMEWORKS are provided, they are MANDATORY — hooks AND visuals must clearly match them.
 - If pattern_interrupt is selected: NEVER produce generic stock meeting/laptop huddle scenes; the image must feel unexpected and scroll-stopping; do NOT use the phrase "professional stock photography".
 - use_cases: 1-3 ids from the catalogue only.
-- prompt MUST describe the visual story FIRST (subject, action, stakes, emotion, props), THEN the exact on-image text: burn ONLY image_hook + image_headline + CTA. Never put full hook/message/offer text on the image.
+- prompt MUST start from the seed's SPECIFIC visual concept (scene / post_type) and expand it creatively — NEVER replace a seed's concept with a generic lifestyle or consultation photo.
+  PHOTOGRAPHY prompts: visual story FIRST (subject, action, stakes, emotion, props, lighting, lens feel), THEN on-image text.
+  GRAPHIC / STAT / QUOTE CARD prompts: layout description FIRST (background, key visual element, number/quote/icon, brand colours, typography style), THEN exactly what text appears.
+  The viewer should feel the concept's emotion / trust / logic from the image alone, before reading the copy.
+- Burn ONLY image_hook + image_headline + CTA onto the image. Never put full hook/message/offer body text on the image.
 - prompt MUST mention the selected ad style by name when frameworks are provided (e.g. "pattern interrupt stop-the-scroll commercial").
 - ON-IMAGE COPY: industry/niche vocabulary, speaks to the ICP's fear or desire, Australian English
   (catchy Aussie billboard — not flat US corporate), never the persona's first name.
@@ -4612,6 +4872,7 @@ def _pack_icp_plan(
     niche: str = "",
     image_aspect_ratio: str = "4:3",
     on_image_style: str = "auto",
+    image_visual_style: str = "auto",
     fashion_retail_promo: bool = False,
     campaign_product_focus: str = "",
     primary_color: str = "",
@@ -4793,7 +5054,10 @@ def _pack_icp_plan(
             secondary_color=secondary_color,
             font_heading=font_heading,
             font_body=font_body,
-            brand_name=brand_name,
+        )
+        styled_prompt = enforce_image_visual_style_in_prompt(
+            styled_prompt,
+            image_visual_style=image_visual_style,
         )
         seed_focus = _seed_product_focus(seed) or _normalize_product_focus(campaign_product_focus)
         consolidated = consolidate_image_prompt_for_generation(
@@ -4852,12 +5116,16 @@ async def generate_icp_image_plan(
     strategy_notes: str = "",
     strategy_variants: list[dict] | None = None,
     on_image_style: str = "auto",
+    image_visual_style: str = "auto",
     product_focus: str = "",
     primary_color: str = "",
     secondary_color: str = "",
     font_heading: str = "",
     font_body: str = "",
     social_style_profile: dict | None = None,
+    competitor_social_insights: list[dict] | None = None,
+    reference_images: list[dict] | None = None,
+    llm_model: str = "",
 ) -> dict[str, Any]:
     """
     Build ICP from industry + niche + objective, then produce N distinct image variant plans.
@@ -4873,13 +5141,33 @@ async def generate_icp_image_plan(
     facts_block = format_brand_facts_for_llm(brand_facts)
     facts_whitelist = brand_facts_whitelist_text(brand_facts)
     from app.services.social_style_service import format_social_style_for_llm, resolve_effective_brand_colors
+    from app.services.competitor_social_service import format_competitor_insights_for_llm
+    from app.services.reference_image_service import (
+        format_reference_guidance_for_llm,
+        reference_primary_secondary,
+    )
+    from app.services.prompt_llm_catalog import resolve_prompt_llm_model
 
+    resolved_llm = resolve_prompt_llm_model(llm_model)
+    kit_primary = primary_color
+    kit_secondary = secondary_color
+    ref_primary, ref_secondary = reference_primary_secondary(reference_images)
+    if ref_primary and not (kit_primary or "").strip():
+        kit_primary = ref_primary
+    if ref_secondary and not (kit_secondary or "").strip():
+        kit_secondary = ref_secondary
     primary_color, secondary_color = resolve_effective_brand_colors(
-        primary_color=primary_color,
-        secondary_color=secondary_color,
+        primary_color=kit_primary,
+        secondary_color=kit_secondary,
         social_style_profile=social_style_profile,
     )
-    social_style_block = format_social_style_for_llm(social_style_profile)
+    social_style_block = format_social_style_for_llm(
+        social_style_profile,
+        brand_primary=kit_primary,
+        brand_secondary=kit_secondary,
+    )
+    reference_block = format_reference_guidance_for_llm(reference_images)
+    competitor_block = format_competitor_insights_for_llm(competitor_social_insights)
     # Business rule: if user didn't pick a location, fall back to scraped service area.
     if not service_location and isinstance(brand_facts, dict):
         areas = [str(a).strip() for a in (brand_facts.get("service_areas") or []) if str(a).strip()]
@@ -4891,6 +5179,25 @@ async def generate_icp_image_plan(
         for seed in strategy_seeds:
             if isinstance(seed, dict) and not _seed_product_focus(seed):
                 seed["product_focus"] = campaign_product_focus
+    # Detect whether seeds already carry individual product_focus values.
+    # When they do, we must NOT override everything with a single campaign rule —
+    # instead we emit explicit per-variant instructions so the LLM honours each
+    # variant's own shot-style requirement.
+    # Keep the list length aligned to `count` so _seed_focuses[i] == seed i.
+    _seed_focuses: list[str] = [
+        _seed_product_focus(s) if isinstance(s, dict) else ""
+        for s in strategy_seeds[:count]
+    ]
+    # Pad to count in case strategy_seeds has fewer elements than requested.
+    while len(_seed_focuses) < count:
+        _seed_focuses.append("")
+    _has_any_seed_focus = any(_seed_focuses)
+    _has_mixed_seed_focus = len({f for f in _seed_focuses if f}) > 1
+    # Only push a campaign-level override to the LLM when ALL seeds share the same
+    # focus (or there are no seeds).  Mixed seeds need per-variant rules instead.
+    _prompt_campaign_focus = (
+        "" if (_has_mixed_seed_focus or _has_any_seed_focus) else campaign_product_focus
+    )
     fmt_l = (creative_format or "").strip().lower()
     seed_formats = [
         str(v.get("format") or "").strip().lower() for v in strategy_seeds if v.get("format")
@@ -4920,6 +5227,8 @@ async def generate_icp_image_plan(
         industry=industry_label,
         fashion_retail_promo=fashion_retail_promo,
     )
+    resolved_image_visual_style = resolve_image_visual_style(image_visual_style)
+    visual_style_llm_block = format_image_visual_style_for_llm(image_visual_style)
     if fashion_retail_promo:
         seed_ratio = next(
             (
@@ -4958,17 +5267,33 @@ async def generate_icp_image_plan(
         if seed_angle and i < len(angle_assignments):
             angle_assignments[i] = seed_angle
 
+    # When every variant already has its own ad_angle from the MD brief,
+    # the globally-selected frameworks are redundant and can confuse the LLM.
+    # Only emit framework guidance when seeds DON'T all have their own angle.
+    seeds_have_all_angles = (
+        len(strategy_seeds) >= count
+        and all(
+            str(s.get("ad_angle") or "").strip()
+            for s in strategy_seeds[:count]
+            if isinstance(s, dict)
+        )
+    )
     framework_lines = []
-    for fid in frameworks:
-        tip = ANGLE_GUIDANCE.get(fid, "Apply this marketing angle clearly in hook + scene.")
-        framework_lines.append(f"- {fid}: {tip}")
+    if not seeds_have_all_angles:
+        for fid in frameworks:
+            tip = ANGLE_GUIDANCE.get(fid, "Apply this marketing angle clearly in hook + scene.")
+            framework_lines.append(f"- {fid}: {tip}")
     framework_block = (
         "\n".join(framework_lines)
         if framework_lines
         else (
             "- product_hero: catalog product-alone layout — model name + bold headline on brand colors; no story angle."
             if campaign_product_focus == "product_only"
-            else "- (none selected) — AI will pick angles from campaign objective and ICP."
+            else (
+                "- (MD-defined per variant — follow each seed's ad_angle exactly.)"
+                if seeds_have_all_angles
+                else "- (none selected) — AI will pick angles from campaign objective and ICP."
+            )
         )
     )
     angle_block = per_variant_angle_instructions(angle_assignments)
@@ -5005,13 +5330,31 @@ async def generate_icp_image_plan(
         ]
         for i in range(count):
             scene_mandates[i] = catalog_scenes[i % len(catalog_scenes)]
-    seen_seed_scenes: set[str] = set()
+    # IMPORTANT: when the client provided per-variant MD scene/prompt, we must
+    # treat it as the mandatory art direction for that specific variant.
+    # Earlier de-dupe logic based on the first ~100 chars caused multiple
+    # variants to receive the same scene mandate, which made generated
+    # prompts look identical.
     for i, seed in enumerate(strategy_seeds[:count]):
         scene = str(seed.get("scene") or seed.get("prompt") or "").strip()
-        key = re.sub(r"\s+", " ", scene.lower())[:100]
-        if scene and key not in seen_seed_scenes:
-            scene_mandates[i] = scene[:500]
-            seen_seed_scenes.add(key)
+        if scene:
+            scene_mandates[i] = scene[:800]
+
+    # ── DEBUG ───────────────────────────────────────────────────────────────────
+    import sys
+    print(
+        f"[icp-image-plan] count={count}  seeds={len(strategy_seeds)}"
+        f"  mixed={_has_mixed_seed_focus}  any={_has_any_seed_focus}"
+        f"  campaign_focus={_prompt_campaign_focus!r}  seeds_all_angles={seeds_have_all_angles}",
+        file=sys.stderr,
+    )
+    for _di, _dm in enumerate(scene_mandates[:count]):
+        print(
+            f"  mandates[{_di}] focus={_seed_focuses[_di] if _di < len(_seed_focuses) else '?'!r}"
+            f"  scene={_dm[:100]!r}",
+            file=sys.stderr,
+        )
+    # ────────────────────────────────────────────────────────────────────────────
 
     niche_visual_mandate = _build_niche_visual_mandate(
         niche=niche_label,
@@ -5043,6 +5386,7 @@ async def generate_icp_image_plan(
             niche=niche_label,
             image_aspect_ratio=image_aspect_ratio,
             on_image_style=on_image_style,
+            image_visual_style=image_visual_style,
             fashion_retail_promo=fashion_retail_promo,
             campaign_product_focus=campaign_product_focus,
             primary_color=primary_color,
@@ -5102,7 +5446,7 @@ async def generate_icp_image_plan(
                 "image_hook may be the product model name; image_headline a short feature or offer line.",
                 "",
             ]
-            if campaign_product_focus == "product_only"
+            if _prompt_campaign_focus == "product_only"
             else []
         ),
         *(
@@ -5113,7 +5457,7 @@ async def generate_icp_image_plan(
                 "Use use_cases hero_product + product_person or lifestyle together.",
                 "",
             ]
-            if campaign_product_focus == "product_with_person"
+            if _prompt_campaign_focus == "product_with_person"
             else []
         ),
         *(
@@ -5123,20 +5467,60 @@ async def generate_icp_image_plan(
                 "shallow depth of field. Product must remain clearly visible.",
                 "",
             ]
-            if campaign_product_focus == "with_person"
+            if _prompt_campaign_focus == "with_person"
             else []
         ),
         *(
+            # When seeds carry MIXED shot-style requirements, emit an explicit
+            # per-variant table so the LLM never collapses them all into one rule.
             [
-                "PRODUCT SHOT LOCK (per-variant seeds): "
-                "product_focus=product_only → catalog/studio hero, NO people, use_cases: hero_product + detail_texture. "
-                "product_focus=product_with_person → product fills 60–70% of frame as hero, real person adds lifestyle context in the scene (use_cases: hero_product + product_person/lifestyle). "
-                "product_focus=with_person → real person is the main subject, product clearly visible (use_cases: product_person / bs_emotional_using). "
-                "When product_model is set, that exact model name must appear in the scene and may become image_hook on product-only cards.",
+                "PER-VARIANT SHOT STYLE — MANDATORY (each variant has its OWN rule; ignore any global default above):",
+            ]
+            + [
+                "  Variant {n}: {rule}".format(
+                    n=i + 1,
+                    rule=(
+                        "PRODUCT ONLY — NO people, NO hands, NO faces, NO models. "
+                        "Clean studio / catalog / graphic composition. "
+                        "Product is the sole subject."
+                        if (_seed_focuses[i] if i < len(_seed_focuses) else "") == "product_only"
+                        else (
+                            "PRODUCT HERO + LIFESTYLE PERSON — product fills 60–70% of the frame "
+                            "as the clear visual hero. A real person (hands, partial body, or full "
+                            "figure) naturally interacts with / wears / uses the product, adding "
+                            "authentic lifestyle context. Product always dominates the composition."
+                            if (_seed_focuses[i] if i < len(_seed_focuses) else "") == "product_with_person"
+                            else (
+                                "PERSON-LED — real person is the primary subject; "
+                                "product is clearly visible but secondary."
+                                if (_seed_focuses[i] if i < len(_seed_focuses) else "") == "with_person"
+                                else "AUTO — choose the best composition for this variant's scene."
+                            )
+                        )
+                    ),
+                )
+                for i in range(count)
+            ]
+            + [
+                "RULE DEFINITIONS: "
+                "product_only = studio/catalog/graphic, zero people; "
+                "product_with_person = product is hero, person adds context; "
+                "with_person = person is hero, product supports.",
                 "",
             ]
-            if any(_seed_product_focus(s) for s in strategy_seeds[:count] if isinstance(s, dict))
-            else []
+            if _has_mixed_seed_focus
+            else (
+                [
+                    "PRODUCT SHOT LOCK (all seeds share the same focus): "
+                    "product_focus=product_only → NO people; "
+                    "product_focus=product_with_person → product hero + lifestyle person; "
+                    "product_focus=with_person → person-led. "
+                    "When product_model is set, that exact model name must appear in the scene.",
+                    "",
+                ]
+                if _has_any_seed_focus
+                else []
+            )
         ),
         *(
             [
@@ -5172,6 +5556,8 @@ async def generate_icp_image_plan(
             "",
         ] ),
         *( [social_style_block, ""] if social_style_block else [] ),
+        *( [reference_block, ""] if reference_block else [] ),
+        *( [competitor_block, ""] if competitor_block else [] ),
         "",
         f"CREATIVE FORMAT: {'mixed static + carousel' if is_mixed else ('carousel (swipe story)' if is_carousel else 'static (standalone ads)')}",
         f"CAMPAIGN LABEL: {campaign_name}",
@@ -5187,6 +5573,17 @@ async def generate_icp_image_plan(
         f"ON-IMAGE TYPE STYLE (campaign — same for ALL variants): user selected '{on_image_style or 'auto'}' "
         f"→ resolved '{resolved_on_image_style}'.{on_image_style_lock(resolved_on_image_style, primary_color=primary_color, secondary_color=secondary_color, font_heading=font_heading, font_body=font_body)} "
         "Do NOT mix jeweller gold serif on retail/bike ads unless jewellery_luxury is selected.",
+        *(
+            [
+                f"VISUAL ART STYLE (campaign — same for ALL variants): user selected '{image_visual_style or 'auto'}' "
+                f"→ resolved '{resolved_image_visual_style}'.",
+                visual_style_llm_block,
+                image_visual_style_lock(resolved_image_visual_style),
+                "",
+            ]
+            if resolved_image_visual_style != "auto"
+            else []
+        ),
         *([brand_visual_msg, ""] if brand_visual_msg else []),
         "",
         *( [niche_visual_mandate, ""] if niche_visual_mandate else [] ),
@@ -5251,13 +5648,20 @@ async def generate_icp_image_plan(
         "",
         *(
             [
-                "CLIENT STRATEGY (knowledge only — NOT a script to copy):",
-                "Write ORIGINAL catchy hook + matching headline pairs. Same campaign idea as the client,",
-                "but do NOT paste their primary text or hook verbatim. Stronger billboard lines are welcome.",
-                "When strategy seeds include scene / post_type / design_notes, treat them as MANDATORY art direction —",
-                "layout, product placement, colors, and on-image text structure must match the MD brief.",
+                "CLIENT STRATEGY — FOLLOW EACH SEED'S UNIQUE CONCEPT:",
+                "Each seed carries its OWN creative concept (emotional moment, experience, process graphic, stat card,",
+                "testimonial quote, etc.). EVERY variant's prompt MUST be built FROM that specific concept.",
+                "Treat each seed's client_hook and client_message as authoritative source copy. "
+                "Preserve their claims, audience, product, and promise; do not replace them with "
+                "an unrelated angle. You may tighten wording only when needed for the requested "
+                "format, and otherwise keep the supplied hook/message verbatim.",
+                "GRAPHIC / STAT / QUOTE CARD seeds: design the card layout in the prompt field —",
+                "describe background, key visual element (number/quote/icons), text content, typography, colours.",
+                "PHOTOGRAPHY seeds: describe the specific scene, subject pose, lighting, emotion, and props.",
+                "NEVER replace a graphic/stat/quote card seed with a lifestyle consultation photo.",
                 "Hook and headline MUST be one matching pair (same promise, same audience). "
-                "Never split one sentence across two fields. Never leave a fragment ending on your/at/the.",
+                "The seed's visual/creative/design notes are mandatory art direction: expand them "
+                "into the image prompt instead of defaulting to a generic lifestyle scene.",
                 *( [f"Strategy notes: {(strategy_notes or '')[:1200]}"] if (strategy_notes or "").strip() else [] ),
                 *[
                     (
@@ -5273,19 +5677,48 @@ async def generate_icp_image_plan(
                         f" design={str(seed.get('design_notes') or '')[:180] or '-'}"
                         f" client_hook={str(seed.get('client_hook') or '')[:140]}"
                         f" client_message={str(seed.get('client_message') or '')[:140]}"
+                        f" source_image_hook={str(seed.get('image_hook') or '')[:120]}"
+                        f" source_image_headline={str(seed.get('image_headline') or '')[:140]}"
+                        f" source_cta={str(seed.get('cta') or '')[:80]}"
                     )
                     for i, seed in enumerate(strategy_seeds[:count])
                 ],
                 "Product focus seeds: product_only = catalog hero, NO people; with_person = model/user with product. "
                 "When product_model is set, show THAT exact model in the scene and prefer it for image_hook on product-only shots.",
+                "If source_image_hook or source_image_headline is present, preserve it as the on-image copy "
+                "unless it is incomplete. Do not move the source headline into the post hook field. "
+                "If no client hook exists, generate a new catchy hook from the supplied headline/message; "
+                "never use the headline verbatim as the hook merely because the hook field is empty.",
                 "Carousel seeds: ONE square photo per card. CTA pill only on the last card of that carousel.",
                 "",
             ]
             if strategy_seeds or (strategy_notes or "").strip()
             else []
         ),
-        "SCENE STARTING POINT (one per variant — adapt to ICP; vary props and setting across variants):",
-        *[f"  Variant {i + 1}: {scene_mandates[i]}" for i in range(count)],
+        "SCENE STARTING POINT — MANDATORY CREATIVE FOUNDATION (each variant MUST build its prompt FROM this concept):",
+        "  Photography variants: expand the scene into a detailed art-direction — subject, pose, lighting, depth, emotion, props.",
+        "  Graphic / stat / quote card variants: design the card layout — background, key visual element, exact text, icons, typography.",
+        "  DO NOT discard the scene and default to a generic consultation or lifestyle photo.",
+        *[
+            "  Variant {n} [{style}]: {scene}".format(
+                n=i + 1,
+                style=(
+                    "PRODUCT ONLY"
+                    if (_seed_focuses[i] if i < len(_seed_focuses) else _prompt_campaign_focus) == "product_only"
+                    else (
+                        "PRODUCT+PERSON"
+                        if (_seed_focuses[i] if i < len(_seed_focuses) else _prompt_campaign_focus) == "product_with_person"
+                        else (
+                            "PERSON-LED"
+                            if (_seed_focuses[i] if i < len(_seed_focuses) else _prompt_campaign_focus) == "with_person"
+                            else "AUTO"
+                        )
+                    )
+                ),
+                scene=scene_mandates[i],
+            )
+            for i in range(count)
+        ],
         "",
         *(f"AVOID THESE HOOKS (already used): {h}" for h in hooks_avoid),
         *(f"AVOID REPEATING SCENES SIMILAR TO: {p[:120]}…" for p in prompts_avoid[:5]),
@@ -5365,13 +5798,7 @@ async def generate_icp_image_plan(
     fallback_reason = "template fallback"
     try:
         client = _get_openrouter_client()
-        model = (
-            # Prefer stronger models for creative variant planning — Haiku is too weak here.
-            settings.OPENROUTER_MODEL_CLAUDE_SCRIPT
-            or settings.OPENROUTER_MODEL_VISION
-            or settings.OPENROUTER_MODEL_OPENAI
-            or settings.OPENROUTER_MODEL_CLAUDE
-        )
+        model = resolved_llm
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -5765,6 +6192,7 @@ async def generate_icp_image_plan(
                     niche=niche_label,
                     image_aspect_ratio=image_aspect_ratio,
                     on_image_style=on_image_style,
+                    image_visual_style=image_visual_style,
                     fashion_retail_promo=fashion_retail_promo,
                     campaign_product_focus=campaign_product_focus,
                     primary_color=primary_color,
@@ -5811,6 +6239,7 @@ async def generate_icp_image_plan(
         niche=niche_label,
         image_aspect_ratio=image_aspect_ratio,
         on_image_style=on_image_style,
+        image_visual_style=image_visual_style,
         fashion_retail_promo=fashion_retail_promo,
         campaign_product_focus=campaign_product_focus,
         primary_color=primary_color,

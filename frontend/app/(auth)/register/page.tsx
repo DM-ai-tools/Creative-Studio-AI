@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -28,7 +29,11 @@ type FormData = z.infer<typeof schema>
 
 export default function RegisterPage() {
   const router = useRouter()
-  const { register: registerUser } = useAuth()
+  const { register: registerUser, user, isLoading } = useAuth()
+
+  useEffect(() => {
+    if (!isLoading && user) router.replace('/dashboard')
+  }, [user, isLoading, router])
   const {
     register,
     handleSubmit,
@@ -52,6 +57,10 @@ export default function RegisterPage() {
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Registration failed'
       toast.error(String(msg))
     }
+  }
+
+  if (isLoading || user) {
+    return null
   }
 
   return (

@@ -200,6 +200,13 @@ media (Facebook, Instagram, TikTok, LinkedIn, Pinterest), Google Display, YouTub
 website hero banners, email headers, print, and out-of-home.
 Your job is NOT to produce a beautiful AI image — it is to produce an ADVERTISEMENT that converts.
 
+RULE #1 — NON-NEGOTIABLE UNIQUENESS:
+Each response MUST be visually and compositionally DIFFERENT from any other variant.
+The VARIANT NUMBER and MANDATORY CREATIVE ANGLE in the user message are hard constraints —
+they override everything else. Change the scene, setting, subject action, lighting, colour
+palette, and composition entirely. If two prompts could describe the same photo, you have failed.
+The "AVOID" list in the user message lists angles already used — never repeat them.
+
 Before writing anything, derive the campaign intent from the brief:
 - Who is the audience? What problem are they living with?
 - What action must they take? What emotion should the creative trigger?
@@ -305,20 +312,48 @@ PROMPT STRUCTURE (follow this order in one paragraph):
 Prompt length: 120–260 words, one continuous paragraph.
 """.strip()
 
-# Creative angles rotated to force variation on each call
+# Creative angles — large pool ensures each variant uses a distinct scene
 _CREATIVE_ANGLES = [
-    "golden-hour outdoor lifestyle scene with warm backlight",
-    "clean minimal studio shot with white background and dramatic side lighting",
-    "candid indoor scene in a modern home or office, soft window light",
-    "overhead flat-lay on a textured surface, cool neutral tones",
-    "close-up macro detail shot, shallow depth of field, bokeh background",
-    "person in action using the product, dynamic low angle, vibrant energy",
-    "moody evening scene, rich dark tones, product as hero with accent lighting",
-    "bright airy outdoor cafe or workspace setting, natural daylight",
-    "professional workspace scene with person, clean desk, warm morning light",
-    "product surrounded by complementary lifestyle items, editorial styling",
-    "split-light portrait with person and product, half studio half natural",
-    "expansive wide shot with person small in frame, environment as context",
+    # Lighting / time of day
+    "golden-hour outdoor scene, warm amber backlight, long shadows",
+    "crisp blue-hour dusk, city lights beginning to glow, cool tones",
+    "bright mid-morning sunlight, high-key outdoor, clean whites",
+    "moody overcast daylight, soft diffused shadows, desaturated palette",
+    "dramatic single-source spotlight in darkness, high contrast",
+    "soft window light, late afternoon, warm golden spill across the subject",
+    # Location / setting
+    "upscale urban street corner, glass storefronts, modern architecture",
+    "cosy home living room, bookshelves and warm throw blanket in background",
+    "busy open-plan office, blurred colleagues in background, confident foreground subject",
+    "minimalist white studio, single stool, no distractions, product front and centre",
+    "rooftop terrace with city skyline, cocktail-hour vibe",
+    "rustic coffee-shop interior, exposed brick, warm pendant lights",
+    "lush park greenery, dappled sunlight through leaves",
+    "gym or fitness studio, rubber floors, mirrors, athletic energy",
+    "sleek kitchen with marble countertop, overhead pendant, professional chef vibe",
+    "luxury hotel lobby, grand staircase, marble floors, aspirational setting",
+    # Camera angle / composition
+    "extreme close-up macro, sharp texture and micro-detail, shallow DOF",
+    "overhead flat-lay, arranged symmetrically on linen, editorial",
+    "worm's-eye upward angle, subject empowered and towering",
+    "bird's-eye drone perspective, person and product tiny amid large context",
+    "Dutch tilt for tension, environment off-balance, subject centred",
+    "wide cinematic establishing shot, subject left-third, environment tells story",
+    "tight candid over-the-shoulder, depth and intimacy",
+    # Subject / action
+    "person mid-stride in action, motion blur background, product in use",
+    "before-and-after side-by-side within one frame, visible contrast",
+    "hands-only shot, product interaction, clean styled background",
+    "group of three diverse people reacting genuinely to product outcome",
+    "single person alone with product, quiet determination, neutral setting",
+    "product hero solo on seamless gradient, dramatic rim light",
+    # Mood / style
+    "dark moody editorial, rich jewel tones, cinematic film grain",
+    "fresh pastel palette, springtime feel, light and optimistic energy",
+    "bold primary colours, graphic poster style, strong geometry",
+    "monochromatic black-and-white, high contrast, timeless gravitas",
+    "warm earthy tones, natural materials, grounded and authentic",
+    "vibrant neon-accented nightlife scene, energy and excitement",
 ]
 
 _SELECTOR_FALLBACK_USE_CASES: list[str] = ["hero_product", "lifestyle"]
@@ -437,26 +472,51 @@ async def select_and_build_image_plan(
     brief: dict[str, Any],
     brand: dict[str, Any],
     copy: dict[str, Any] | None = None,
+    variant_index: int = 0,
 ) -> ImagePlan:
     """
     Core intelligent pipeline:
     1. LLM reads campaign context + generated ad copy (hook, headline, CTA).
     2. Selects best 1-3 use cases.
-    3. Writes a complete Meta ad image prompt — background photo + ad text layout.
+    3. Writes a complete ad image prompt — background photo + ad text layout.
+
+    variant_index guarantees a distinct creative angle per variant in a multi-variant brief.
     Returns ImagePlan(use_cases, prompt, reasoning).
     """
     if not settings.OPENROUTER_API_KEY:
         return _mock_plan(brief, brand)
 
+    # Derive a stable per-brief offset from the brief ID so all variant calls
+    # for the same brief start from the same position in the angles list.
+    # Each variant_index then selects the NEXT angle — no two variants ever repeat.
+    brief_id_str = str(brief.get("id") or brief.get("brief_id") or "")
+    if brief_id_str:
+        import hashlib
+        offset = int(hashlib.md5(brief_id_str.encode()).hexdigest(), 16) % len(_CREATIVE_ANGLES)
+    else:
+        offset = random.randint(0, len(_CREATIVE_ANGLES) - 1)
+
+    angle_idx = (variant_index + offset) % len(_CREATIVE_ANGLES)
+    creative_angle = _CREATIVE_ANGLES[angle_idx]
+
+    # Build list of angles already used (warn LLM to avoid them)
+    used_angles = [
+        _CREATIVE_ANGLES[(i + offset) % len(_CREATIVE_ANGLES)]
+        for i in range(variant_index)
+    ]
     campaign_summary = _build_campaign_summary(brief, brand, copy=copy)
-    creative_angle = random.choice(_CREATIVE_ANGLES)
     has_copy = bool(copy and (copy.get("hook") or copy.get("headline")))
+    avoid_line = (
+        f"\nAVOID THESE ALREADY-USED ANGLES (do NOT repeat them): {'; '.join(used_angles)}"
+        if used_angles else ""
+    )
     user_msg = (
         f"{_USE_CASE_CATALOGUE}\n\n"
         f"---\n"
         f"CAMPAIGN DETAILS:\n{campaign_summary}\n\n"
-        f"REQUIRED BACKGROUND CREATIVE ANGLE: {creative_angle}\n"
-        f"(The background photograph MUST be based on this angle — avoid generic desk/laptop scenes)\n\n"
+        f"VARIANT NUMBER: {variant_index + 1} — this is variant #{variant_index + 1} for the same campaign.\n"
+        f"MANDATORY CREATIVE ANGLE FOR THIS VARIANT: {creative_angle}\n"
+        f"(The background photograph MUST be based on this EXACT angle — completely different from other variants){avoid_line}\n\n"
         + (
             "IMPORTANT: Use ONLY the short hook/headline/CTA lines above as on-image text.\n"
             "They must appear exactly — large billboard style. Do NOT expand them into long sentences.\n"

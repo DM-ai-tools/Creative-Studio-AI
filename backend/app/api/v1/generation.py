@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
+from uuid import UUID
 import logging
 
 import httpx
@@ -8,6 +9,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from app.core.config import settings
+from app.core.database import get_db
 from app.core.security import get_current_user
 from app.schemas.avatar_script import (
     AvatarScriptRequest,
@@ -24,6 +26,7 @@ from app.schemas.avatar_script import (
     WebsiteScriptResponse,
 )
 from app.schemas.generation import GenerationCatalogResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.avatar_script_service import generate_avatar_script
 from app.services.generation_catalog import get_generation_catalog
 from app.services.icp_service import generate_icp_script
@@ -100,6 +103,318 @@ async def extract_stats_image(
     return StatsImageExtractionResponse(stats=stats, filename=file.filename or "")
 
 
+class ReferenceImageAnalysisResponse(BaseModel):
+    file_url: str | None = None
+    asset_id: str | None = None
+    analysis: dict
+    summary: str = ""
+
+
+class ProductReferenceRequest(BaseModel):
+    source: str
+    brand_id: str
+    brand_name: str = ""
+    niche: str = ""
+
+
+class ProductReferenceResponse(ReferenceImageAnalysisResponse):
+    source_url: str
+    slug: str = ""
+
+
+class HeroImageResponse(BaseModel):
+    image_url: str = ""
+    hook: str
+    headline: str
+    prompt: str
+
+
+@router.post("/analyze-reference-image", response_model=ReferenceImageAnalysisResponse)
+async def analyze_reference_image(
+    file: UploadFile = File(...),
+    brand_id: Optional[str] = Form(None),
+    brand_name: str = Form(""),
+    niche: str = Form(""),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vision-parse a reference image; optionally persist to brand reference library."""
+    from app.models.asset import Asset
+    from app.services.brand_service import BrandService
+    from app.services.file_service import file_service
+    from app.services.media_content import image_suffix_and_type
+    from app.services.reference_image_service import analyze_reference_image as analyze_ref
+
+    raw = await file.read()
+    if len(raw) > 12_000_000:
+        raise HTTPException(status_code=400, detail="Image is too large (max 12MB)")
+    try:
+        mime = _guess_image_mime(raw, file.filename or "", file.content_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    try:
+        analysis = await analyze_ref(
+            raw,
+            mime_type=mime,
+            brand_name=brand_name.strip(),
+            niche=niche.strip(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not analyze reference image: {e}") from e
+
+    summary = str(analysis.get("summary") or "").strip()
+    file_url: str | None = None
+    asset_id: str | None = None
+
+    brand_uuid: UUID | None = None
+    if (brand_id or "").strip():
+        try:
+            brand_uuid = UUID(brand_id.strip())
+            await BrandService.get_brand(db, brand_uuid, current_user.tenant_id)
+        except (ValueError, HTTPException):
+            brand_uuid = None
+
+    if brand_uuid:
+        suffix, content_type = image_suffix_and_type(
+            raw,
+            fallback_suffix=(file.filename or "").rsplit(".", 1)[-1] if "." in (file.filename or "") else "",
+        )
+        saved = file_service.save_bytes(
+            raw,
+            str(current_user.tenant_id),
+            "reference_image",
+            suffix,
+            content_type,
+        )
+        asset = Asset(
+            tenant_id=current_user.tenant_id,
+            brand_id=brand_uuid,
+            asset_type="reference_image",
+            created_by=current_user.id,
+            asset_metadata={"analysis": analysis, "summary": summary},
+            **saved,
+        )
+        db.add(asset)
+        await db.flush()
+        await db.refresh(asset)
+        file_url = asset.file_url
+        asset_id = str(asset.id)
+
+    return ReferenceImageAnalysisResponse(
+        file_url=file_url,
+        asset_id=asset_id,
+        analysis=analysis,
+        summary=summary,
+    )
+
+
+@router.post("/product-reference", response_model=ProductReferenceResponse)
+async def create_product_reference(
+    data: ProductReferenceRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch and save one exact product image into the selected brand's kit."""
+    from app.models.asset import Asset
+    from app.services.brand_service import BrandService
+    from app.services.file_service import file_service
+    from app.services.product_reference_service import resolve_product_reference
+    from app.services.reference_image_service import analyze_reference_image as analyze_ref
+
+    try:
+        brand_uuid = UUID(data.brand_id.strip())
+        await BrandService.get_brand(db, brand_uuid, current_user.tenant_id)
+        resolved = await resolve_product_reference(data.source)
+        analysis = await analyze_ref(
+            resolved["image_bytes"],
+            mime_type=resolved["mime_type"],
+            brand_name=data.brand_name.strip(),
+            niche=data.niche.strip(),
+        )
+        summary = str(analysis.get("summary") or "").strip()
+        saved = file_service.save_bytes(
+            resolved["image_bytes"],
+            str(current_user.tenant_id),
+            "product_reference",
+            resolved["suffix"],
+            resolved["mime_type"],
+        )
+        asset = Asset(
+            tenant_id=current_user.tenant_id,
+            brand_id=brand_uuid,
+            asset_type="product_reference",
+            created_by=current_user.id,
+            asset_metadata={
+                "analysis": analysis,
+                "summary": summary,
+                "source_url": resolved["source_url"],
+                "final_url": resolved["final_url"],
+                "image_url": resolved["image_url"],
+                "slug": resolved["slug"],
+            },
+            **saved,
+        )
+        db.add(asset)
+        await db.flush()
+        await db.refresh(asset)
+        return ProductReferenceResponse(
+            file_url=asset.file_url,
+            asset_id=str(asset.id),
+            analysis=analysis,
+            summary=summary,
+            source_url=resolved["source_url"],
+            slug=resolved["slug"],
+        )
+    except (ValueError, HTTPException) as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Product reference extraction failed")
+        raise HTTPException(status_code=502, detail=f"Could not fetch product image: {exc}") from exc
+
+
+@router.post("/hero-ai-image", response_model=HeroImageResponse)
+async def create_hero_ai_image(
+    file: UploadFile = File(...),
+    brand_name: str = Form(""),
+    industry: str = Form(""),
+    niche: str = Form(""),
+    product_name: str = Form(""),
+    hook: str = Form(""),
+    headline: str = Form(""),
+    model: str = Form("openai-gpt-image-2"),
+    logo_url: str = Form(""),
+    logo_on_light_url: str = Form(""),
+    prompt: str = Form(""),
+    generate_image: bool = Form(True),
+    current_user=Depends(get_current_user),
+):
+    """Generate a Hero image from an upload and burn the final copy deterministically."""
+    from app.services.ai_service import AIService
+    from app.services.file_service import file_service
+    from app.services.media_content import image_suffix_and_type
+    from app.services.reference_image_service import analyze_reference_image as analyze_ref
+
+    raw = await file.read()
+    if len(raw) > 12_000_000:
+        raise HTTPException(status_code=400, detail="Hero image is too large (max 12MB)")
+    try:
+        suffix, mime = image_suffix_and_type(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Please upload a valid image") from exc
+
+    try:
+        copy = {"hook": hook.strip(), "headline": headline.strip()}
+        image_analysis = await analyze_ref(
+            raw,
+            mime_type=mime,
+            brand_name=brand_name.strip(),
+            niche=niche.strip(),
+        )
+        if not copy["hook"] or not copy["headline"]:
+            generated = await AIService().generate_ad_copy(
+                brand_voice=(
+                    "On-brand, visually clear, concise. The industry and niche are authoritative. "
+                    "If the niche describes a service, gym, clinic, class, venue, or experience, "
+                    "write service-led copy and never turn the image into an ecommerce product ad."
+                ),
+                forbidden_words=[],
+                brief={
+                    "brand_name": brand_name.strip(),
+                    "product_name": product_name.strip(),
+                    "objective": "Create a hero image for the selected brand and niche",
+                    "target_audience": niche.strip(),
+                    "ad_copy_tone": "Premium and attention-grabbing",
+                    "cta": "",
+                    "key_benefits": {
+                        "industry": industry.strip(),
+                        "niche": niche.strip(),
+                        "uploaded_image_context": image_analysis.get("product_description", ""),
+                        "copy_rule": (
+                            "Follow the selected niche exactly. Promote the service or experience "
+                            "when the niche is service-led; do not invent product/gear claims."
+                        ),
+                    },
+                },
+                format_type="static",
+            )
+            copy["hook"] = copy["hook"] or str(generated.get("hook") or "").strip()
+            copy["headline"] = copy["headline"] or str(generated.get("headline") or "").strip()
+        if not copy["hook"] or not copy["headline"]:
+            raise ValueError("Could not generate Hero hook and headline")
+
+        uploaded = file_service.save_bytes(
+            raw,
+            str(current_user.tenant_id),
+            "hero_reference",
+            suffix,
+            mime,
+        )
+        subject_rule = (
+            "The uploaded image may show a person, gym, class, service environment, or lifestyle scene. "
+            "Preserve that subject and do not convert it into an ecommerce product shot."
+            if not product_name.strip()
+            else "Preserve the named product exactly and do not invent a different product."
+        )
+        copy_layout = (
+            f'Render the exact on-image copy as part of the professional ad design. '
+            f'Hook text: "{copy["hook"]}". Headline text: "{copy["headline"]}". '
+            "Use clean typography, natural spacing, strong hierarchy, and a layout that suits the "
+            "uploaded composition. Place text where it does not cover the subject. "
+            "Do not use a large black rectangle, black banner, or bottom overlay. "
+            "Do not paraphrase, truncate, misspell, or add extra copy."
+        )
+        generation_prompt = (
+            f"{prompt.strip()}\n\n{copy_layout}"
+            if prompt.strip()
+            else (
+                f"Create a premium hero advertisement using the uploaded image as the primary visual source. "
+                f"Preserve the exact subject/product, shape, colours, materials, proportions, and visible branding. "
+                f"Brand: {brand_name.strip() or 'the selected brand'}. Industry: {industry.strip()}. "
+                f"Authoritative niche: {niche.strip()}. Product: {product_name.strip() or 'not specified'}. "
+                f"{subject_rule} {copy_layout}"
+            )
+        )
+        if not generate_image:
+            return HeroImageResponse(
+                hook=copy["hook"],
+                headline=copy["headline"],
+                prompt=generation_prompt,
+            )
+        hero_model = (
+            model.strip()
+            if "gpt-image-2" in model.strip().lower()
+            else "openai-gpt-image-2"
+        )
+        generated_image = await AIService().generate_image_asset(
+            prompt=generation_prompt,
+            tenant_id=str(current_user.tenant_id),
+            model=hero_model,
+            format_type="static",
+            logo_url=logo_url.strip() or None,
+            logo_on_light_url=logo_on_light_url.strip() or None,
+            reference_image_url=uploaded["file_url"],
+        )
+        generated_url = str((generated_image or {}).get("url") or "").strip()
+        if not generated_url:
+            raise ValueError(str((generated_image or {}).get("error") or "Image generation failed"))
+        return HeroImageResponse(
+            image_url=generated_url,
+            hook=copy["hook"],
+            headline=copy["headline"],
+            prompt=generation_prompt,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Hero AI Image generation failed")
+        raise HTTPException(status_code=502, detail=f"Could not generate Hero image: {exc}") from exc
+
+
 class StrategyVariantPlan(BaseModel):
     id: str = ""
     format: str = "static"
@@ -120,6 +435,11 @@ class StrategyVariantPlan(BaseModel):
     photo_only: bool = False
     retail_promo: bool = False
     aspect_ratio: str | None = None
+    # Preserve document-provided creative metadata for downstream image prompting.
+    post_type: str = ""
+    product_name: str = ""
+    design_notes: str = ""
+    product_focus: str = ""
 
 
 class StrategyParseResponse(BaseModel):
@@ -353,6 +673,8 @@ class ImagePlanRequest(BaseModel):
     hook: str = ""
     headline: str = ""
     body_copy: str = ""
+    # Increment this on each retry to get a different creative angle
+    variant_index: int = 0
 
 
 class ImagePlanResponse(BaseModel):
@@ -395,7 +717,7 @@ async def preview_image_plan(
         "body_copy": data.body_copy,
         "cta": data.cta,
     } if (data.hook or data.headline) else None
-    plan = await select_and_build_image_plan(brief, brand, copy=copy)
+    plan = await select_and_build_image_plan(brief, brand, copy=copy, variant_index=data.variant_index)
     return ImagePlanResponse(**plan.to_dict())
 
 
@@ -481,6 +803,10 @@ class IcpImagePlanRequest(BaseModel):
         default="auto",
         description="Campaign on-image typography: auto | retail_modern | jewellery_luxury | fashion_editorial | high_contrast",
     )
+    image_visual_style: str = Field(
+        default="auto",
+        description="Optional illustration treatment: auto | sketch_illustration | flat_cartoon | clay_3d | 3d_metaphor",
+    )
     product_focus: str = Field(
         default="",
         description="Campaign shot style: empty=auto | product_only | with_person — applies to all variants",
@@ -489,9 +815,33 @@ class IcpImagePlanRequest(BaseModel):
     secondary_color: str = Field(default="", description="Brand secondary hex from website / Brand Kit")
     font_heading: str = Field(default="", description="Heading font family from website / Brand Kit")
     font_body: str = Field(default="", description="Body font family from website / Brand Kit")
+    brand_id: str = Field(
+        default="",
+        description="Brand Kit id — when set, saved social media visual style is loaded automatically for image prompts.",
+    )
     social_style_profile: dict | None = Field(
         default=None,
         description="Client social feed visual style (SociaVault) — match their posted ad look.",
+    )
+    competitor_social_insights: list[dict] | None = Field(
+        default=None,
+        description="Saved competitor posting strategy from Brand Kit — content structure only.",
+    )
+    use_competitor_insights: bool = Field(
+        default=False,
+        description="When true, apply saved competitor posting logic to image plans.",
+    )
+    reference_images: list[dict] = Field(
+        default_factory=list,
+        description="Optional brand reference uploads: { asset_id, file_url, analysis }.",
+    )
+    exact_product_reference: bool = Field(
+        default=False,
+        description="Use the selected product reference as the authoritative product source.",
+    )
+    llm_model: str = Field(
+        default="",
+        description="OpenRouter model slug for prompt generation (e.g. anthropic/claude-sonnet-4.6).",
     )
 
 
@@ -506,13 +856,65 @@ class IcpImagePlanResponse(BaseModel):
 @router.post("/icp-image-plan", response_model=IcpImagePlanResponse)
 async def icp_image_plan(
     data: IcpImagePlanRequest,
-    _current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Build ICP from industry + niche + objective + brand, then return N distinct
     image variant plans (hook/headline + catchy on-image lines + prompt).
     """
+    from app.services.brand_service import BrandService, competitor_insights_from_brand_and_kit, social_style_from_brand_and_kit
+    from app.services.competitor_social_service import normalize_competitor_insights
     from app.services.icp_image_plan_service import generate_icp_image_plan
+    from app.services.prompt_llm_catalog import resolve_prompt_llm_model
+
+    social_profile = data.social_style_profile
+    competitor_insights = normalize_competitor_insights(data.competitor_social_insights)
+    brand = None
+    kit = None
+    if (data.brand_id or "").strip():
+        try:
+            brand = await BrandService.get_brand(db, UUID(data.brand_id.strip()), current_user.tenant_id)
+            try:
+                kit = await BrandService.get_brand_kit(db, UUID(data.brand_id.strip()), current_user.tenant_id)
+            except HTTPException:
+                pass
+            if not social_profile:
+                social_profile = social_style_from_brand_and_kit(brand, kit)
+            if not competitor_insights:
+                competitor_insights = competitor_insights_from_brand_and_kit(brand, kit)
+        except HTTPException:
+            social_profile = social_profile
+            competitor_insights = competitor_insights
+
+    if not data.use_competitor_insights:
+        competitor_insights = []
+
+    reference_images = [r for r in (data.reference_images or []) if isinstance(r, dict)]
+    if not reference_images and brand:
+        from sqlalchemy import select
+        from app.models.asset import Asset
+
+        asset_rows = await db.execute(
+            select(Asset)
+            .where(
+                Asset.tenant_id == current_user.tenant_id,
+                Asset.brand_id == brand.id,
+                Asset.asset_type == "reference_image",
+                Asset.asset_metadata["analysis"].is_not(None),
+            )
+            .order_by(Asset.created_at.desc())
+            .limit(5)
+        )
+        for asset in asset_rows.scalars().all():
+            meta = asset.asset_metadata if isinstance(asset.asset_metadata, dict) else {}
+            reference_images.append(
+                {
+                    "asset_id": str(asset.id),
+                    "file_url": asset.file_url,
+                    "analysis": meta.get("analysis") if isinstance(meta.get("analysis"), dict) else meta,
+                }
+            )
 
     result = await generate_icp_image_plan(
         campaign_name=data.campaign_name.strip(),
@@ -533,12 +935,16 @@ async def icp_image_plan(
         strategy_notes=data.strategy_notes,
         strategy_variants=data.strategy_variants,
         on_image_style=data.on_image_style,
+        image_visual_style=data.image_visual_style,
         product_focus=data.product_focus,
         primary_color=data.primary_color,
         secondary_color=data.secondary_color,
         font_heading=data.font_heading,
         font_body=data.font_body,
-        social_style_profile=data.social_style_profile,
+        social_style_profile=social_profile,
+        competitor_social_insights=competitor_insights,
+        reference_images=reference_images,
+        llm_model=resolve_prompt_llm_model(data.llm_model),
     )
     return IcpImagePlanResponse(**result)
 
@@ -957,4 +1363,360 @@ async def get_photo_avatar_status(
         look_id=look_id,
         name=str(name_val),
         error=avatar_item.get("error") or None,
+    )
+
+
+class CreativeStudioGenerateRequest(BaseModel):
+    media_mode: str = Field(..., description="image | video")
+    model: str
+    prompt: str
+    duration_seconds: int = Field(default=15, ge=5, le=600)
+    aspect: str = "9/16"
+    resolution: str = "1080p"
+    sound_on: bool = True
+    negative_prompt: str = ""
+
+
+class CreativeStudioGenerateResponse(BaseModel):
+    status: str
+    job_id: str | None = None
+    progress: str | None = None
+    url: str | None = None
+    model: str | None = None
+    provider: str | None = None
+    error: str | None = None
+    seed_image_url: str | None = None
+    duration_seconds: int | None = None
+    requested_duration_seconds: int | None = None
+    segment_count: int | None = None
+    partial: bool = False
+    credits_estimate: float | None = None
+    duration_warning: str | None = None
+    note: str | None = None
+    storyboard: list[dict] | None = None
+    media_mode: str | None = None
+    product_reference_url: str | None = None
+
+
+class CreativeStudioPromptRequest(BaseModel):
+    niche: str
+    media_mode: str = "video"
+    duration_seconds: int = Field(default=15, ge=5, le=600)
+    style: str = "auto"
+    genre: str = "general"
+    camera: str = "auto"
+    aspect: str = "9/16"
+    product_name: str = ""
+    brand_name: str = ""
+    notes: str = ""
+
+
+class CreativeStudioPromptResponse(BaseModel):
+    prompt: str
+    niche: str
+
+
+class CreativeStudioNicheOption(BaseModel):
+    id: str
+    label: str
+
+
+class CreativeStudioChatMessage(BaseModel):
+    role: str = Field(..., description="user | assistant")
+    content: str = ""
+
+
+class CreativeStudioChatRequest(BaseModel):
+    messages: list[CreativeStudioChatMessage] = Field(default_factory=list)
+    mode: str = Field(default="auto", description="auto | ask | generate")
+    chat_model: str = "auto"
+    duration_seconds: int | None = Field(default=None, ge=5, le=600)
+    aspect: str = "9/16"
+    resolution: str = "1080p"
+    sound_on: bool = True
+    attachment_urls: list[str] = Field(default_factory=list)
+    brand_name: str = ""
+    product_name: str = ""
+    # Supercomputer pipeline
+    action: str = Field(
+        default="continue",
+        description="continue | generate_image | regenerate_image | approve_next | generate_video",
+    )
+    image_prompt: str = ""
+    video_prompt: str = ""
+    approved_image_url: str = ""
+    image_model: str = ""
+    revision_notes: str = ""
+    phase: str = ""
+    product_reference_url: str = ""
+    logo_reference_url: str = ""
+    additional_reference_urls: list[str] = Field(default_factory=list)
+    storyboard_image_urls: list[str] = Field(default_factory=list)
+
+
+class CreativeStudioChatResponse(BaseModel):
+    assistant_message: str
+    intent: str
+    phase: str | None = None
+    suggested_actions: list[str] = Field(default_factory=list)
+    chat_model: str | None = None
+    image_model: str | None = None
+    video_model: str | None = None
+    job_id: str | None = None
+    status: str = "ok"
+    media_mode: str | None = None
+    model: str | None = None
+    image_prompt: str | None = None
+    video_prompt: str | None = None
+    approved_image_url: str | None = None
+    product_reference_url: str | None = None
+    storyboard_scenes: list[dict] | None = None
+    duration_seconds: int | None = None
+    requested_duration_seconds: int | None = None
+    segment_count: int | None = None
+    partial: bool = False
+    aspect: str | None = None
+    error: str | None = None
+
+
+@router.get("/creative-studio/niches", response_model=list[CreativeStudioNicheOption])
+async def creative_studio_niches(_current_user=Depends(get_current_user)):
+    from app.services.creative_studio_prompt_service import CREATIVE_STUDIO_NICHES
+
+    return [CreativeStudioNicheOption(**n) for n in CREATIVE_STUDIO_NICHES]
+
+
+@router.get("/creative-studio/models")
+async def creative_studio_models(_current_user=Depends(get_current_user)):
+    """Creative Studio catalog: OpenRouter chat + GPT Image 2 + Seedance."""
+    from app.services.media.byteplus_seedance_catalog import (
+        byteplus_seedance_video_catalog_options,
+    )
+    from app.services.media.byteplus_seedance_client import ark_configured
+    from app.services.media.higgsfield_catalog import (
+        higgsfield_image_catalog_options,
+        higgsfield_video_catalog_options,
+    )
+    from app.services.media.higgsfield_models import higgsfield_configured
+    from app.services.media.openai_image_catalog import (
+        openai_configured,
+        openai_image_catalog_options,
+    )
+    from app.services.prompt_llm_catalog import (
+        default_prompt_llm_model,
+        prompt_llm_catalog_options,
+    )
+
+    hf_ok = higgsfield_configured()
+    ark_ok = ark_configured()
+    oai_ok = openai_configured()
+    video_models = []
+    video_models.extend(byteplus_seedance_video_catalog_options())
+    if hf_ok:
+        video_models.extend(higgsfield_video_catalog_options())
+    image_models = []
+    image_models.extend(openai_image_catalog_options())
+    if hf_ok:
+        image_models.extend(higgsfield_image_catalog_options())
+    chat_models = prompt_llm_catalog_options()
+
+    messages: list[str] = []
+    if not settings.OPENROUTER_API_KEY:
+        messages.append("Set OPENROUTER_API_KEY for chat models.")
+    if not oai_ok:
+        messages.append("Set OPENAI_API_KEY for GPT Image 2 stills.")
+    if not ark_ok:
+        messages.append("Set ARK_API_KEY for BytePlus Seedance 2.0.")
+    if not hf_ok:
+        messages.append("Optional: HIGGSFIELD keys for extra image/video models.")
+
+    return {
+        "configured": bool(settings.OPENROUTER_API_KEY) or ark_ok or hf_ok or oai_ok,
+        "chat_models": chat_models,
+        "default_chat_model": default_prompt_llm_model(),
+        "image_model_default": "openai-gpt-image-2",
+        "video_model_default": "ark-seedance-2-0",
+        "image_models": image_models,
+        "video_models": video_models,
+        "message": " ".join(messages) if messages else None,
+    }
+
+
+@router.post("/creative-studio/chat", response_model=CreativeStudioChatResponse)
+async def creative_studio_chat(
+    data: CreativeStudioChatRequest,
+    current_user=Depends(get_current_user),
+):
+    """One Supercomputer-style chat turn (plan → GPT Image 2 → Seedance)."""
+    from app.services.creative_studio_chat_service import run_creative_studio_chat_turn
+
+    if not data.messages and data.action in {"continue", ""}:
+        raise HTTPException(status_code=422, detail="messages required")
+    # Pipeline buttons may send empty messages with action + prompts
+    msgs = [m.model_dump() for m in data.messages] if data.messages else []
+    if not msgs and data.action not in {
+        "generate_image",
+        "regenerate_image",
+        "approve_next",
+        "generate_video",
+    }:
+        raise HTTPException(status_code=422, detail="messages required")
+    result = await run_creative_studio_chat_turn(
+        tenant_id=str(current_user.tenant_id),
+        messages=msgs,
+        mode=data.mode,
+        chat_model=data.chat_model,
+        duration_seconds=data.duration_seconds,
+        aspect=data.aspect,
+        resolution=data.resolution,
+        sound_on=data.sound_on,
+        attachment_urls=list(data.attachment_urls or []),
+        brand_name=data.brand_name,
+        product_name=data.product_name,
+        action=data.action,
+        image_prompt=data.image_prompt,
+        video_prompt=data.video_prompt,
+        approved_image_url=data.approved_image_url,
+        image_model=data.image_model,
+        revision_notes=data.revision_notes,
+        phase=data.phase,
+        product_reference_url=data.product_reference_url or (
+            (data.attachment_urls or [None])[0] if data.attachment_urls else ""
+        ) or "",
+        logo_reference_url=data.logo_reference_url,
+        additional_reference_urls=list(data.additional_reference_urls or []),
+        storyboard_image_urls=list(data.storyboard_image_urls or []),
+    )
+    return CreativeStudioChatResponse(**result)
+
+
+@router.post("/creative-studio/prompt", response_model=CreativeStudioPromptResponse)
+async def creative_studio_prompt(
+    data: CreativeStudioPromptRequest,
+    _current_user=Depends(get_current_user),
+):
+    """Auto-generate a Higgsfield/Cinema Studio prompt from niche + scene settings."""
+    from app.services.creative_studio_prompt_service import generate_creative_studio_prompt
+
+    niche = (data.niche or "").strip()
+    if not niche:
+        raise HTTPException(status_code=422, detail="Select or enter a niche first")
+    try:
+        prompt = await generate_creative_studio_prompt(
+            niche=niche,
+            media_mode=data.media_mode,
+            duration_seconds=data.duration_seconds,
+            style=data.style,
+            genre=data.genre,
+            camera=data.camera,
+            aspect=data.aspect,
+            product_name=data.product_name,
+            brand_name=data.brand_name,
+            notes=data.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return CreativeStudioPromptResponse(prompt=prompt, niche=niche)
+
+
+def _cs_format_from_aspect(aspect: str) -> str:
+    a = (aspect or "9/16").replace(":", "/")
+    if a in {"9/16", "1/4"}:
+        return "reel"
+    if a in {"16/9"}:
+        return "video"
+    if a in {"4/3"}:
+        return "carousel"
+    return "static"
+
+
+@router.post("/creative-studio", response_model=CreativeStudioGenerateResponse)
+async def creative_studio_generate(
+    data: CreativeStudioGenerateRequest,
+    current_user=Depends(get_current_user),
+):
+    """Start Creative Studio generate in the background (avoids browser HTTP timeouts)."""
+    import asyncio
+
+    from app.services.creative_studio_job_service import (
+        create_job,
+        run_creative_studio_job,
+    )
+
+    prompt = (data.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="Prompt is required")
+    model = (data.model or "").strip()
+    if not model:
+        raise HTTPException(status_code=422, detail="Model is required")
+
+    tenant_id = str(current_user.tenant_id)
+    job_id = await create_job(
+        tenant_id=tenant_id,
+        payload={
+            "media_mode": data.media_mode,
+            "model": model,
+            "prompt": prompt,
+            "duration_seconds": data.duration_seconds,
+            "aspect": data.aspect,
+            "resolution": data.resolution,
+            "sound_on": data.sound_on,
+            "negative_prompt": data.negative_prompt,
+        },
+    )
+    asyncio.create_task(run_creative_studio_job(job_id))
+    return CreativeStudioGenerateResponse(
+        status="queued",
+        job_id=job_id,
+        progress="Queued — Higgsfield jobs can take 15–40 min for a 15s stitch. This tab will poll until done.",
+        note="Running in background so the browser does not time out.",
+    )
+
+
+@router.get("/creative-studio/jobs/{job_id}", response_model=CreativeStudioGenerateResponse)
+async def creative_studio_job_status(
+    job_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Poll a Creative Studio background job."""
+    from app.services.creative_studio_job_service import get_job
+
+    job = await get_job(job_id, tenant_id=str(current_user.tenant_id))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found (server may have restarted)")
+    return CreativeStudioGenerateResponse(
+        status=str(job.get("status") or "failed"),
+        job_id=str(job.get("job_id") or job_id),
+        progress=job.get("progress"),
+        url=job.get("url"),
+        model=job.get("model"),
+        provider=job.get("provider"),
+        error=job.get("error"),
+        seed_image_url=job.get("seed_image_url"),
+        duration_seconds=job.get("duration_seconds"),
+        credits_estimate=job.get("credits_estimate"),
+        duration_warning=job.get("duration_warning"),
+        note=job.get("note"),
+        storyboard=job.get("storyboard") if isinstance(job.get("storyboard"), list) else None,
+        media_mode=job.get("media_mode"),
+        product_reference_url=job.get("product_reference_url"),
+    )
+
+
+@router.post("/creative-studio/jobs/{job_id}/cancel", response_model=CreativeStudioGenerateResponse)
+async def creative_studio_job_cancel(
+    job_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Kill switch — stop a running Creative Studio job."""
+    from app.services.creative_studio_job_service import cancel_job
+
+    job = await cancel_job(job_id, tenant_id=str(current_user.tenant_id))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return CreativeStudioGenerateResponse(
+        status=str(job.get("status") or "cancelled"),
+        job_id=str(job.get("job_id") or job_id),
+        progress=job.get("progress") or "Stopped by user",
+        error=job.get("error") or "Cancelled by user",
     )

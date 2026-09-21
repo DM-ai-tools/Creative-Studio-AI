@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     HIGGSFIELD_BASE_URL: str = "https://platform.higgsfield.ai"
     HIGGSFIELD_POLL_MAX_WAIT_SECONDS: int = 1800
 
+    # BytePlus ModelArk — Dreamina Seedance 2.0 video (Creative Studio)
+    # Console key name example: api-key-20260907112046
+    ARK_API_KEY: str = ""
+    ARK_BASE_URL: str = "https://ark.ap-southeast.bytepluses.com/api/v3"
+    ARK_SEEDANCE_MODEL: str = "dreamina-seedance-2-0-260128"
+    ARK_POLL_MAX_WAIT_SECONDS: int = 1800
+
     # Firecrawl — scrape website → brand colors, logo, industry
     # Official: POST https://api.firecrawl.dev/v2/scrape with formats=["branding"]
     # https://docs.firecrawl.dev/features/scrape#extract-brand-identity
@@ -143,6 +150,9 @@ class Settings(BaseSettings):
         "OPENROUTER_MODEL_CLAUDE_SCRIPT",
         "OPENROUTER_MODEL_VISION",
         "OPENROUTER_MODEL_STRATEGY_PARSE",
+        "ARK_API_KEY",
+        "ARK_SEEDANCE_MODEL",
+        "ARK_BASE_URL",
         mode="before",
     )
     @classmethod

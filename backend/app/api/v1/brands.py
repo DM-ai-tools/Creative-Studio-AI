@@ -122,7 +122,7 @@ async def fetch_brand_social_style(
 ):
     """
     One-time SociaVault fetch: pull public posts from Instagram/Facebook,
-    analyze visual ad style, store in brand.voice_rules.social_style_profile.
+    analyze visual ad style, store in Brand Kit (colors.social_style_profile) for this brand.
     """
     from app.services.social_style_service import fetch_and_analyze_social_style
     from app.services.usage_tracker import record_sociavault
@@ -141,15 +141,8 @@ async def fetch_brand_social_style(
         record_sociavault(success=False, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Could not fetch social style: {exc}") from exc
 
-    voice_rules = dict(brand.voice_rules or {})
-    voice_rules["social_style_profile"] = profile
-    voice_rules["social_style_fetched_at"] = profile.get("fetched_at")
-    updated = await BrandService.update_brand(
-        db,
-        brand_id,
-        current_user.tenant_id,
-        BrandUpdate(voice_rules=voice_rules),
-    )
+    await BrandService.persist_social_style_profile(db, brand, profile)
+    updated = brand
     record_sociavault(
         success=True,
         platform=str(profile.get("platform") or ""),
@@ -160,6 +153,213 @@ async def fetch_brand_social_style(
         brand_id=str(updated.id),
         social_style_profile=profile,
     )
+
+
+class FetchCompetitorSocialRequest(BaseModel):
+    handle_or_url: str = Field(..., min_length=2, description="Competitor Instagram/Facebook URL or @handle")
+    platform: str = Field(default="", description="instagram | facebook — auto-detected from URL if empty")
+    industry: str = Field(default="", description="Optional industry context for LLM analysis")
+    niche: str = Field(default="", description="Optional niche context for LLM analysis")
+
+
+class DiscoverCompetitorsRequest(BaseModel):
+    handle_or_url: str = Field(
+        default="",
+        description="Client Instagram/Facebook URL or @handle — uses saved Brand Kit social profile if empty",
+    )
+    platform: str = Field(default="", description="instagram | facebook — auto-detected from URL if empty")
+    industry: str = Field(default="", description="Optional industry context")
+    niche: str = Field(default="", description="Optional niche / campaign context")
+    geography: str = Field(default="", description="Optional service location")
+
+
+class DiscoverCompetitorsResponse(BaseModel):
+    brand_id: str
+    competitor_candidates: list[dict]
+    message: str = "Competitor suggestions saved — select one to analyze."
+
+
+class FetchCompetitorSocialResponse(BaseModel):
+    brand_id: str
+    competitor_insight: dict
+    competitor_social_insights: list[dict]
+    message: str = "Competitor posting logic saved to Brand Kit."
+
+
+@router.post("/{brand_id}/fetch-competitor-social", response_model=FetchCompetitorSocialResponse)
+async def fetch_brand_competitor_social(
+    brand_id: UUID,
+    data: FetchCompetitorSocialRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    SociaVault fetch for a COMPETITOR account — extracts posting strategy (not visual identity),
+    upserts into Brand Kit competitor_social_insights for this brand.
+    """
+    from app.services.competitor_social_service import (
+        fetch_and_analyze_competitor_social,
+        upsert_competitor_insight,
+    )
+    from app.services.brand_service import competitor_insights_from_brand_and_kit
+    from app.services.usage_tracker import record_sociavault
+
+    brand = await BrandService.get_brand(db, brand_id, current_user.tenant_id)
+    kit = None
+    try:
+        kit = await BrandService.get_brand_kit(db, brand_id, current_user.tenant_id)
+    except HTTPException:
+        pass
+    try:
+        insight = await fetch_and_analyze_competitor_social(
+            platform=data.platform,
+            handle_or_url=data.handle_or_url.strip(),
+            industry=data.industry,
+            niche=data.niche,
+        )
+    except ValueError as exc:
+        record_sociavault(success=False, error=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        record_sociavault(success=False, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Could not analyze competitor: {exc}") from exc
+
+    existing = competitor_insights_from_brand_and_kit(brand, kit)
+    merged = upsert_competitor_insight(existing, insight)
+    await BrandService.persist_competitor_social_insights(db, brand, merged)
+
+    from app.services.brand_service import competitor_candidates_from_brand_and_kit
+    from app.services.competitor_social_service import _competitor_key
+
+    analyzed_key = _competitor_key(
+        str(insight.get("platform") or ""),
+        str(insight.get("handle") or ""),
+    )
+    remaining_candidates = [
+        c
+        for c in competitor_candidates_from_brand_and_kit(brand, kit)
+        if _competitor_key(str(c.get("platform") or ""), str(c.get("handle") or "")) != analyzed_key
+    ]
+    await BrandService.persist_competitor_candidates(db, brand, remaining_candidates)
+
+    record_sociavault(
+        success=True,
+        platform=str(insight.get("platform") or ""),
+        handle=str(insight.get("handle") or ""),
+        post_count=int(insight.get("post_count_analyzed") or 0),
+    )
+    return FetchCompetitorSocialResponse(
+        brand_id=str(brand.id),
+        competitor_insight=insight,
+        competitor_social_insights=merged,
+    )
+
+
+@router.post("/{brand_id}/discover-competitors", response_model=DiscoverCompetitorsResponse)
+async def discover_brand_competitors(
+    brand_id: UUID,
+    data: DiscoverCompetitorsRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Optional: suggest competitor social pages from client context.
+    Does NOT analyze posts — user selects a candidate then calls fetch-competitor-social.
+    """
+    from app.services.brand_service import (
+        competitor_candidates_from_brand_and_kit,
+        competitor_insights_from_brand_and_kit,
+        social_style_from_brand_and_kit,
+    )
+    from app.services.competitor_discovery_service import discover_competitor_candidates
+
+    brand = await BrandService.get_brand(db, brand_id, current_user.tenant_id)
+    kit = None
+    try:
+        kit = await BrandService.get_brand_kit(db, brand_id, current_user.tenant_id)
+    except HTTPException:
+        pass
+
+    client_url = (data.handle_or_url or "").strip()
+    client_platform = (data.platform or "").strip()
+    if not client_url:
+        social = social_style_from_brand_and_kit(brand, kit)
+        if social:
+            client_url = str(social.get("profile_url") or social.get("handle") or "").strip()
+            if client_url and not client_url.startswith("http"):
+                client_url = f"@{client_url.lstrip('@')}"
+            client_platform = client_platform or str(social.get("platform") or "")
+
+    if not client_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter client Facebook/Instagram URL or fetch social style first.",
+        )
+
+    geography = (data.geography or "").strip()
+    if not geography:
+        raise HTTPException(
+            status_code=400,
+            detail="Set Service Location on the brief (e.g. Melbourne VIC) — competitors are limited to that area and nearby states.",
+        )
+
+    try:
+        candidates = await discover_competitor_candidates(
+            brand_name=brand.name,
+            industry=(data.industry or brand.industry or "").strip(),
+            niche=data.niche.strip(),
+            geography=geography,
+            client_handle_or_url=client_url,
+            client_platform=client_platform,
+            existing_insights=competitor_insights_from_brand_and_kit(brand, kit),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not discover competitors: {exc}") from exc
+
+    await BrandService.persist_competitor_candidates(db, brand, candidates)
+    return DiscoverCompetitorsResponse(
+        brand_id=str(brand.id),
+        competitor_candidates=candidates,
+    )
+
+
+class DeleteCompetitorSocialRequest(BaseModel):
+    platform: str = Field(default="", description="instagram | facebook")
+    handle: str = Field(..., min_length=1, description="Competitor handle without @")
+
+
+@router.delete("/{brand_id}/competitor-social")
+async def delete_brand_competitor_social(
+    brand_id: UUID,
+    handle: str,
+    platform: str = "",
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove one saved competitor insight from Brand Kit."""
+    from app.services.competitor_social_service import remove_competitor_insight
+    from app.services.brand_service import competitor_insights_from_brand_and_kit
+
+    brand = await BrandService.get_brand(db, brand_id, current_user.tenant_id)
+    kit = None
+    try:
+        kit = await BrandService.get_brand_kit(db, brand_id, current_user.tenant_id)
+    except HTTPException:
+        pass
+    existing = competitor_insights_from_brand_and_kit(brand, kit)
+    merged = remove_competitor_insight(
+        existing,
+        platform=platform,
+        handle=handle.strip().lstrip("@"),
+    )
+    await BrandService.persist_competitor_social_insights(db, brand, merged)
+    return {
+        "brand_id": str(brand.id),
+        "competitor_social_insights": merged,
+        "message": "Competitor removed from Brand Kit.",
+    }
 
 
 @router.delete("/{brand_id}", status_code=204)

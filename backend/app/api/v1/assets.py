@@ -42,6 +42,7 @@ async def upload_asset(
 @router.get("/", response_model=list[AssetResponse])
 async def list_assets(
     variant_id: Optional[UUID] = Query(None),
+    brand_id: Optional[UUID] = Query(None),
     asset_type: Optional[str] = Query(None),
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -49,8 +50,16 @@ async def list_assets(
     q = select(Asset).where(Asset.tenant_id == current_user.tenant_id)
     if variant_id:
         q = q.where(Asset.variant_id == variant_id)
+    if brand_id:
+        q = q.where(Asset.brand_id == brand_id)
     if asset_type:
         q = q.where(Asset.asset_type == asset_type)
+        # Image-brief Brand Kit references are created by the analyzed
+        # reference-image flow. Creative Studio attachments use a separate
+        # asset type and legacy unclassified uploads must not leak into this
+        # library.
+        if asset_type == "reference_image":
+            q = q.where(Asset.asset_metadata["analysis"].is_not(None))
     result = await db.execute(q.order_by(Asset.created_at.desc()))
     return list(result.scalars().all())
 

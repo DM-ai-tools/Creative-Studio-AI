@@ -1,8 +1,8 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MetricResponse(BaseModel):
@@ -61,6 +61,7 @@ class AssetResponse(BaseModel):
     asset_type: str
     width: Optional[int]
     height: Optional[int]
+    metadata: Dict[str, Any] = Field(default_factory=dict, validation_alias="asset_metadata")
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)

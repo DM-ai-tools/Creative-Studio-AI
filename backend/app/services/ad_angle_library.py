@@ -820,7 +820,22 @@ def assign_angles_to_variants(
         campaign_name=campaign_name,
     )
     if valid:
-        # User picked angles — lock them to slots. Do NOT inject industry must-haves.
+        # User picked angles — lock them to slots.
+        # If fewer angles than variants, pad with complementary angles so each variant
+        # gets a DIFFERENT visual framework (no "pain_led, pain_led, pain_led" repeats).
+        if len(valid) < count:
+            complement_pool = default_angles_for_objective(
+                objective_id,
+                count,
+                industry=industry,
+                niche=niche,
+                campaign_name=campaign_name,
+            )
+            # Keep user choices first, then fill with non-repeating complements
+            used = set(valid)
+            extras = [a for a in complement_pool if a not in used]
+            padded = valid + extras
+            return [padded[i % len(padded)] for i in range(count)]
         return [valid[i % len(valid)] for i in range(count)]
 
     pool = default_angles_for_objective(

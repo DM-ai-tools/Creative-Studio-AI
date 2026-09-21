@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from app.services.brand_logo import _collect_logo_url_candidates
+from app.services.brand_service import competitor_insights_from_brand_and_kit, social_style_from_brand_and_kit
 from app.services.campaign_themes import parse_campaign_themes
 from app.services.copy_helpers import texts_duplicate
 from app.services.cta_defaults import resolve_campaign_cta
@@ -89,20 +91,26 @@ def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, A
 
     fonts: dict = {}
     logo_on_light = ""
-    social_style_profile: dict | None = None
+    social_style_profile = social_style_from_brand_and_kit(brand, kit)
+    competitor_social_insights = competitor_insights_from_brand_and_kit(brand, kit)
     if kit and isinstance(kit.fonts, dict):
         fonts = kit.fonts
     if kit and isinstance(kit.logo_variations, dict):
         logo_on_light = str(kit.logo_variations.get("on_light") or "")
-    if isinstance(brand.voice_rules, dict):
-        raw_social = brand.voice_rules.get("social_style_profile")
-        if isinstance(raw_social, dict):
-            social_style_profile = raw_social
 
-    # Also include full logo_variations so resolve_video_logo_urls can pick it up
     logo_variations: dict = {}
     if kit and isinstance(kit.logo_variations, dict):
         logo_variations = kit.logo_variations
+
+    effective_logo_url, effective_on_light = _collect_logo_url_candidates(
+        brand={
+            "logo_url": brand.logo_url,
+            "logo_on_light_url": logo_on_light or None,
+            "logo_variations": logo_variations,
+        },
+    )
+
+    # Also include full logo_variations so resolve_video_logo_urls can pick it up
 
     return {
         "brand_name": brand.name,
@@ -111,12 +119,13 @@ def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, A
         "primary_color": primary,
         "secondary_color": secondary,
         "voice": voice,
-        "logo_url": brand.logo_url,
-        "logo_on_light_url": logo_on_light or None,
+        "logo_url": effective_logo_url,
+        "logo_on_light_url": effective_on_light,
         "logo_variations": logo_variations or None,
         "font_heading": fonts.get("heading", ""),
         "font_body": fonts.get("body", ""),
         "social_style_profile": social_style_profile,
+        "competitor_social_insights": competitor_social_insights,
     }
 
 
@@ -151,7 +160,7 @@ def build_image_prompt(
     if isinstance(benefits, dict):
         offer = _clip(str(benefits.get("offer") or ""), 80)
 
-    has_logo = bool(brand.get("logo_url"))
+    has_logo = bool(brand.get("logo_url") or brand.get("logo_on_light_url"))
     prompt = (
         f"Professional Meta {format_type} ad for {target_industry}. "
         "Natural, realistic photography or clean modern layout — true-to-life colors, "

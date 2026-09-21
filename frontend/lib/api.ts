@@ -3,9 +3,9 @@ import { authStorage } from './auth'
 import type {
   AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
   SuggestAdAnglesResult, StrategyParseResult, WebsiteBrandFetchResult,
-  StatsImageExtractionResult, StrategyPreviewResult,
+  StatsImageExtractionResult, StrategyPreviewResult, ReferenceImageAnalysisResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
-  GenerationCatalog, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
+  GenerationCatalog, GenerationModelOption, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
   TopPerformer, User, Variant,
 } from '@/types'
 
@@ -117,6 +117,49 @@ export const brandsApi = {
         { timeout: 120_000 }
       )
       .then((r) => r.data),
+
+  fetchCompetitorSocial: (
+    brandId: string,
+    data: { handle_or_url: string; platform?: string; industry?: string; niche?: string }
+  ) =>
+    api
+      .post<{
+        brand_id: string
+        competitor_insight: import('@/types').CompetitorSocialInsight
+        competitor_social_insights: import('@/types').CompetitorSocialInsight[]
+        message: string
+      }>(`/brands/${brandId}/fetch-competitor-social`, data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  deleteCompetitorSocial: (
+    brandId: string,
+    params: { handle: string; platform?: string }
+  ) =>
+    api
+      .delete<{
+        brand_id: string
+        competitor_social_insights: import('@/types').CompetitorSocialInsight[]
+        message: string
+      }>(`/brands/${brandId}/competitor-social`, { params })
+      .then((r) => r.data),
+
+  discoverCompetitors: (
+    brandId: string,
+    data: {
+      handle_or_url?: string
+      platform?: string
+      industry?: string
+      niche?: string
+      geography?: string
+    }
+  ) =>
+    api
+      .post<{
+        brand_id: string
+        competitor_candidates: import('@/types').CompetitorCandidate[]
+        message: string
+      }>(`/brands/${brandId}/discover-competitors`, data, { timeout: 120_000 })
+      .then((r) => r.data),
 }
 
 // ── Briefs ────────────────────────────────────────────────────────────────────
@@ -205,21 +248,43 @@ export const variantsApi = {
 
   delete: (id: string) => api.delete(`/variants/${id}`),
 
+  /** Save Creative Studio (or other) media URL into the Variants library. */
+  createFromMedia: (data: {
+    media_url: string
+    media_mode?: 'image' | 'video' | 'storyboard'
+    aspect?: string
+    model?: string
+    prompt?: string
+    duration_seconds?: number | null
+    seed_image_url?: string | null
+    brief_id?: string | null
+    brand_id?: string | null
+    brief_title?: string | null
+    product_name?: string
+  }) =>
+    api.post<Variant>('/variants/from-media', data, { timeout: 30_000 }).then((r) => r.data),
+
   getFatigueAlerts: () =>
     api.get<FatigueAlert[]>('/variants/fatigue-alerts').then((r) => r.data),
 }
 
 // ── Assets ────────────────────────────────────────────────────────────────────
 export const assetsApi = {
-  upload: (file: File, variantId?: string, assetType: string = 'image') => {
+  upload: (
+    file: File,
+    variantId?: string,
+    assetType: string = 'image',
+    brandId?: string,
+  ) => {
     const form = new FormData()
     form.append('file', file)
     if (variantId) form.append('variant_id', variantId)
     form.append('asset_type', assetType)
+    if (brandId) form.append('brand_id', brandId)
     return api.post<Asset>('/assets/upload', form).then((r) => r.data)
   },
 
-  list: (params?: { variant_id?: string; asset_type?: string }) =>
+  list: (params?: { variant_id?: string; brand_id?: string; asset_type?: string }) =>
     api.get<Asset[]>('/assets/', { params }).then((r) => r.data),
 
   delete: (id: string) => api.delete(`/assets/${id}`),
@@ -402,6 +467,64 @@ export const generationApi = {
       .then((r) => r.data)
   },
 
+  analyzeReferenceImage: (
+    file: File,
+    opts?: { brand_id?: string; brand_name?: string; niche?: string },
+  ) => {
+    const form = new FormData()
+    form.append('file', file)
+    if (opts?.brand_id) form.append('brand_id', opts.brand_id)
+    if (opts?.brand_name) form.append('brand_name', opts.brand_name)
+    if (opts?.niche) form.append('niche', opts.niche)
+    return api
+      .post<ReferenceImageAnalysisResult>('/generation/analyze-reference-image', form, {
+        timeout: 120_000,
+      })
+      .then((r) => r.data)
+  },
+
+  fetchProductReference: (data: {
+    source: string
+    brand_id: string
+    brand_name?: string
+    niche?: string
+  }) =>
+    api
+      .post<ReferenceImageAnalysisResult>('/generation/product-reference', data, {
+        timeout: 120_000,
+      })
+      .then((r) => r.data),
+
+  generateHeroAiImage: (
+    file: File,
+    data: {
+      brand_name?: string
+      industry?: string
+      niche?: string
+      product_name?: string
+      hook?: string
+      headline?: string
+      model?: string
+      logo_url?: string
+      logo_on_light_url?: string
+      prompt?: string
+      generate_image?: boolean
+    },
+  ) => {
+    const form = new FormData()
+    form.append('file', file)
+    Object.entries(data).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') form.append(key, String(value))
+    })
+    return api
+      .post<{ image_url: string; hook: string; headline: string; prompt: string }>(
+        '/generation/hero-ai-image',
+        form,
+        { timeout: 300_000 },
+      )
+      .then((r) => r.data)
+  },
+
   previewImagePlan: (data: {
     brand_name?: string
     industry?: string
@@ -425,6 +548,7 @@ export const generationApi = {
 
   previewIcpImagePlan: (data: {
     campaign_name: string
+    brand_id?: string
     brand_name?: string
     industry?: string
     niche?: string
@@ -441,11 +565,21 @@ export const generationApi = {
     creative_format?: 'static' | 'carousel' | 'mixed' | string
     strategy_notes?: string
     product_focus?: string
+    image_visual_style?: string
     primary_color?: string
     secondary_color?: string
     font_heading?: string
     font_body?: string
     social_style_profile?: import('@/types').SocialStyleProfile | null
+    use_competitor_insights?: boolean
+    competitor_social_insights?: import('@/types').CompetitorSocialInsight[] | null
+    reference_images?: Array<{
+      asset_id?: string
+      file_url?: string
+      analysis?: import('@/types').ReferenceImageAnalysis
+      is_product_reference?: boolean
+    }>
+    exact_product_reference?: boolean
     strategy_variants?: Array<{
       id?: string
       format?: string
@@ -458,9 +592,10 @@ export const generationApi = {
       carousel_total?: number
       carousel_group?: string
     }>
+    llm_model?: string
   }) => {
     const count = Math.max(1, data.variant_count ?? 1)
-    const timeout = Math.min(600_000, 90_000 + count * 12_000)
+    const timeout = Math.min(600_000, 120_000 + count * 20_000)
     return api
       .post<IcpImagePlanResult>('/generation/icp-image-plan', data, { timeout })
       .then((r) => r.data)
@@ -525,6 +660,180 @@ export const generationApi = {
   }) =>
     api
       .post<IcpScriptResult>('/generation/icp-script', data, { timeout: 180_000 })
+      .then((r) => r.data),
+
+  creativeStudioGenerate: (data: {
+    media_mode: 'image' | 'video'
+    model: string
+    prompt: string
+    duration_seconds?: number
+    aspect?: string
+    resolution?: string
+    sound_on?: boolean
+    negative_prompt?: string
+  }) =>
+    api
+      .post<{
+        status: string
+        job_id?: string | null
+        progress?: string | null
+        url?: string | null
+        model?: string | null
+        provider?: string | null
+        error?: string | null
+        seed_image_url?: string | null
+        duration_seconds?: number | null
+        requested_duration_seconds?: number | null
+        segment_count?: number | null
+        partial?: boolean
+        credits_estimate?: number | null
+        duration_warning?: string | null
+        note?: string | null
+      }>('/generation/creative-studio', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
+  creativeStudioJob: (jobId: string) =>
+    api
+      .get<{
+        status: string
+        job_id?: string | null
+        progress?: string | null
+        url?: string | null
+        model?: string | null
+        provider?: string | null
+        error?: string | null
+        seed_image_url?: string | null
+        duration_seconds?: number | null
+        requested_duration_seconds?: number | null
+        segment_count?: number | null
+        partial?: boolean
+        credits_estimate?: number | null
+        duration_warning?: string | null
+        note?: string | null
+        storyboard?: {
+          id?: string
+          index?: number
+          title?: string
+          url?: string | null
+          image_prompt?: string
+          overlays?: string[]
+          status?: string
+          error?: string | null
+        }[]
+        media_mode?: string | null
+      }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}`, {
+        timeout: 30_000,
+      })
+      .then((r) => r.data),
+
+  creativeStudioCancelJob: (jobId: string) =>
+    api
+      .post<{
+        status: string
+        job_id?: string | null
+        progress?: string | null
+        error?: string | null
+      }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}/cancel`, {}, {
+        timeout: 30_000,
+      })
+      .then((r) => r.data),
+
+  creativeStudioNiches: () =>
+    api
+      .get<{ id: string; label: string }[]>('/generation/creative-studio/niches', {
+        timeout: 15_000,
+      })
+      .then((r) => r.data),
+
+  creativeStudioModels: () =>
+    api
+      .get<{
+        configured: boolean
+        chat_models?: GenerationModelOption[]
+        default_chat_model?: string | null
+        image_model_default?: string | null
+        video_model_default?: string | null
+        image_models: GenerationModelOption[]
+        video_models: GenerationModelOption[]
+        message?: string | null
+      }>('/generation/creative-studio/models', { timeout: 20_000 })
+      .then((r) => r.data),
+
+  creativeStudioChat: (data: {
+    messages: { role: 'user' | 'assistant'; content: string }[]
+    mode?: 'auto' | 'ask' | 'generate'
+    chat_model?: string
+    duration_seconds?: number
+    aspect?: string
+    resolution?: string
+    sound_on?: boolean
+    attachment_urls?: string[]
+    brand_name?: string
+    product_name?: string
+    action?:
+      | 'continue'
+      | 'generate_image'
+      | 'regenerate_image'
+      | 'approve_next'
+      | 'generate_video'
+      | 'generate_storyboard'
+    image_prompt?: string
+    video_prompt?: string
+    approved_image_url?: string
+    product_reference_url?: string
+    logo_reference_url?: string
+    additional_reference_urls?: string[]
+    storyboard_image_urls?: string[]
+    image_model?: string
+    revision_notes?: string
+    phase?: string
+  }) =>
+    api
+      .post<{
+        assistant_message: string
+        intent: string
+        phase?: string | null
+        suggested_actions?: string[]
+        chat_model?: string | null
+        image_model?: string | null
+        video_model?: string | null
+        job_id?: string | null
+        status: string
+        media_mode?: string | null
+        model?: string | null
+        image_prompt?: string | null
+        video_prompt?: string | null
+        approved_image_url?: string | null
+        product_reference_url?: string | null
+        storyboard_scenes?: {
+          id?: string
+          index?: number
+          title?: string
+          image_prompt?: string
+          overlays?: string[]
+        }[]
+        duration_seconds?: number | null
+        aspect?: string | null
+        error?: string | null
+      }>('/generation/creative-studio/chat', data, { timeout: 120_000 })
+      .then((r) => r.data),
+
+  creativeStudioPrompt: (data: {
+    niche: string
+    media_mode?: 'image' | 'video'
+    duration_seconds?: number
+    style?: string
+    genre?: string
+    camera?: string
+    aspect?: string
+    product_name?: string
+    brand_name?: string
+    notes?: string
+  }) =>
+    api
+      .post<{ prompt: string; niche: string }>('/generation/creative-studio/prompt', data, {
+        timeout: 90_000,
+      })
       .then((r) => r.data),
 }
 

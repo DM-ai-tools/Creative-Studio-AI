@@ -15,6 +15,7 @@ from app.services.heygen_catalog import (
     get_heygen_voice_options,
 )
 from app.services.heygen_video_catalog import heygen_video_catalog_options
+from app.services.media.byteplus_seedance_catalog import byteplus_seedance_video_catalog_options
 from app.services.media.higgsfield_catalog import (
     higgsfield_image_catalog_options,
     higgsfield_video_catalog_options,
@@ -25,6 +26,7 @@ from app.services.media.runway_catalog import (
     runway_image_catalog_options,
     runway_video_catalog_options,
 )
+from app.services.prompt_llm_catalog import prompt_llm_catalog_options
 
 
 _CATALOG_CACHE: tuple[float, GenerationCatalogResponse] | None = None
@@ -54,6 +56,7 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
     image_models.extend(higgsfield_image_catalog_options())
 
     video_models: list[GenerationModelOption] = []
+    video_models.extend(byteplus_seedance_video_catalog_options())
     video_models.extend(heygen_video_catalog_options())
     video_models.extend(runway_video_catalog_options())
     video_models.extend(higgsfield_video_catalog_options())
@@ -75,6 +78,7 @@ def get_generation_catalog(*, refresh: bool = False) -> GenerationCatalogRespons
         ],
         image_models=image_models,
         video_models=video_models,
+        prompt_llm_models=prompt_llm_catalog_options(),
         heygen_avatar_options=get_heygen_avatar_options(),
         heygen_avatar_featured=get_heygen_avatar_featured(),
         heygen_voice_options=get_heygen_voice_options(),

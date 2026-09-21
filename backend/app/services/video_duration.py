@@ -10,6 +10,10 @@ ALLOWED_VIDEO_DURATIONS: tuple[int, ...] = (5, 6, 8, 10, 12, 15)
 # UI value: selecting 30s enables master script (4 clips totalling 30s), not one 30s Runway call.
 MASTER_VIDEO_DURATION_SECONDS = 30
 
+# Creative Studio long-form generation limit. Providers may still impose a
+# smaller per-clip limit; long jobs are segmented and stitched by the job service.
+CREATIVE_STUDIO_MAX_DURATION_SECONDS = 600
+
 # HeyGen / long-form UI durations (up to 4 minutes).
 EXTENDED_VIDEO_DURATIONS: tuple[int, ...] = (60, 90, 120, 180, 240)
 MAX_VIDEO_DURATION_SECONDS = 240

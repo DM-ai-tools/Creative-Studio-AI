@@ -58,7 +58,7 @@ export default function VariantTile({
   const imageFailureMessage =
     imageFailed || (!previewUrl && !isMotionVariant && (variant.status === 'READY' || variant.status === 'FAILED'))
       ? formatVideoErrorMessage(imageError) ||
-        'Image not generated. Check Runway model settings, then regenerate.'
+        'Image not generated. Check OpenAI image model / credits, then regenerate.'
       : null
 
   const videoFailureMessage =

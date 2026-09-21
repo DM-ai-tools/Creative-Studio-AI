@@ -11,6 +11,8 @@ interface CardProps {
   hover?: boolean
   /** Accent left bar */
   accent?: boolean
+  /** Dark surface for usage / analytics pages */
+  theme?: 'light' | 'dark'
 }
 
 export default function Card({
@@ -22,13 +24,16 @@ export default function Card({
   padding = true,
   hover = false,
   accent = false,
+  theme = 'light',
 }: CardProps) {
+  const isDark = theme === 'dark'
   return (
     <div
       className={cn(
-        'relative bg-surface-elevated rounded-2xl overflow-hidden animate-fade-in',
-        'border border-border',
-        'shadow-card',
+        'relative rounded-2xl overflow-hidden animate-fade-in',
+        isDark
+          ? 'bg-[#111114] border border-[#2a2a2e] shadow-none'
+          : 'bg-surface-elevated border border-border shadow-card',
         hover && 'transition-all duration-250 ease-premium hover:shadow-card-hover hover:border-accent/20 hover:-translate-y-px cursor-pointer',
         className
       )}
@@ -45,18 +50,22 @@ export default function Card({
       {(title || action) && (
         <div className={cn(
           'flex items-center justify-between gap-3 px-5 py-3.5',
-          'border-b border-border/60',
-          'bg-gradient-to-r from-surface/60 to-transparent',
+          isDark ? 'border-b border-[#2a2a2e]' : 'border-b border-border/60 bg-gradient-to-r from-surface/60 to-transparent',
         )}>
           <div className="min-w-0">
             <h3 className={cn(
-              'text-sm font-bold text-charcoal tracking-tight truncate',
+              'text-sm font-bold tracking-tight truncate',
+              isDark ? 'text-[#f5f5f7]' : 'text-charcoal',
               accent && 'pl-2'
             )}>
               {title}
             </h3>
             {subtitle && (
-              <p className={cn('text-[11px] text-muted mt-0.5 truncate', accent && 'pl-2')}>
+              <p className={cn(
+                'text-[11px] mt-0.5 truncate',
+                isDark ? 'text-[#8e8e93]' : 'text-muted',
+                accent && 'pl-2'
+              )}>
                 {subtitle}
               </p>
             )}

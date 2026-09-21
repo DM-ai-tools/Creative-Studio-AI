@@ -132,6 +132,18 @@ export function formatVideoErrorMessage(raw: string | undefined | null): string 
   if (text.includes('not enough credits') && text.toLowerCase().includes('runway')) {
     return 'Runway image credits are empty. Add Runway credits or switch Image model in generation settings, then regenerate.'
   }
+  if (
+    text.includes('OpenAI Images API') &&
+    (text.includes('429') || text.toLowerCase().includes('billing') || text.toLowerCase().includes('quota'))
+  ) {
+    return 'OpenAI image credits/quota issue. Check billing at platform.openai.com, then regenerate.'
+  }
+  if (
+    text.includes('ReadTimeout') ||
+    (text.includes('timed out') && text.toLowerCase().includes('openai'))
+  ) {
+    return 'OpenAI image timed out on a heavy prompt. Retry, or switch to GPT Image 1 Mini.'
+  }
   if (text.includes('ffmpeg') || text.includes('imageio-ffmpeg')) {
     return (
       'Logo and captions are added after HeyGen finishes, using ffmpeg. ' +

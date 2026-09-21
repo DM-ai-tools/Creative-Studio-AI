@@ -1,0 +1,5 @@
+Host creative-studio-aws
+    HostName 13.235.37.173
+    User ubuntu
+    Port 22
+    IdentityFile C:\Users\Humruth\Downloads\DM-Creative-studioppk.ppk

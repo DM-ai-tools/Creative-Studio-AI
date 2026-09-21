@@ -7,21 +7,33 @@ interface TopbarProps {
   actions?: React.ReactNode
   /** Compact version for nested pages */
   compact?: boolean
+  /** Dark header for analytics / usage pages */
+  variant?: 'light' | 'dark'
 }
 
-export default function Topbar({ title, subtitle, actions, compact = false }: TopbarProps) {
+export default function Topbar({
+  title,
+  subtitle,
+  actions,
+  compact = false,
+  variant = 'light',
+}: TopbarProps) {
+  const isDark = variant === 'dark'
   return (
     <header
       className={cn(
         'sticky top-0 z-20 flex items-center justify-between gap-4',
-        'glass-topbar',
+        isDark
+          ? 'bg-[#0c0c0e]/95 backdrop-blur-xl border-b border-[#2a2a2e]'
+          : 'glass-topbar',
         compact ? 'px-6 py-3' : 'px-6 py-4',
       )}
     >
       <div className="min-w-0 animate-slide-up">
         <h1
           className={cn(
-            'font-bold text-charcoal tracking-tight truncate',
+            'font-bold tracking-tight truncate',
+            isDark ? 'text-[#f5f5f7]' : 'text-charcoal',
             compact ? 'text-[15px]' : 'text-[17px]'
           )}
           style={{ letterSpacing: '-0.015em' }}
@@ -29,7 +41,14 @@ export default function Topbar({ title, subtitle, actions, compact = false }: To
           {title}
         </h1>
         {subtitle && (
-          <p className="text-[12px] text-muted mt-0.5 truncate font-medium">{subtitle}</p>
+          <p
+            className={cn(
+              'text-[12px] mt-0.5 truncate font-medium',
+              isDark ? 'text-[#8e8e93]' : 'text-muted',
+            )}
+          >
+            {subtitle}
+          </p>
         )}
       </div>
 

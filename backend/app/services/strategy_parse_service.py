@@ -300,21 +300,50 @@ def _normalize_parsed_product_focus(raw: str, prompt: str = "") -> str:
     if v in {"with_person", "with_model", "with_people", "lifestyle_person", "person"}:
         return "with_person"
     # Heuristic fallback from prompt text when LLM left it blank.
+    # Covers all industries: jewellery, dental, roofing, HVAC, automotive,
+    # landscaping, gardening, turf, trade services, and generic retail.
     p = (prompt or "").lower()
     if v == "" and p:
+        # Pure graphic / stat / info-card → product_only (no people needed)
         _graphic_signals = (
             "graphic", "icon", "badge", "stat", "number", "clean background",
             "white background", "minimal", "3 steps", "3-step", "process card",
-            "logo", "wordmark",
+            "logo", "wordmark", "infographic", "text card", "quote card",
+            "testimonial card", "review card", "google review", "star rating",
+            "checklist", "comparison", "before/after text", "price card",
+            "discount", "offer card", "percentage off", "benefits list",
+            "why choose", "our process", "step by step",
         )
+        # Person is the main subject — product is secondary or in background
         _person_hero_signals = (
             "couple", "jeweller", "jeweler", "consultation", "boutique",
             "sitting across", "person", "people", "model", "woman", "man",
             "homeowner", "technician", "tradie", "customer", "client",
+            # trade / service industries
+            "mechanic", "worker", "crew", "team", "staff", "employee",
+            "plumber", "electrician", "installer", "operator", "driver",
+            "contractor", "roofer", "hvac tech", "landscape crew",
+            # dental / health
+            "patient", "dentist", "hygienist", "practitioner", "doctor",
+            "smile", "smiling", "laughing",
+            # lifestyle generic
+            "family", "couple", "homeowner sitting", "customer smiling",
+            "before and after", "happy customer",
         )
+        # Product + body-part or product being used / worn / held close-up
         _product_lifestyle_signals = (
+            # jewellery
             "hand", "ring on", "wearing", "wrist", "collarbone", "finger",
             "necklace on", "bracelet on", "held by", "in hand",
+            # automotive parts on vehicle
+            "installed on", "fitted to", "mounted on", "on the car",
+            "on the vehicle", "under the hood", "in the engine bay",
+            # turf / landscaping applied to surface
+            "turf laid", "grass installed", "lawn installed", "applied to lawn",
+            "artificial turf on", "garden with product",
+            # tool / equipment being used
+            "being used", "in use", "technician using", "worker using",
+            "holding the", "applying the", "spraying the",
         )
         if any(s in p for s in _product_lifestyle_signals):
             return "product_with_person"
@@ -444,8 +473,8 @@ def _extract_card_scenes(text: str) -> list[str]:
 _MAX_STRATEGY_VARIANTS = 100
 
 _CREATIVE_SPLIT_RE = re.compile(
-    r"(?m)^#\s*\*{0,2}\s*CREATIVE\s+(\d+)\s*[–—\-]?\s*(.+?)\s*\*{0,2}\s*$",
-    re.I,
+    r"(?im)^\s*(?:#{1,6}\s*)?\*{0,2}\s*CREATIVE\s+(\d+)"
+    r"(?:\s*[–—\-:]\s*(.+?))?\s*\*{0,2}\s*$",
 )
 _CARD_HEADER_RE = re.compile(
     r"(?m)^(?:#{2,4}\s*)?\*{0,2}\s*Card\s+(\d+)\s*(?:[–—\-:].*?)?\*{0,2}\s*$",
@@ -482,12 +511,75 @@ def _overlay_from_card_body(body: str) -> str:
 def _scene_from_card_body(body: str) -> str:
     """Visual direction without overlay/CTA blocks."""
     cleaned = re.sub(
-        r"(?is)(?:Overlay(?:\s*text)?|Headline|CTA)\s*:?\s*.*",
+        r"(?im)^\s*\*{0,2}\s*(?:Overlay(?:\s*text)?|Headline|Hook|Message|Primary Text|CTA)\s*:?\s*\*{0,2}.*$",
         " ",
         body or "",
     )
+    cleaned = re.sub(
+        r"(?im)^\s*\*{0,2}\s*(?:Visual|Creative(?:\s+Direction)?|Image Direction)\s*:?\s*\*{0,2}\s*",
+        "",
+        cleaned,
+    )
     cleaned = _strip_md_noise(cleaned)
     return cleaned[:500]
+
+
+_CREATIVE_FIELD_NAMES = (
+    "Hook",
+    "Headline",
+    "Message",
+    "Primary Text",
+    "Description",
+    "Description (Below Headline)",
+    "Body Copy",
+    "Creative",
+    "Creative Direction",
+    "Creative Design Direction",
+    "Visual",
+    "Visual Direction",
+    "Image Direction",
+    "On-image Hook",
+    "On-image Headline",
+    "Image Hook",
+    "Image Headline",
+    "Design Notes",
+    "Overlay",
+    "Overlay Text",
+    "CTA",
+    "CTA Button",
+    "Post Type",
+    "Product",
+    "Benefits",
+)
+
+
+def _extract_loose_creative_field(text: str, names: tuple[str, ...]) -> str:
+    """Read labelled creative fields from common MD/DOCX heading styles."""
+    if not text:
+        return ""
+    wanted = "|".join(
+        re.escape(name) for name in sorted(names, key=len, reverse=True)
+    )
+    all_fields = "|".join(
+        re.escape(name) for name in sorted(_CREATIVE_FIELD_NAMES, key=len, reverse=True)
+    )
+    pattern = re.compile(
+        rf"(?ims)^\s*(?:#{1,6}\s*)?\*{{0,2}}\s*(?:{wanted})"
+        rf"(?:\s*\([^)\n]*\))?\s*:?\s*\*{{0,2}}\s*"
+        rf"(?P<value>.*?)(?=^\s*(?:#{1,6}\s*)?\*{{0,2}}\s*(?:{all_fields})"
+        rf"(?:\s*\([^)\n]*\))?\s*:?\s*\*{{0,2}}\s*|"
+        rf"^\s*(?:#{1,6}\s*)?\*{{0,2}}\s*Card\s+\d+\b|\Z)"
+    )
+    match = pattern.search(text)
+    if not match:
+        return ""
+    raw_value = re.split(
+        r"(?im)\n\s*#{1,6}\s*Card\s+\d+\b",
+        match.group("value"),
+        maxsplit=1,
+    )[0]
+    value = _strip_md_noise(raw_value)
+    return value[:1200]
 
 
 def _is_cta_card(body: str, overlay: str) -> bool:
@@ -525,6 +617,7 @@ def _cards_from_arrow_list(section: str) -> list[dict[str, Any]]:
                 "scene": "CTA closer" if scene.lower().startswith("cta") else scene[:500],
                 "overlay": "" if is_cta or scene.lower().startswith("cta") else scene[:120],
                 "is_cta": is_cta or scene.lower().startswith("cta"),
+                "body": part[:1200],
             }
         )
     return cards if len(cards) >= 2 else []
@@ -552,6 +645,7 @@ def _cards_from_numbered_headers(section: str) -> list[dict[str, Any]]:
                 "scene": scene or f"Carousel card {n}",
                 "overlay": overlay,
                 "is_cta": _is_cta_card(body, overlay),
+                "body": body[:1200],
             }
         return [by_n[k] for k in sorted(by_n)]
 
@@ -568,6 +662,7 @@ def _cards_from_numbered_headers(section: str) -> list[dict[str, Any]]:
             "scene": scene or f"Carousel card {n}",
             "overlay": overlay,
             "is_cta": _is_cta_card(f"{heading}\n{body}", overlay),
+            "body": body[:1200],
         }
     return [by_n[k] for k in sorted(by_n)] if len(by_n) >= 2 else []
 
@@ -1189,21 +1284,80 @@ def _extract_creatives_from_markdown(markdown: str) -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
     for hi, hm in enumerate(headers):
         creative_n = int(hm.group(1))
-        title = _strip_md_noise(hm.group(2))[:120]
+        title = _strip_md_noise(hm.group(2) or "")[:120]
         start = hm.end()
         end = headers[hi + 1].start() if hi + 1 < len(headers) else len(text)
         section = text[start:end]
+        if not title:
+            first_line = next(
+                (
+                    _strip_md_noise(line)
+                    for line in section.splitlines()
+                    if _strip_md_noise(line)
+                ),
+                "",
+            )
+            title = first_line[:120] or f"Creative {creative_n}"
 
-        headline_m = re.search(
-            r"(?is)##?\s*\*{0,2}\s*Headline\*{0,2}\s*(.+?)(?=\n#|\n##|\Z)",
-            section,
+        creative_hook = _extract_loose_creative_field(section, ("Hook",))
+        creative_headline = _extract_loose_creative_field(section, ("Headline",))
+        creative_message = _extract_loose_creative_field(
+            section, ("Message", "Primary Text", "Description", "Description (Below Headline)", "Body Copy")
         )
-        headline = _strip_md_noise(headline_m.group(1).split("\n\n")[0])[:160] if headline_m else title
+        creative_visual = _extract_loose_creative_field(
+            section,
+            (
+                "Creative",
+                "Creative Direction",
+                "Creative Design Direction",
+                "Visual",
+                "Visual Direction",
+                "Image Direction",
+            ),
+        )
+        creative_design = _extract_loose_creative_field(section, ("Design Notes",))
+        headline = creative_headline or title
 
         cards = _cards_from_numbered_headers(section)
         if len(cards) < 2:
             cards = _cards_from_arrow_list(section)
         if len(cards) < 2:
+            # Standalone static creatives often have no Card/Slide blocks.
+            # In client files like "Headline / Description (Below Headline)",
+            # Headline is the primary on-image line. Description is supporting copy.
+            explicit_image_hook = _extract_loose_creative_field(
+                section, ("On-image Hook", "Image Hook")
+            )
+            explicit_image_headline = _extract_loose_creative_field(
+                section, ("On-image Headline", "Image Headline")
+            )
+            variants.append(
+                {
+                    "id": f"C{creative_n}",
+                    "format": "static",
+                    "ad_angle": "",
+                    "use_cases": ["lifestyle"],
+                    "hook": creative_hook,
+                    "message": creative_message,
+                    "image_hook": explicit_image_hook or creative_headline,
+                    # In this document format, Description (Below Headline)
+                    # is the supporting on-image headline line.
+                    "image_headline": explicit_image_headline or creative_message,
+                    "cta": _extract_loose_creative_field(section, ("CTA", "CTA Button")),
+                    "offer": "",
+                    "prompt": "\n\n".join(
+                        part for part in (creative_visual, creative_design) if part
+                    )[:4000],
+                    "reasoning": f"Creative {creative_n}: {title}",
+                    "creative_type": "photo",
+                    "carousel_index": None,
+                    "carousel_total": None,
+                    "carousel_group": None,
+                    "design_notes": creative_design[:1200],
+                    "retail_promo": False,
+                    "photo_only": False,
+                }
+            )
             continue
 
         total = min(len(cards), 10)
@@ -1214,6 +1368,28 @@ def _extract_creatives_from_markdown(markdown: str) -> list[dict[str, Any]]:
         for i, card in enumerate(cards[:total]):
             overlay = str(card.get("overlay") or "").strip()
             scene = str(card.get("scene") or "").strip()
+            card_body = str(card.get("body") or "")
+            card_hook = _extract_loose_creative_field(card_body, ("Hook",))
+            card_headline = _extract_loose_creative_field(card_body, ("Headline",))
+            card_message = _extract_loose_creative_field(
+                card_body,
+                ("Message", "Primary Text", "Description", "Description (Below Headline)", "Body Copy"),
+            )
+            card_visual = _extract_loose_creative_field(
+                card_body,
+                ("Creative", "Creative Direction", "Visual", "Visual Direction", "Image Direction"),
+            )
+            # Do not put a headline into the hook field. If the document has no
+            # hook, the downstream LLM may create a catchy one from the source.
+            exact_hook = card_hook or creative_hook or ""
+            exact_headline = card_headline or creative_headline or headline or title
+            exact_message = card_message or creative_message or exact_headline
+            image_hook = _extract_loose_creative_field(
+                card_body, ("On-image Hook", "Image Hook")
+            )
+            image_headline = _extract_loose_creative_field(
+                card_body, ("On-image Headline", "Image Headline")
+            )
             is_last = i == closer_i or i == total - 1
             # If an earlier card was marked CTA but there are cards after, only the
             # final CTA-marked (or absolute last) card keeps the button.
@@ -1225,18 +1401,24 @@ def _extract_creatives_from_markdown(markdown: str) -> list[dict[str, Any]]:
                     "format": "carousel",
                     "ad_angle": "",
                     "use_cases": ["lifestyle"],
-                    "hook": overlay or headline or title,
-                    "message": headline if i == 0 else (overlay or scene[:120]),
-                    "image_hook": "",
-                    "image_headline": "",
+                    "hook": exact_hook,
+                    "message": exact_message if i == 0 else (card_message or scene[:120]),
+                    "image_hook": image_hook or overlay or exact_headline,
+                    "image_headline": image_headline or card_message or creative_message,
                     "cta": "",  # filled after we know campaign CTA
                     "offer": "",
-                    "prompt": scene or overlay or title,
+                    "prompt": "\n\n".join(
+                        part for part in (
+                            card_visual or scene or creative_visual or overlay or title,
+                            creative_design,
+                        ) if part
+                    )[:4000],
                     "reasoning": f"Creative {creative_n}: {title} · card {i + 1}/{total}",
                     "creative_type": "photo",
                     "carousel_index": i + 1,
                     "carousel_total": total,
                     "carousel_group": f"creative-{creative_n}",
+                    "design_notes": creative_design[:1200],
                     "_is_closer": is_last,
                 }
             )
@@ -1250,14 +1432,16 @@ def _prefer_structured_creatives(
 ) -> list[dict[str, Any]]:
     """Prefer deterministic CREATIVE/Card structure over LLM guesses when present."""
     structured = _extract_creatives_from_markdown(markdown)
-    if len(structured) < 4:
+    if len(structured) < 2:
         return llm_variants
     cta = (campaign_cta or "Learn More").strip()[:80]
     out: list[dict[str, Any]] = []
     for v in structured[:_MAX_STRATEGY_VARIANTS]:
         closer = bool(v.pop("_is_closer", False))
-        # Last card of THIS creative only.
-        v["cta"] = cta if closer else ""
+        if (v.get("format") or "") == "carousel":
+            # Carousel CTA appears only on the final card.
+            v["cta"] = cta if closer else ""
+        # Standalone static creative already carries its own document CTA.
         out.append(v)
     logger.info(
         "Strategy MD: using structured creatives (%s cards across groups) over LLM variants (%s)",
@@ -1524,11 +1708,21 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
         "(≤ 160 characters — do not expand into a full image prompt yet). "
         "hook = short on-ad line from the doc (≤ 120 chars); "
         "message = primary text / body copy from the doc (≤ 220 chars). "
-        "product_focus: read the visual concept description and assign one of: "
-        "  'product_only'        — product isolated on clean/studio background, NO people (e.g. graphic, stat card, catalog shot). "
-        "  'product_with_person' — product is the main visual hero (fills most of frame) AND a real person is present adding lifestyle context (e.g. ring on hand, person using product, product worn by model). "
-        "  'with_person'         — person/human is the primary subject, product is visible but secondary (e.g. couple conversation, testimonial face, person-centric lifestyle). "
-        "  ''                    — cannot determine from the visual description (leave blank). "
+        "product_focus: read EACH variant's visual concept description and assign one of these values — "
+        "every variant must get its own independent value, do NOT copy the first variant's value to all: "
+        "  'product_only'        — product / graphic / text card isolated, NO people at all. "
+        "    Examples (any industry): stat card, before/after text card, Google-review quote card, "
+        "    product catalog shot on white, HVAC unit on white background, turf roll on grass, "
+        "    roof shingle close-up, dental whitening kit on counter, auto part on white. "
+        "  'product_with_person' — product IS the clear hero (occupies most of frame) AND a real person is also present. "
+        "    Examples: ring on a hand, person wearing necklace, technician holding HVAC part next to unit, "
+        "    mechanic's hands on auto parts, dentist showing whitening tray to camera, "
+        "    landscaper laying turf (turf is the hero), roofer on roof showing shingle. "
+        "  'with_person'         — person / human is the PRIMARY subject; product is visible but background / secondary. "
+        "    Examples: homeowner smiling in renovated space, couple at jewellery consultation, "
+        "    dentist or patient (face-focused), happy customer holding result, "
+        "    tradie team on job site, before/after lifestyle photo of a person. "
+        "  ''                    — truly cannot determine (leave blank — rare, only if no visual description at all). "
         "Keep every string compact — large strategy files must still fit in one JSON response.\n"
         "Schema: {\n"
         '  "brand_name": "", "industry": "", "niche": "", "geography": "",\n'

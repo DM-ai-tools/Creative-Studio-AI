@@ -12,6 +12,7 @@ class ImageGenerationProvider(ABC):
         format_type: str,
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
+        reference_image_url: str | None = None,
     ) -> dict:
         raise NotImplementedError
 

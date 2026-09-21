@@ -111,6 +111,11 @@ def estimate_media_cost(*, provider: str, model: str, duration_seconds: float = 
             cost = 0.07
         return round(cost, 6), round(cost / _RUNWAY_CREDIT_USD, 4)
 
+    if provider == "byteplus":
+        secs = duration or 5
+        cost = 0.08 * max(1.0, secs)
+        return round(cost, 6), round(cost / _RUNWAY_CREDIT_USD, 4)
+
     if provider == "openai":
         from app.services.media.openai_image_catalog import openai_image_cost_usd
 

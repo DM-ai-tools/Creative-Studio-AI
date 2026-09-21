@@ -13,12 +13,18 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 LIGHT_BACKGROUND_THRESHOLD = 165
-CAROUSEL_HEADER_RATIO = 0.09
+# Slim white header — height hugs trimmed logo; minimal gap above/below mark.
+HEADER_PAD_TOP_RATIO = 0.006
+HEADER_PAD_TOP_MIN = 3
+HEADER_PAD_BOTTOM_RATIO = 0.004
+HEADER_PAD_BOTTOM_MIN = 2
+HEADER_MAX_HEIGHT_RATIO = 0.055
+HEADER_MAX_HEIGHT_MIN = 36
 VERTICAL_HEADER_RATIO = 0.10
 # Runway image_to_video requires width/height >= 0.5 on promptImage.
 RUNWAY_MIN_WH_RATIO = 0.501
-# Logo width inside the white header strip (~18% of image width).
-HEADER_LOGO_WIDTH_RATIO = 0.18
+HEADER_LOGO_WIDTH_RATIO = 0.15
+HEADER_LOGO_MAX_HEIGHT_RATIO = 0.042
 
 
 def file_url_to_local_path(file_url: str | None) -> Path | None:
@@ -115,19 +121,89 @@ def _pad_to_runway_min_aspect_ratio(img: Image.Image, min_ratio: float = RUNWAY_
     return canvas
 
 
+def _trim_logo_to_content(logo: Image.Image) -> Image.Image:
+    """Crop transparent / white margins baked into scraped logo PNGs."""
+    img = logo.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    min_x, min_y = w, h
+    max_x, max_y = 0, 0
+    found = False
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a < 25:
+                continue
+            lum = 0.299 * r + 0.587 * g + 0.114 * b
+            sat = max(r, g, b) - min(r, g, b)
+            if lum >= 248 and sat <= 12:
+                continue
+            if lum >= 232 and sat <= 18:
+                continue
+            found = True
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x)
+            max_y = max(max_y, y)
+    if not found:
+        return logo
+    margin = 1
+    return img.crop((
+        max(0, min_x - margin),
+        max(0, min_y - margin),
+        min(w, max_x + margin + 1),
+        min(h, max_y + margin + 1),
+    ))
+
+
+def _strip_leading_blank_rows(img: Image.Image, *, max_ratio: float = 0.14) -> Image.Image:
+    """Remove AI-generated empty white/light band at top before adding logo header."""
+    rgb = img.convert("RGB")
+    w, h = rgb.size
+    if h <= 0 or w <= 0:
+        return img
+    px = rgb.load()
+    limit = max(1, int(h * max_ratio))
+    step = max(1, w // 48)
+    cut = 0
+    for y in range(limit):
+        samples = [px[x, y] for x in range(0, w, step)]
+        avg = sum(r + g + b for r, g, b in samples) / (3 * len(samples))
+        if avg >= 238:
+            cut = y + 1
+        else:
+            break
+    if cut <= 0:
+        return img
+    logger.info("Stripped %spx leading blank rows from generated image before logo header", cut)
+    return img.crop((0, cut, w, h))
+
+
 def _add_carousel_header_band(
     base: Image.Image,
     logo_height: int,
-    pad: int,
     *,
+    pad_top: int | None = None,
+    pad_bottom: int | None = None,
     format_type: str | None = None,
 ) -> tuple[Image.Image, int]:
-    """Shift creative down and add a clean white header strip for the logo."""
+    """Shift creative down and add a compact white header strip sized to the logo."""
     ft = (format_type or "").lower()
-    ratio = VERTICAL_HEADER_RATIO if ft in {"reel", "video"} else CAROUSEL_HEADER_RATIO
-    header_h = max(int(base.height * ratio), logo_height + pad * 2)
-    # Cap so the strip stays a small bar, not a huge empty zone.
-    header_h = min(header_h, max(56, int(base.height * 0.12)))
+    top = pad_top
+    bottom = pad_bottom
+    if top is None:
+        top = max(HEADER_PAD_TOP_MIN, int(base.width * HEADER_PAD_TOP_RATIO))
+    if bottom is None:
+        bottom = max(HEADER_PAD_BOTTOM_MIN, int(base.width * HEADER_PAD_BOTTOM_RATIO))
+    if ft in {"reel", "video"}:
+        header_h = max(int(base.height * VERTICAL_HEADER_RATIO), logo_height + top + bottom)
+        header_h = min(header_h, max(56, int(base.height * 0.12)))
+    else:
+        header_h = logo_height + top + bottom
+        header_h = min(
+            header_h,
+            max(HEADER_MAX_HEIGHT_MIN, int(base.height * HEADER_MAX_HEIGHT_RATIO)),
+        )
     canvas = Image.new("RGBA", (base.width, base.height + header_h), (255, 255, 255, 255))
     canvas.paste(base, (0, header_h))
     return canvas, header_h
@@ -166,6 +242,20 @@ def pad_image_bytes_for_runway_video(image_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def _logo_is_full_color_mark(logo: Image.Image) -> bool:
+    """True when the asset is a full-colour logo (not a white wordmark for dark backgrounds)."""
+    px = logo.convert("RGBA")
+    colored = 0
+    total = 0
+    for r, g, b, a in px.getdata():
+        if a < 40:
+            continue
+        total += 1
+        if max(r, g, b) - min(r, g, b) > 25 and (r + g + b) / 3 < 245:
+            colored += 1
+    return total > 0 and (colored / total) > 0.05
+
+
 def _pick_logo_rgba_for_placement(
     *,
     logo_path: Path,
@@ -179,7 +269,8 @@ def _pick_logo_rgba_for_placement(
         use_light_variant = True
     else:
         logo_src = Image.open(logo_path).convert("RGBA")
-        use_light_variant = False
+        # Full-colour logos (blue/red marks) on white header — use file as-is.
+        use_light_variant = light_background and _logo_is_full_color_mark(logo_src)
 
     if logo_src.width > max_width:
         scale = max_width / logo_src.width
@@ -338,10 +429,17 @@ def apply_logo_overlay_bytes(
     header_band = _uses_header_band(format_type, base.width, base.height)
 
     if header_band:
+        base = _strip_leading_blank_rows(base)
         max_w = max(64, int(base.width * HEADER_LOGO_WIDTH_RATIO))
-        probe_h = max(28, int(max_w * 0.35))
-        base, header_h = _add_carousel_header_band(
-            base, probe_h, pad, format_type=format_type
+        pad_top = max(HEADER_PAD_TOP_MIN, int(base.width * HEADER_PAD_TOP_RATIO))
+        pad_bottom = max(HEADER_PAD_BOTTOM_MIN, int(base.width * HEADER_PAD_BOTTOM_RATIO))
+        max_header_h = max(
+            HEADER_MAX_HEIGHT_MIN,
+            int(base.height * HEADER_MAX_HEIGHT_RATIO),
+        )
+        max_logo_h = min(
+            max(18, int(base.height * HEADER_LOGO_MAX_HEIGHT_RATIO)),
+            max(16, max_header_h - pad_top - pad_bottom),
         )
         logo = _pick_logo_rgba_for_placement(
             logo_path=logo_path,
@@ -349,23 +447,38 @@ def apply_logo_overlay_bytes(
             light_background=True,
             max_width=max_w,
         )
-        max_logo_h = max(20, header_h - pad * 2)
+        logo = _trim_logo_to_content(logo)
+        if logo.width > max_w:
+            scale = max_w / logo.width
+            logo = logo.resize(
+                (max_w, max(1, int(logo.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
         if logo.height > max_logo_h:
             scale = max_logo_h / logo.height
             logo = logo.resize(
                 (max(1, int(logo.width * scale)), max_logo_h),
                 Image.Resampling.LANCZOS,
             )
-        logo_x = pad
-        logo_y = max(pad // 2, (header_h - logo.height) // 2)
+        base, header_h = _add_carousel_header_band(
+            base,
+            logo.height,
+            pad_top=pad_top,
+            pad_bottom=pad_bottom,
+            format_type=format_type,
+        )
+        logo_x = max(6, int(base.width * 0.015))
+        logo_y = pad_top
         base.paste(logo, (logo_x, logo_y), logo)
         logger.info(
-            "Logo on white header: canvas=%sx%s header_h=%s logo=%sx%s",
+            "Logo on white header: canvas=%sx%s header_h=%s logo=%sx%s pad_top=%s pad_bottom=%s",
             base.width,
             base.height,
             header_h,
             logo.width,
             logo.height,
+            pad_top,
+            pad_bottom,
         )
     else:
         max_w = max(64, int(base.width * max_width_ratio))
@@ -409,7 +522,9 @@ def apply_logo_overlay_to_file(
     from app.services.file_service import file_service
     from app.services.media_content import image_suffix_and_type
 
-    logo_path, logo_on_light_path = resolve_overlay_logo_paths(logo_url, logo_on_light_url)
+    logo_path, logo_on_light_path = resolve_overlay_logo_paths(
+        logo_url, logo_on_light_url, tenant_id=tenant_id
+    )
     image_path = file_url_to_local_path(image_file_url)
     if not logo_path or not image_path:
         if logo_url and not logo_path:

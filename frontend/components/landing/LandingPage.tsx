@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { BrandMark } from '@/components/brand/BrandMark'
+import { authApi } from '@/lib/api'
 import { authStorage } from '@/lib/auth'
 
 /** Every `src` on this page is unique — never reused across sections. */
@@ -57,7 +58,7 @@ const FEATURE_BLOCKS = [
     kicker: 'Formats',
     title: 'Static. Carousel. Reel-ready concepts.',
     body: 'Plan image and video creatives for Meta placements, then refine, retry failed frames, and keep winners in your variants library.',
-    cta: 'Create account',
+    cta: 'Login',
     src: '/landing/feat-formats.jpg',
   },
 ]
@@ -93,8 +94,21 @@ export default function LandingPage() {
   const [slide, setSlide] = useState(0)
 
   useEffect(() => {
-    if (authStorage.getAccessToken()) {
-      router.replace('/dashboard')
+    const token = authStorage.getAccessToken()
+    if (!token) return
+
+    let active = true
+    authApi
+      .getMe()
+      .then((user) => {
+        if (active && user) router.replace('/dashboard')
+      })
+      .catch(() => {
+        authStorage.clear()
+      })
+
+    return () => {
+      active = false
     }
   }, [router])
 
@@ -122,11 +136,8 @@ export default function LandingPage() {
             <a href="#examples">Examples</a>
           </nav>
           <div className="hf-nav-actions">
-            <Link href="/login" className="hf-link-quiet">
+            <Link href="/login" className="hf-btn-accent">
               Login
-            </Link>
-            <Link href="/register" className="hf-btn-accent">
-              Sign up
             </Link>
           </div>
         </div>
@@ -159,10 +170,7 @@ export default function LandingPage() {
           <h1 className="hf-hero-title">{active.title}</h1>
           <p className="hf-hero-sub">{active.subtitle}</p>
           <div className="hf-hero-cta">
-            <Link href="/register" className="hf-btn-accent hf-btn-lg">
-              Start free
-            </Link>
-            <Link href="/login" className="hf-btn-ghost hf-btn-lg">
+            <Link href="/login" className="hf-btn-accent hf-btn-lg">
               Login
             </Link>
           </div>
@@ -208,6 +216,9 @@ export default function LandingPage() {
               <p className="hf-kicker">{block.kicker}</p>
               <h3 className="hf-feature-title">{block.title}</h3>
               <p className="hf-feature-body">{block.body}</p>
+              <Link href="/login" className="hf-btn-accent hf-btn-lg mt-4 inline-flex">
+                {block.cta}
+              </Link>
             </div>
             <div className="hf-feature-media">
               <Image src={block.src} alt="" fill sizes="(max-width: 900px) 100vw, 50vw" className="object-cover" />
@@ -299,10 +310,7 @@ export default function LandingPage() {
           Australian Meta creatives — brief, angles, use cases, variants, brand safety, export.
         </p>
         <div className="hf-hero-cta">
-          <Link href="/register" className="hf-btn-accent hf-btn-lg">
-            Sign up
-          </Link>
-          <Link href="/login" className="hf-btn-ghost hf-btn-lg">
+          <Link href="/login" className="hf-btn-accent hf-btn-lg">
             Login
           </Link>
         </div>

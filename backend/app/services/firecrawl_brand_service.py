@@ -17,6 +17,30 @@ logger = logging.getLogger(__name__)
 _HEX = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 
 
+def _pick_raster_logo_url(*candidates: Any) -> str:
+    """Prefer PNG/JPG/WebP logo URLs over SVG when scraping a website."""
+    raster: list[str] = []
+    svg: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        raw = str(candidate).strip()
+        if not raw or raw.lower() in {"none", "null", "undefined"}:
+            continue
+        lower = raw.lower()
+        if lower.endswith(".svg") or "/svg" in lower or "image/svg" in lower:
+            svg.append(raw)
+        else:
+            raster.append(raw)
+    if raster:
+        return raster[0]
+    for candidate in svg:
+        from app.services.brand_logo import resolve_downloadable_logo_url
+
+        return resolve_downloadable_logo_url(candidate)
+    return ""
+
+
 def _clean_font_family(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw or raw.lower() in {"none", "null", "undefined", "inherit", "system-ui"}:
@@ -265,19 +289,15 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
     markdown = str(data.get("markdown") or "")[:4000]
     personality = branding.get("personality") if isinstance(branding.get("personality"), dict) else {}
 
-    # Docs: branding.logo OR branding.images.logo / favicon / ogImage
-    logo = (
-        branding.get("logo")
-        or images.get("logo")
-        or images.get("favicon")
-        or images.get("ogImage")
-        or metadata.get("ogImage")
-        or ""
-    )
-    # Skip empty / malformed values
-    logo_str = str(logo).strip() if logo else ""
-    if logo_str.lower() in {"none", "null", "undefined"}:
-        logo_str = ""
+    # Docs: branding.logo OR branding.images.logo / favicon / ogImage — prefer raster over SVG.
+    logo_candidates = [
+        branding.get("logo"),
+        images.get("logo"),
+        images.get("ogImage"),
+        metadata.get("ogImage"),
+        images.get("favicon"),
+    ]
+    logo_str = _pick_raster_logo_url(*logo_candidates)
 
     page_title = str(metadata.get("title") or metadata.get("ogTitle") or "").strip()
     brand_name = page_title.split("|")[0].split("-")[0].strip() or urlparse(url).netloc

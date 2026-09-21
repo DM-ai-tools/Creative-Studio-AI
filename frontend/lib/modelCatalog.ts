@@ -3,13 +3,16 @@ import type { GenerationModelOption } from '@/types'
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  google: 'Google Gemini',
+  'x-ai': 'xAI Grok',
   runway: 'Runway',
   heygen: 'HeyGen',
   higgsfield: 'Higgsfield',
   other: 'Other',
 }
 
-const PROVIDER_ORDER = ['openai', 'runway', 'higgsfield', 'heygen', 'other']
+const PROVIDER_ORDER = ['anthropic', 'openai', 'google', 'x-ai', 'runway', 'higgsfield', 'heygen', 'other']
 
 function modelOptionLabel(m: GenerationModelOption): string {
   if (typeof m.cost_usd !== 'number') return m.label

@@ -6,6 +6,7 @@ import { useForm, type UseFormRegister } from 'react-hook-form'
 import Topbar from '@/components/layout/Topbar'
 import BrandKitPreview from '@/components/brand-kit/BrandKitPreview'
 import LogoUploadZone from '@/components/brand-kit/LogoUploadZone'
+import ReferenceImagesGallery from '@/components/brand-kit/ReferenceImagesGallery'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import TextArea from '@/components/ui/TextArea'
@@ -16,7 +17,8 @@ import { brandsApi } from '@/lib/api'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { AGENCY_INDUSTRY_OPTIONS } from '@/lib/industries'
 import { assetUrl, cn } from '@/lib/utils'
-import type { Brand, BrandKit } from '@/types'
+import { preserveSocialStyleKitColors, resolveSocialStyleColors, socialStyleAestheticLabel, socialStyleFromBrand, socialStyleFromVoiceRules, socialStyleAccountLabel, summarizeSocialStyle, competitorInsightsFromBrand, competitorAccountLabel, summarizeCompetitorInsight, hasSocialStyleSummary } from '@/lib/socialStyle'
+import type { Brand, BrandKit, CompetitorSocialInsight } from '@/types'
 
 const LANGUAGE_OPTIONS = [
   { value: 'English', label: 'English' },
@@ -36,6 +38,226 @@ type BrandKitForm = {
   font_body: string
 }
 
+function SocialStyleSavedCard({
+  brand,
+  kit,
+}: {
+  brand: Brand | null
+  kit: BrandKit | null
+}) {
+  const profile = socialStyleFromBrand(brand, kit)
+  if (!profile || !hasSocialStyleSummary(profile)) return null
+  const colors = resolveSocialStyleColors(profile)
+  const aesthetic = socialStyleAestheticLabel(profile)
+  const websitePrimary = brand?.primary_color || ''
+
+  return (
+    <div className="rounded-2xl border border-accent/25 bg-accent/[0.06] p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-bold uppercase tracking-wider text-[#3d5c22]">
+          Saved social media visual style
+          {socialStyleAccountLabel(profile) ? (
+            <span className="font-normal normal-case text-charcoal ml-1">
+              · {socialStyleAccountLabel(profile)}
+            </span>
+          ) : null}
+          {profile.fetched_at ? (
+            <span className="font-normal normal-case text-muted ml-1">
+              · {new Date(profile.fetched_at).toLocaleDateString()}
+            </span>
+          ) : null}
+        </p>
+        {profile.profile_url ? (
+          <a
+            href={profile.profile_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-accent hover:underline shrink-0"
+          >
+            View profile
+          </a>
+        ) : null}
+      </div>
+      {summarizeSocialStyle(profile) ? (
+        <p className="text-sm text-charcoal leading-relaxed">{summarizeSocialStyle(profile)}</p>
+      ) : null}
+      {(colors.cta || colors.background) && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">
+            Colours AI will use{aesthetic ? ` · ${aesthetic}` : ''}
+          </p>
+          <div className="flex flex-wrap gap-4">
+            {colors.cta ? (
+              <div className="flex items-center gap-2 text-xs text-charcoal">
+                <span
+                  className="w-7 h-7 rounded-full border border-border shadow-sm shrink-0"
+                  style={{ background: colors.cta }}
+                />
+                <span>
+                  CTA & headline · <span className="font-mono">{colors.cta}</span>
+                </span>
+              </div>
+            ) : null}
+            {colors.background ? (
+              <div className="flex items-center gap-2 text-xs text-charcoal">
+                <span
+                  className="w-7 h-7 rounded-full border border-border shadow-sm shrink-0"
+                  style={{ background: colors.background }}
+                />
+                <span>
+                  Background · <span className="font-mono">{colors.background}</span>
+                </span>
+              </div>
+            ) : null}
+          </div>
+          {colors.cta && websitePrimary && colors.cta.toUpperCase() !== websitePrimary.toUpperCase() ? (
+            <p className="text-[11px] text-muted mt-2">
+              Brand Kit website colour {websitePrimary} is ignored for image prompts when social feed palette differs.
+            </p>
+          ) : null}
+        </div>
+      )}
+      <p className="text-[11px] text-muted">
+        Stored on this brand&apos;s Brand Kit — used when AI writes image prompts.
+      </p>
+    </div>
+  )
+}
+
+function CompetitorInsightsSavedCard({
+  brand,
+  kit,
+  industry,
+  onUpdated,
+}: {
+  brand: Brand | null
+  kit: BrandKit | null
+  industry: string
+  onUpdated: (brand: Brand) => void
+}) {
+  const insights = competitorInsightsFromBrand(brand, kit)
+  const [handleUrl, setHandleUrl] = useState('')
+  const [fetching, setFetching] = useState(false)
+
+  const handleFetch = async () => {
+    if (!brand?.id || handleUrl.trim().length < 2) {
+      toast.error('Enter a competitor handle or URL')
+      return
+    }
+    setFetching(true)
+    try {
+      const result = await brandsApi.fetchCompetitorSocial(brand.id, {
+        handle_or_url: handleUrl.trim(),
+        industry,
+      })
+      const updated = await brandsApi.get(brand.id)
+      onUpdated(updated)
+      setHandleUrl('')
+      toast.success(result.message || 'Competitor saved')
+    } catch {
+      toast.error('Could not analyze competitor')
+    } finally {
+      setFetching(false)
+    }
+  }
+
+  const handleRemove = async (insight: CompetitorSocialInsight) => {
+    if (!brand?.id) return
+    const handle = (insight.handle || '').replace(/^@/, '')
+    if (!handle) return
+    try {
+      await brandsApi.deleteCompetitorSocial(brand.id, {
+        handle,
+        platform: insight.platform || '',
+      })
+      const updated = await brandsApi.get(brand.id)
+      onUpdated(updated)
+      toast.success('Competitor removed')
+    } catch {
+      toast.error('Could not remove competitor')
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-border bg-surface-elevated/80 p-4 space-y-3">
+      <p className="text-xs font-bold uppercase tracking-wider text-navy">
+        Competitor social analysis (optional)
+      </p>
+      <p className="text-[11px] text-muted leading-relaxed">
+        Saved posting logic (hooks, formats, story arc) — your brand colours and theme are never
+        overwritten.
+      </p>
+      {insights.length > 0 ? (
+        <div className="space-y-2">
+          {insights.map((insight) => (
+            <div
+              key={`${insight.platform}-${insight.handle}`}
+              className="rounded-xl border border-border/70 bg-white/70 p-3 space-y-1"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-charcoal">
+                  {competitorAccountLabel(insight)}
+                  {insight.fetched_at ? (
+                    <span className="font-normal text-muted ml-1">
+                      · {new Date(insight.fetched_at).toLocaleDateString()}
+                    </span>
+                  ) : null}
+                </p>
+                <div className="flex items-center gap-2">
+                  {insight.profile_url ? (
+                    <a
+                      href={insight.profile_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-accent hover:underline"
+                    >
+                      View profile
+                    </a>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="text-[11px] text-red-600 hover:underline"
+                    onClick={() => void handleRemove(insight)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+              {summarizeCompetitorInsight(insight) ? (
+                <p className="text-[11px] text-charcoal leading-relaxed">
+                  {summarizeCompetitorInsight(insight)}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-[11px] text-muted">No competitors saved yet.</p>
+      )}
+      <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+        <div className="flex-1">
+          <Input
+            label="Competitor Instagram / Facebook"
+            placeholder="@competitor"
+            value={handleUrl}
+            onChange={(e) => setHandleUrl(e.target.value)}
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="shrink-0 mb-0.5"
+          isLoading={fetching}
+          onClick={() => void handleFetch()}
+        >
+          Analyze &amp; save
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function SectionBlock({
   step,
   title,
@@ -52,7 +274,7 @@ function SectionBlock({
   return (
     <section
       className={cn(
-        'card-premium p-6 md:p-7 animate-fade-in h-full min-h-0 flex flex-col',
+        'card-premium p-6 md:p-7 animate-fade-in flex flex-col',
         className
       )}
     >
@@ -65,14 +287,14 @@ function SectionBlock({
           <p className="text-sm text-muted mt-0.5 leading-relaxed">{description}</p>
         </div>
       </div>
-      <div className="flex-1 flex flex-col min-h-0">{children}</div>
+      <div className="flex flex-col">{children}</div>
     </section>
   )
 }
 
 function CardRow({ children }: { children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch w-full">{children}</div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start w-full">{children}</div>
   )
 }
 
@@ -88,7 +310,7 @@ function ColorField({
   value: string
 }) {
   return (
-    <div className="rounded-2xl border border-border/80 bg-surface/60 p-4 h-full flex flex-col">
+    <div className="rounded-2xl border border-border/80 bg-surface/60 p-4 flex flex-col">
       <p className="label-ui mb-3">{label}</p>
       <div
         className="h-20 rounded-xl border border-border/60 mb-3 shadow-inner transition-colors duration-300"
@@ -186,20 +408,27 @@ export default function BrandKitPage() {
       setSidebarActiveBrandId(b.id)
       setActiveKit(null)
       setIsCreatingNew(false)
-      const voice = b.voice_rules as { description?: string }
+      let brand = b
+      try {
+        brand = await brandsApi.get(b.id)
+        setBrands((prev) => prev.map((item) => (item.id === brand.id ? brand : item)))
+      } catch {
+        /* use list copy */
+      }
+      const voice = brand.voice_rules as { description?: string }
       reset({
-        name: b.name,
-        industry: b.industry,
-        language: b.language,
+        name: brand.name,
+        industry: brand.industry,
+        language: brand.language,
         voice_description: voice?.description ?? '',
-        forbidden_words: b.forbidden_words?.join(', ') ?? '',
-        primary_color: b.primary_color ?? '#FF6B00',
-        secondary_color: b.secondary_color ?? '#1A1A2E',
+        forbidden_words: brand.forbidden_words?.join(', ') ?? '',
+        primary_color: brand.primary_color ?? '#FF6B00',
+        secondary_color: brand.secondary_color ?? '#1A1A2E',
         font_heading: '',
         font_body: '',
       })
       try {
-        const k = await brandsApi.getKit(b.id)
+        const k = await brandsApi.getKit(brand.id)
         setActiveKit(k)
         reset((prev) => ({
           ...prev,
@@ -277,11 +506,16 @@ export default function BrandKitPage() {
   const onSubmit = async (data: BrandKitForm) => {
     setIsSaving(true)
     try {
+      const existingVoice = (activeBrand?.voice_rules as Record<string, unknown>) || {}
+      const voiceSocialStyle = socialStyleFromVoiceRules(existingVoice)
       const brandData = {
         name: data.name,
         industry: data.industry,
         language: data.language,
-        voice_rules: { description: data.voice_description },
+        voice_rules: {
+          ...existingVoice,
+          description: data.voice_description,
+        },
         forbidden_words: data.forbidden_words.split(',').map((w) => w.trim()).filter(Boolean),
         primary_color: data.primary_color,
         secondary_color: data.secondary_color,
@@ -290,9 +524,24 @@ export default function BrandKitPage() {
         activeKit?.logo_variations && typeof activeKit.logo_variations === 'object'
           ? { ...(activeKit.logo_variations as Record<string, unknown>) }
           : {}
+      const existingKitColors =
+        activeKit?.colors && typeof activeKit.colors === 'object'
+          ? (activeKit.colors as Record<string, unknown>)
+          : {}
+      const preservedSocial = preserveSocialStyleKitColors(existingKitColors)
       const kitData = {
         name: activeKit?.name ?? 'Default Kit',
-        colors: { primary: data.primary_color, secondary: data.secondary_color },
+        colors: {
+          primary: data.primary_color,
+          secondary: data.secondary_color,
+          ...preservedSocial,
+          ...(preservedSocial.social_style_profile || !voiceSocialStyle
+            ? {}
+            : {
+                social_style_profile: voiceSocialStyle,
+                social_style_fetched_at: voiceSocialStyle.fetched_at,
+              }),
+        },
         fonts: { heading: data.font_heading, body: data.font_body },
         logo_variations: preservedLogoVariations,
       }
@@ -541,7 +790,7 @@ export default function BrandKitPage() {
               </SectionBlock>
 
               <SectionBlock
-                step="04"
+                step="02"
                 title="Logos"
                 description="Burned onto every generated creative: light mark on dark areas, dark mark on bright corners (auto-detected)."
               >
@@ -576,18 +825,36 @@ export default function BrandKitPage() {
 
             <CardRow>
               <SectionBlock
-                step="02"
+                step="03"
+                title="Reference image library"
+                description="Product and ad examples for AI image generation — saved per brand and reused in image briefs."
+                className="lg:col-span-2"
+              >
+                {activeBrand ? (
+                  <ReferenceImagesGallery
+                    brandId={activeBrand.id}
+                    brandName={activeBrand.name}
+                  />
+                ) : (
+                  <p className="text-sm text-mid">
+                    Save your brand first, then upload reference images here.
+                  </p>
+                )}
+              </SectionBlock>
+            </CardRow>
+
+            <CardRow>
+              <SectionBlock
+                step="04"
                 title="Voice & tone"
                 description="Guides AI copy generation — tone, personality, and messaging style."
               >
-                <div className="flex flex-1 flex-col min-h-[240px] [&_textarea]:min-h-[200px] [&_textarea]:flex-1">
-                  <TextArea
-                    label="Brand voice & style guide"
-                    placeholder="Bold, confident, AI-forward. Short sentences. Lead with outcomes…"
-                    rows={10}
-                    {...register('voice_description')}
-                  />
-                </div>
+                <TextArea
+                  label="Brand voice & style guide"
+                  placeholder="Bold, confident, AI-forward. Short sentences. Lead with outcomes…"
+                  rows={5}
+                  {...register('voice_description')}
+                />
               </SectionBlock>
 
               <SectionBlock
@@ -595,26 +862,39 @@ export default function BrandKitPage() {
                 title="Color palette"
                 description="Primary drives CTAs and accents; secondary supports backgrounds and type."
               >
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 flex-1 h-full auto-rows-fr">
-                  <ColorField
-                    label="Primary"
-                    register={register}
-                    name="primary_color"
-                    value={watched.primary_color ?? ''}
-                  />
-                  <ColorField
-                    label="Secondary"
-                    register={register}
-                    name="secondary_color"
-                    value={watched.secondary_color ?? ''}
-                  />
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <ColorField
+                      label="Primary"
+                      register={register}
+                      name="primary_color"
+                      value={watched.primary_color ?? ''}
+                    />
+                    <ColorField
+                      label="Secondary"
+                      register={register}
+                      name="secondary_color"
+                      value={watched.secondary_color ?? ''}
+                    />
+                  </div>
+                  <SocialStyleSavedCard brand={activeBrand} kit={activeKit} />
+                  {activeBrand ? (
+                    <CompetitorInsightsSavedCard
+                      brand={activeBrand}
+                      kit={activeKit}
+                      industry={watched.industry ?? activeBrand.industry ?? ''}
+                      onUpdated={(updated) => {
+                        setBrands((prev) => prev.map((b) => (b.id === updated.id ? updated : b)))
+                      }}
+                    />
+                  ) : null}
                 </div>
               </SectionBlock>
             </CardRow>
 
             <CardRow>
               <SectionBlock
-                step="03"
+                step="06"
                 title="Compliance guardrails"
                 description="Blocked terms and claims — generation will fail compliance if these appear."
               >
@@ -634,7 +914,7 @@ export default function BrandKitPage() {
               </SectionBlock>
 
               <SectionBlock
-                step="06"
+                step="07"
                 title="Typography"
                 description="Optional — preview updates in the hero mockup above."
               >

@@ -26,6 +26,12 @@ function tokens(n: number | null | undefined) {
   return String(v)
 }
 
+const thClass =
+  'text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border'
+const tdClass = 'px-4 py-2.5 text-mid'
+const theadRowClass = 'bg-light'
+const tbodyRowClass = 'border-b border-border hover:bg-light/50'
+
 export default function UsagePage() {
   const router = useRouter()
   const { user } = useAuth()
@@ -44,7 +50,7 @@ export default function UsagePage() {
   const totals = usage?.totals
 
   return (
-    <div className="min-h-full bg-[#050506]">
+    <div>
       <Topbar
         title="Usage"
         subtitle="API spend, request volume, and model breakdown — last 30 days"
@@ -52,22 +58,19 @@ export default function UsagePage() {
 
       <div className="p-5 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 flex-1">
             {[
               { label: 'Total spend', value: isLoading ? '—' : money(totals?.cost_usd) },
               { label: 'API calls', value: isLoading ? '—' : totals?.calls },
               { label: 'Tokens', value: isLoading ? '—' : tokens(totals?.total_tokens) },
               { label: 'Credits', value: isLoading ? '—' : (totals?.credits ?? 0).toFixed(1) },
             ].map((item) => (
-              <div
-                key={item.label}
-                className="rounded-xl border border-[#2a2a2e] bg-[#111114] px-4 py-2.5 min-w-[120px]"
-              >
-                <div className="text-[10px] font-bold text-[#8e8e93] uppercase tracking-wide">
+              <Card key={item.label}>
+                <div className="text-xs font-bold text-lt uppercase tracking-wide mb-1">
                   {item.label}
                 </div>
-                <div className="text-lg font-bold text-[#f5f5f7] tabular-nums">{item.value}</div>
-              </div>
+                <div className="text-2xl font-extrabold text-navy tabular-nums">{item.value}</div>
+              </Card>
             ))}
           </div>
           <Button size="sm" variant="secondary" onClick={() => refetch()}>
@@ -81,9 +84,9 @@ export default function UsagePage() {
           <Card title="By API / provider" padding={false}>
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-light">
+                <tr className={theadRowClass}>
                   {['Provider', 'Calls', 'Tokens', 'Credits', 'Spend'].map((h) => (
-                    <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
+                    <th key={h} className={thClass}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -95,12 +98,12 @@ export default function UsagePage() {
                   : (usage?.by_provider ?? []).length === 0
                     ? <tr><td colSpan={5} className="px-4 py-6 text-center text-mid">No API usage recorded yet.</td></tr>
                     : (usage?.by_provider ?? []).map((row) => (
-                      <tr key={row.name} className="border-b border-border">
-                        <td className="px-4 py-2.5 font-semibold text-navy capitalize">{row.name}</td>
-                        <td className="px-4 py-2.5">{row.calls}</td>
-                        <td className="px-4 py-2.5">{tokens(row.tokens)}</td>
-                        <td className="px-4 py-2.5">{row.credits.toFixed(1)}</td>
-                        <td className="px-4 py-2.5 font-semibold">{money(row.cost_usd)}</td>
+                      <tr key={row.name} className={tbodyRowClass}>
+                        <td className={`${tdClass} font-semibold text-navy capitalize`}>{row.name}</td>
+                        <td className={tdClass}>{row.calls}</td>
+                        <td className={tdClass}>{tokens(row.tokens)}</td>
+                        <td className={tdClass}>{row.credits.toFixed(1)}</td>
+                        <td className={`${tdClass} font-semibold text-navy`}>{money(row.cost_usd)}</td>
                       </tr>
                     ))}
               </tbody>
@@ -111,20 +114,20 @@ export default function UsagePage() {
             <div className="overflow-x-auto max-h-[360px]">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="bg-light">
+                  <tr className={theadRowClass}>
                     {['Model', 'Calls', 'Tokens', 'Credits', 'Spend'].map((h) => (
-                      <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
+                      <th key={h} className={thClass}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {(usage?.by_model ?? []).map((row) => (
-                    <tr key={row.name} className="border-b border-border">
-                      <td className="px-4 py-2.5 font-semibold text-navy break-all">{row.name}</td>
-                      <td className="px-4 py-2.5">{row.calls}</td>
-                      <td className="px-4 py-2.5">{tokens(row.tokens)}</td>
-                      <td className="px-4 py-2.5">{row.credits.toFixed(1)}</td>
-                      <td className="px-4 py-2.5 font-semibold">{money(row.cost_usd)}</td>
+                    <tr key={row.name} className={tbodyRowClass}>
+                      <td className={`${tdClass} font-semibold text-navy break-all`}>{row.name}</td>
+                      <td className={tdClass}>{row.calls}</td>
+                      <td className={tdClass}>{tokens(row.tokens)}</td>
+                      <td className={tdClass}>{row.credits.toFixed(1)}</td>
+                      <td className={`${tdClass} font-semibold text-navy`}>{money(row.cost_usd)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -137,24 +140,24 @@ export default function UsagePage() {
           <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-light sticky top-0 z-10">
+                <tr className={`${theadRowClass} sticky top-0 z-10`}>
                   {['When', 'Client', 'Provider', 'Model', 'Operation', 'Tokens', 'Credits', 'Spend', 'Status'].map((h) => (
-                    <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
+                    <th key={h} className={thClass}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {(usage?.recent ?? []).map((row) => (
-                  <tr key={row.id} className="border-b border-border hover:bg-light/50">
-                    <td className="px-4 py-2.5 text-lt whitespace-nowrap">{row.created_at ? timeAgo(row.created_at) : '—'}</td>
-                    <td className="px-4 py-2.5">{row.client || '—'}</td>
-                    <td className="px-4 py-2.5 capitalize">{row.provider}</td>
-                    <td className="px-4 py-2.5 max-w-[180px] truncate" title={row.model}>{row.model || '—'}</td>
-                    <td className="px-4 py-2.5 max-w-[200px] truncate" title={row.operation}>{row.operation}</td>
-                    <td className="px-4 py-2.5">{tokens(row.total_tokens)}</td>
-                    <td className="px-4 py-2.5">{Number(row.credits || 0).toFixed(1)}</td>
-                    <td className="px-4 py-2.5 font-semibold">{money(row.cost_usd)}</td>
-                    <td className="px-4 py-2.5">
+                  <tr key={row.id} className={tbodyRowClass}>
+                    <td className={`${tdClass} whitespace-nowrap text-lt`}>{row.created_at ? timeAgo(row.created_at) : '—'}</td>
+                    <td className={tdClass}>{row.client || '—'}</td>
+                    <td className={`${tdClass} capitalize`}>{row.provider}</td>
+                    <td className={`${tdClass} max-w-[180px] truncate`} title={row.model}>{row.model || '—'}</td>
+                    <td className={`${tdClass} max-w-[200px] truncate`} title={row.operation}>{row.operation}</td>
+                    <td className={tdClass}>{tokens(row.total_tokens)}</td>
+                    <td className={tdClass}>{Number(row.credits || 0).toFixed(1)}</td>
+                    <td className={`${tdClass} font-semibold text-navy`}>{money(row.cost_usd)}</td>
+                    <td className={tdClass}>
                       <Badge variant={row.success ? 'green' : 'red'}>{row.success ? 'OK' : 'Failed'}</Badge>
                     </td>
                   </tr>

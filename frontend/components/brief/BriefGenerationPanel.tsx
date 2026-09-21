@@ -50,6 +50,8 @@ export interface BriefGenerationSettings {
   heygenAvatarId: string
   heygenVoiceId: string
   higgsfieldVoicePreset: string
+  /** OpenRouter slug for image variant prompt generation (Generate AI for all). */
+  promptLlmModel: string
 }
 
 interface BriefGenerationPanelProps {

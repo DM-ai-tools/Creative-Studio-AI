@@ -109,6 +109,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
         format_type: str,
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
+        reference_image_url: str | None = None,
     ) -> dict:
         provider = get_image_provider(model)
         try:
@@ -119,6 +120,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 format_type=format_type,
                 logo_url=logo_url,
                 logo_on_light_url=logo_on_light_url,
+                reference_image_url=reference_image_url,
             )
         except Exception as exc:
             from app.services.usage_tracker import record_media_generation
@@ -179,7 +181,9 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
         }
         if not brand_ctx.get("logo_url"):
             from app.services.brand_logo import resolve_video_logo_urls
-            _rlogo, _rlight = resolve_video_logo_urls(brief=brief, brand=brand_ctx)
+            _rlogo, _rlight = resolve_video_logo_urls(
+                brief=brief, brand=brand_ctx, tenant_id=tenant_id
+            )
             if _rlogo:
                 brand_ctx["logo_url"] = _rlogo
             if _rlight:
@@ -302,6 +306,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 brand=brand_ctx,
                 logo_url=logo_url,
                 logo_on_light_url=logo_on_light_url,
+                tenant_id=tenant_id,
             )
             from app.services.video_subtitles import resolve_spoken_script_for_subtitles
 

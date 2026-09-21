@@ -25,17 +25,16 @@ from app.services.media.higgsfield_models import (
     resolve_higgsfield_video_duration,
     resolve_image_spec,
     resolve_video_spec,
+    supports_dop_clip_stitch,
 )
 from app.services.media.seedance_multiscene import (
     SEEDANCE_MAX_TOTAL_SECONDS,
     build_seedance_scene_prompt,
     concat_video_files,
-    extract_last_frame_png,
     plan_seedance_scenes,
     scene_broll_from_brief,
     seedance_multiscene_requested,
     trim_video_to_duration,
-    upload_frame_png,
 )
 from app.services.media.runway_providers import _download_asset
 from app.services.media.voiceover import HIGGSFIELD_VOICE_PRESET_MAP
@@ -67,14 +66,27 @@ def _local_file_from_url(file_url: str | None) -> Path | None:
 
 
 async def _resolve_image_url_for_video(source_image_url: str | None) -> str | None:
+    """Prefer already-hosted https URLs — avoid Higgsfield S3 re-upload (often 403)."""
     if not source_image_url:
         return None
     if source_image_url.startswith("http://") or source_image_url.startswith("https://"):
         return source_image_url
     local = _local_file_from_url(source_image_url)
-    if local:
+    if not local:
+        return source_image_url
+    try:
         return await upload_local_image(str(local))
-    return source_image_url
+    except Exception as exc:
+        logger.error(
+            "Cannot re-upload local seed to Higgsfield (%s). "
+            "Pass a remote https seed URL from image generation instead.",
+            exc,
+        )
+        raise RuntimeError(
+            "Seed image is only saved locally and Higgsfield file-upload is failing (S3 403). "
+            "Retry Generate so the seed keeps its Higgsfield https URL, or pick a model that "
+            "does not need a seed."
+        ) from exc
 
 
 class HiggsfieldImageProvider(ImageGenerationProvider):
@@ -87,6 +99,7 @@ class HiggsfieldImageProvider(ImageGenerationProvider):
         format_type: str,
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
+        reference_image_url: str | None = None,
     ) -> dict:
         spec = resolve_image_spec(model)
         if not spec:
@@ -119,14 +132,23 @@ class HiggsfieldImageProvider(ImageGenerationProvider):
                 raise RuntimeError("Higgsfield returned no image URL")
 
             async with httpx.AsyncClient(timeout=120.0) as client:
-                saved = await _download_asset(
-                    client,
-                    remote_url,
-                    tenant_id=tenant_id,
-                    kind="image",
-                )
-            final_url = saved["url"]
-            if logo_url and final_url:
+                try:
+                    saved = await _download_asset(
+                        client,
+                        remote_url,
+                        tenant_id=tenant_id,
+                        kind="image",
+                    )
+                    final_url = saved["url"]
+                except Exception as dl_exc:
+                    # Presigned S3 URLs sometimes fail to mirror locally — keep remote URL
+                    # so Creative Studio / video seed can still proceed.
+                    logger.warning(
+                        "Higgsfield image download failed (%s) — using remote URL",
+                        dl_exc,
+                    )
+                    final_url = remote_url
+            if logo_url and final_url and not final_url.startswith("http"):
                 from app.services.logo_overlay import apply_logo_overlay_to_file
 
                 overlaid = apply_logo_overlay_to_file(
@@ -144,8 +166,9 @@ class HiggsfieldImageProvider(ImageGenerationProvider):
                 "catalog_model": model,
                 "prompt": prompt,
                 "url": final_url,
+                "remote_url": remote_url,
                 "provider": "higgsfield",
-                "logo_applied": bool(logo_url and final_url),
+                "logo_applied": bool(logo_url and final_url and not str(final_url).startswith("http")),
             }
         except Exception as exc:
             logger.exception("Higgsfield image failed: %s", exc)
@@ -185,7 +208,7 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
         if not higgsfield_configured():
             return self._fallback(spec.platform_path, brief, copy, status="mock")
 
-        if is_seedance_video_spec(spec):
+        if is_seedance_video_spec(spec) or supports_dop_clip_stitch(spec.job_set_type):
             requested_duration = min(
                 requested_video_duration_seconds(brief, override=duration_seconds),
                 SEEDANCE_MAX_TOTAL_SECONDS,
@@ -228,7 +251,29 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
 
         from app.services.media.voiceover import build_voiceover_script
 
-        spoken_script = build_voiceover_script(copy=copy, brief=brief)
+        skip_vo = bool(brief.get("skip_voiceover")) or (
+            bool(brief.get("creative_studio_mode"))
+            and not str(brief.get("higgsfield_voice_preset") or "").strip()
+        )
+        spoken_script = ""
+        if not skip_vo:
+            spoken_script = build_voiceover_script(copy=copy, brief=brief)
+            # Never let TTS narrate a Creative Studio / Seedance shot-list prompt
+            if brief.get("creative_studio_mode") or brief.get("creative_studio_prompt"):
+                low = spoken_script.lower()
+                if any(
+                    m in low
+                    for m in (
+                        "clip 1",
+                        "subject continuity",
+                        "strict negative",
+                        "timing beats",
+                        "visual style",
+                        "single continuous",
+                    )
+                ):
+                    spoken_script = ""
+                    skip_vo = True
         selected_hf_voice = str(brief.get("higgsfield_voice_preset") or "").strip().lower()
         runway_voice_preset = HIGGSFIELD_VOICE_PRESET_MAP.get(selected_hf_voice)
 
@@ -238,7 +283,7 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
             duration=api_duration,
             image_url=image_url,
             spec=spec,
-            spoken_script=spoken_script,
+            spoken_script=spoken_script if not skip_vo else None,
         )
         try:
             result = await subscribe_platform(
@@ -260,7 +305,12 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                 final_url = saved["url"]
                 native_audio = higgsfield_supports_native_audio(spec.job_set_type)
                 voiceover: dict = {"status": "skipped"}
-                if settings.RUNWAYML_VOICEOVER_ENABLED and not native_audio:
+                if (
+                    settings.RUNWAYML_VOICEOVER_ENABLED
+                    and not native_audio
+                    and not skip_vo
+                    and spoken_script.strip()
+                ):
                     from app.services.media.voiceover import apply_voiceover_to_video_file
 
                     voiceover = await apply_voiceover_to_video_file(
@@ -274,11 +324,34 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                     )
                     if voiceover.get("status") == "done" and voiceover.get("url"):
                         final_url = str(voiceover["url"])
+                elif skip_vo:
+                    voiceover = {
+                        "status": "skipped",
+                        "reason": "Creative Studio sound off / no spoken script",
+                    }
                 elif not native_audio and not settings.RUNWAYML_VOICEOVER_ENABLED:
                     voiceover = {
                         "status": "skipped",
                         "reason": "Runway TTS disabled (RUNWAYML_VOICEOVER_ENABLED=false)",
                     }
+
+            from app.services.ffmpeg_util import probe_video_duration
+
+            probed = None
+            local_video = _local_file_from_url(final_url)
+            if local_video:
+                try:
+                    probed = probe_video_duration(local_video)
+                except Exception:
+                    probed = None
+
+            reported = int(round(probed)) if probed and probed > 0.5 else None
+            out_warn = duration_warning
+            if reported and abs(reported - int(api_duration)) >= 2:
+                out_warn = (
+                    f"File is {reported}s (requested {api_duration}s). "
+                    "Cinema Studio / DoP often returns ~5s — use Seedance 2.0 for 10–15s."
+                )
 
             out: dict = {
                 "status": "done",
@@ -286,16 +359,16 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                 "catalog_model": model,
                 "prompt": prompt,
                 "url": final_url,
-                "duration_seconds": api_duration,
+                "duration_seconds": reported or api_duration,
                 "requested_duration_seconds": requested_duration,
                 "storyboard": [prompt],
                 "provider": "higgsfield",
                 "voiceover": voiceover,
                 "native_audio": native_audio,
-                "spoken_script": spoken_script,
+                "spoken_script": spoken_script if not skip_vo else "",
             }
-            if duration_warning:
-                out["duration_warning"] = duration_warning
+            if out_warn:
+                out["duration_warning"] = out_warn
             return out
         except Exception as exc:
             logger.exception("Higgsfield video failed: %s", exc)
@@ -339,6 +412,12 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
             requested_duration,
             job_set_type=spec.job_set_type,
             broll_raw=scene_broll_from_brief(brief),
+            scene_prompt=str(
+                brief.get("creative_studio_prompt")
+                or production_skeleton
+                or copy.get("body_copy")
+                or ""
+            ),
         )
         if not scenes:
             return self._fallback(
@@ -361,7 +440,20 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
 
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
+                # Reuse the ORIGINAL Higgsfield seed for every clip.
+                # Mid-stitch last-frame re-uploads hit S3 403 and waste credits —
+                # ffmpeg still joins clips into the full requested length.
                 current_image_url = image_url
+                logger.info(
+                    "Multi-scene stitch: %s clips planned for %ss (%s)",
+                    len(scenes),
+                    requested_duration,
+                    spec.label,
+                )
+                from app.services.ffmpeg_util import probe_video_duration
+                from app.services.media.registry import get_image_provider
+                from app.services.media.higgsfield_models import higgsfield_configured
+
                 for scene in scenes:
                     scene_prompt = build_seedance_scene_prompt(
                         scene,
@@ -373,11 +465,44 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                     )
                     scene_prompts.append(scene_prompt)
                     api_duration = int(scene["duration"])
+
+                    # Per-CLIP seed when we have a beat visual — matches prompt better than
+                    # reusing one seed for every scene (avoids frozen/split-screen loops).
+                    scene_image_url = current_image_url
+                    visual = str(scene.get("visual") or "").strip()
+                    if visual and higgsfield_configured() and int(scene.get("index") or 0) > 0:
+                        try:
+                            seed_model = "hf-text2image-soul-v2"
+                            img_provider = get_image_provider(seed_model)
+                            seed_prompt = (
+                                f"{visual}. Vertical 9:16 single full-frame commercial still. "
+                                "ONE shot only — no split screen, no collage, no stacked panels, "
+                                "no text, no logos as readable words."
+                            )[:1600]
+                            seed_res = await img_provider.generate(
+                                prompt=seed_prompt,
+                                tenant_id=tenant_id,
+                                model=seed_model,
+                                format_type=format_type,
+                            )
+                            next_seed = (
+                                (seed_res or {}).get("remote_url")
+                                or (seed_res or {}).get("url")
+                            )
+                            if (seed_res or {}).get("status") in {"done", "mock"} and next_seed:
+                                scene_image_url = str(next_seed)
+                        except Exception as seed_exc:
+                            logger.warning(
+                                "Per-clip seed failed for scene %s (%s); reusing prior seed",
+                                scene["index"] + 1,
+                                seed_exc,
+                            )
+
                     arguments = build_video_arguments(
                         prompt=scene_prompt,
                         format_type=format_type,
                         duration=api_duration,
-                        image_url=current_image_url,
+                        image_url=scene_image_url,
                         spec=spec,
                         spoken_script=spoken_script,
                     )
@@ -389,7 +514,7 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                     remote_url = extract_media_url(result)
                     if not remote_url:
                         raise RuntimeError(
-                            f"Seedance scene {scene['index'] + 1} returned no video URL"
+                            f"Scene {scene['index'] + 1} returned no video URL"
                         )
 
                     saved = await _download_asset(
@@ -401,21 +526,21 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                     local_path = _local_file_from_url(saved["url"])
                     if not local_path:
                         raise RuntimeError(
-                            f"Seedance scene {scene['index'] + 1} could not be saved locally"
+                            f"Scene {scene['index'] + 1} could not be saved locally"
                         )
+                    clip_dur = probe_video_duration(local_path)
+                    logger.info(
+                        "Stitch clip %s/%s duration=%.2fs (requested %ss)",
+                        scene["index"] + 1,
+                        len(scenes),
+                        clip_dur or 0,
+                        api_duration,
+                    )
                     clip_paths.append(local_path)
+                    current_image_url = scene_image_url
 
-                    if scene["index"] + 1 < len(scenes):
-                        frame_png = extract_last_frame_png(local_path)
-                        if frame_png:
-                            current_image_url = await upload_frame_png(
-                                frame_png, tenant_id=tenant_id
-                            )
-                        elif current_image_url:
-                            logger.warning(
-                                "Seedance scene %s: could not extract last frame; reusing seed",
-                                scene["index"] + 1,
-                            )
+                if not clip_paths:
+                    raise RuntimeError("No video clips were generated for stitch")
 
                 stitched_path = stitch_dir / f"seedance-{uuid.uuid4()}.mp4"
                 concat_video_files(clip_paths, stitched_path)
@@ -430,7 +555,9 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                     suffix=".mp4",
                     content_type="video/mp4",
                 )
-                final_url = saved_final["url"]
+                final_url = saved_final.get("file_url") or saved_final.get("url")
+                if not final_url:
+                    raise RuntimeError("Stitched video saved but no file URL was returned")
 
                 voiceover: dict = {"status": "skipped"}
                 if settings.RUNWAYML_VOICEOVER_ENABLED and not native_audio:
@@ -453,14 +580,18 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                         "reason": "Runway TTS disabled (RUNWAYML_VOICEOVER_ENABLED=false)",
                     }
 
-            clip_max = scenes[0]["duration"] if scenes else 15
+            clip_max = scenes[0]["duration"] if scenes else 5
+            from app.services.ffmpeg_util import probe_video_duration
+
+            actual_duration = probe_video_duration(stitched_path)
+            reported = int(round(actual_duration)) if actual_duration else None
             return {
                 "status": "done",
                 "model": spec.platform_path,
                 "catalog_model": model,
                 "prompt": scene_prompts[0] if scene_prompts else "",
                 "url": final_url,
-                "duration_seconds": requested_duration,
+                "duration_seconds": reported or requested_duration,
                 "requested_duration_seconds": requested_duration,
                 "storyboard": scene_prompts,
                 "provider": "higgsfield",
@@ -468,11 +599,56 @@ class HiggsfieldVideoProvider(VideoGenerationProvider):
                 "native_audio": native_audio,
                 "spoken_script": spoken_script,
                 "seedance_multiscene": True,
-                "scene_count": len(scenes),
+                "scene_count": len(clip_paths),
                 "clip_duration_seconds": clip_max,
+                "duration_warning": (
+                    f"Stitched {len(clip_paths)} clips with {spec.label} → "
+                    f"actual {reported or '?'}s (asked for {requested_duration}s)."
+                    + (
+                        " Duration probe was missing earlier — UI now shows real file length."
+                        if reported and abs(reported - requested_duration) >= 2
+                        else ""
+                    )
+                ),
             }
         except Exception as exc:
             logger.exception("Seedance multi-scene failed: %s", exc)
+            # If we already paid for clip(s), return what we have instead of total loss
+            if clip_paths:
+                try:
+                    partial = stitch_dir / f"seedance-partial-{uuid.uuid4()}.mp4"
+                    concat_video_files(clip_paths, partial)
+                    saved_partial = file_service.save_bytes(
+                        content=partial.read_bytes(),
+                        tenant_id=tenant_id,
+                        subfolder="generated",
+                        suffix=".mp4",
+                        content_type="video/mp4",
+                    )
+                    partial_url = saved_partial.get("file_url") or saved_partial.get("url")
+                    if not partial_url:
+                        raise RuntimeError("Partial stitch saved but no file URL was returned")
+                    return {
+                        "status": "done",
+                        "model": spec.platform_path,
+                        "catalog_model": model,
+                        "prompt": scene_prompts[0] if scene_prompts else "",
+                        "url": partial_url,
+                        "duration_seconds": sum(
+                            int(s.get("duration") or 5) for s in scenes[: len(clip_paths)]
+                        ),
+                        "requested_duration_seconds": requested_duration,
+                        "provider": "higgsfield",
+                        "seedance_multiscene": True,
+                        "scene_count": len(clip_paths),
+                        "duration_warning": (
+                            f"Partial stitch: got {len(clip_paths)}/{len(scenes)} clips "
+                            f"before error ({exc}). Returning what completed so credits are not wasted."
+                        ),
+                        "error": None,
+                    }
+                except Exception as partial_exc:
+                    logger.warning("Partial stitch save failed: %s", partial_exc)
             return self._fallback(
                 spec.platform_path,
                 brief,

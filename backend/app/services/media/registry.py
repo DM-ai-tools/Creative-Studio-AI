@@ -1,4 +1,8 @@
 from app.services.media.base import ImageGenerationProvider, VideoGenerationProvider
+from app.services.media.byteplus_seedance_provider import (
+    BytePlusSeedanceVideoProvider,
+    is_byteplus_seedance_model,
+)
 from app.services.media.heygen_provider import HeyGenVideoProvider, is_heygen_video_model
 from app.services.media.higgsfield_models import (
     is_higgsfield_image_model,
@@ -35,6 +39,10 @@ def get_video_provider(model: str | None = None) -> VideoGenerationProvider:
         if "heygen" not in _video_providers:
             _video_providers["heygen"] = HeyGenVideoProvider()
         return _video_providers["heygen"]
+    if is_byteplus_seedance_model(model):
+        if "byteplus" not in _video_providers:
+            _video_providers["byteplus"] = BytePlusSeedanceVideoProvider()
+        return _video_providers["byteplus"]
     if is_higgsfield_video_model(model):
         if "higgsfield" not in _video_providers:
             _video_providers["higgsfield"] = HiggsfieldVideoProvider()

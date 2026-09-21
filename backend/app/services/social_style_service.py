@@ -111,21 +111,6 @@ def social_style_color_overrides(profile: dict[str, Any] | None) -> tuple[str, s
     primary = ""
     secondary = ""
 
-    if any(k in guidance for k in ("black and gold", "black & gold", "gold on black", "black background")):
-        primary = primary or "#C9A962"
-        secondary = secondary or "#0A0A0A"
-
-    if any(k in guidance for k in ("gold and white", "gold & white", "white and gold", "gold on white")):
-        primary = primary or "#C9A962"
-        if not secondary or not _is_dark_hex(secondary):
-            secondary = secondary or "#FFFFFF"
-
-    # Luxury jewellery feeds without explicit palette: default gold accent + dark studio bg.
-    if not primary and not secondary:
-        if any(k in guidance for k in ("jewel", "diamond", "ring", "luxury", "bespoke")):
-            primary = "#C9A962"
-            secondary = "#0A0A0A"
-
     for color in parsed:
         if _is_gold_hex(color):
             primary = primary or color
@@ -153,6 +138,54 @@ def social_style_color_overrides(profile: dict[str, Any] | None) -> tuple[str, s
     return primary, secondary
 
 
+def _guidance_is_stale_gold_template(text: str) -> bool:
+    """Detect generic gold/jewellery guidance wrongly saved for non-jewellery brands."""
+    lower = (text or "").lower()
+    if not lower:
+        return False
+    gold_hints = (
+        "metallic gold",
+        "gold serif",
+        "champagne-gold",
+        "gold pill",
+        "solid black",
+        "gold on black",
+        "gold headlines",
+        "dark charcoal backgrounds with metallic gold",
+    )
+    jewellery_hints = (
+        "jewel",
+        "jewellery",
+        "jewelry",
+        "diamond",
+        "ring",
+        "pendant",
+        "engagement",
+        "pedestal",
+    )
+    return any(h in lower for h in gold_hints) and not any(h in lower for h in jewellery_hints)
+
+
+def social_style_applies_color_override(
+    profile: dict[str, Any] | None,
+    *,
+    brand_primary: str = "",
+    brand_secondary: str = "",
+) -> bool:
+    """
+    Social feed colours may override Brand Kit ONLY for confirmed gold-led feeds
+    on brands whose Brand Kit is also gold/dark (jewellery). Non-gold Brand Kit always wins.
+    """
+    kit_primary = _parse_color_token(brand_primary)
+    if kit_primary and not _is_gold_hex(kit_primary):
+        return False
+    if not isinstance(profile, dict) or not profile.get("fetched_at"):
+        return False
+    mode = social_style_aesthetic_mode(profile)
+    social_primary, _social_secondary = social_style_color_overrides(profile)
+    return mode in {"gold_on_dark", "gold_on_white"} and _is_gold_hex(social_primary)
+
+
 def resolve_effective_brand_colors(
     *,
     primary_color: str = "",
@@ -160,9 +193,26 @@ def resolve_effective_brand_colors(
     social_style_profile: dict | None = None,
 ) -> tuple[str, str]:
     """
-    When a social style profile exists, its feed palette overrides website Brand Kit
-    colours for image prompts (CTA pill, headline type, backgrounds).
+    Brand Kit colours are the default for every industry.
+    Social feed colours override ONLY when the brand's Kit is gold-compatible AND
+    the saved social profile is a confirmed gold-led feed (jewellery/luxury black+gold).
     """
+    kit_primary = _parse_color_token(primary_color)
+
+    if not isinstance(social_style_profile, dict) or not social_style_profile.get("fetched_at"):
+        return primary_color, secondary_color
+
+    # Explicit Brand Kit palette (red, green, coral, blue, etc.) — never replace with gold social styling.
+    if kit_primary and not _is_gold_hex(kit_primary):
+        return primary_color, secondary_color
+
+    if not social_style_applies_color_override(
+        social_style_profile,
+        brand_primary=primary_color,
+        brand_secondary=secondary_color,
+    ):
+        return primary_color, secondary_color
+
     social_primary, social_secondary = social_style_color_overrides(social_style_profile)
     if social_primary:
         primary_color = social_primary
@@ -175,10 +225,14 @@ def social_style_aesthetic_mode(profile: dict[str, Any] | None) -> str:
     """gold_on_dark | gold_on_white | empty"""
     if not isinstance(profile, dict):
         return ""
+    primary, secondary = social_style_color_overrides(profile)
     stored = str(profile.get("aesthetic_mode") or "").strip().lower()
     if stored in {"gold_on_dark", "gold_on_white"}:
-        return stored
-    primary, secondary = social_style_color_overrides(profile)
+        # Ignore stale gold mode when feed colours are not actually gold-led.
+        if not _is_gold_hex(primary):
+            stored = ""
+        else:
+            return stored
     if _is_gold_hex(primary) and _is_dark_hex(secondary):
         return "gold_on_dark"
     if _is_gold_hex(primary) and secondary == "#FFFFFF":
@@ -192,54 +246,129 @@ def format_social_style_scene_lock(
     profile: dict[str, Any] | None,
     *,
     lifestyle_scene: bool = False,
+    brand_primary: str = "",
+    brand_secondary: str = "",
 ) -> str:
-    """Hard visual rules appended to image prompts — prevents gradient/blue drift."""
+    """Hard visual rules appended to image prompts — match THIS brand's feed only."""
     if not isinstance(profile, dict):
         return ""
-    mode = social_style_aesthetic_mode(profile)
+    use_social_colours = social_style_applies_color_override(
+        profile,
+        brand_primary=brand_primary,
+        brand_secondary=brand_secondary,
+    )
+    mode = social_style_aesthetic_mode(profile) if use_social_colours else ""
     primary, secondary = social_style_color_overrides(profile)
-    if not mode and not primary and not lifestyle_scene:
-        return ""
-
-    if lifestyle_scene:
-        return (
-            "SOCIAL FEED TYPOGRAPHY LOCK: apply gold "
-            f"({primary or '#C9A962'}) serif headlines + white sans sublines to TEXT ONLY. "
-            "Keep the lifestyle boutique/consultation scene — do NOT replace with product-only "
-            "pedestal or full-frame black studio catalog. NO blue/navy tones."
-        )
-
     themes = profile.get("visual_themes") if isinstance(profile.get("visual_themes"), dict) else {}
+    typography = str(themes.get("typography_style") or "").strip()
+    cta_style = str(themes.get("cta_style") or "").strip()
+    mood = str(themes.get("mood") or "").strip()
+    composition = str(themes.get("image_composition") or "").strip()
     avoid = themes.get("avoid") if isinstance(themes.get("avoid"), list) else []
     avoid_bits = [str(a).strip() for a in avoid if str(a).strip()][:6]
 
-    lines = [
-        "SOCIAL FEED SCENE LOCK (non-negotiable — match how this client posts on Facebook/Instagram):",
-    ]
-    if mode == "gold_on_white":
+    if not use_social_colours:
+        if not typography and not themes.get("layout_patterns") and not composition and not lifestyle_scene:
+            return ""
+        if lifestyle_scene:
+            type_note = typography or "match headline/CTA typography from their social posts"
+            return (
+                f"SOCIAL FEED STYLE: {type_note}. Keep the lifestyle photograph — do NOT replace "
+                "with product-only pedestal or black studio catalog. "
+                "Use Brand Kit primary/secondary for ALL on-image text and CTA colours — NOT gold unless Brand Kit uses gold."
+            )
+        lines = [
+            "SOCIAL FEED STYLE (composition + typography — Brand Kit colours for CTA/headline):",
+        ]
+        if typography:
+            lines.append(f"Typography: {typography}.")
+        if cta_style:
+            lines.append(f"CTA style: {cta_style}.")
+        if composition:
+            lines.append(f"Composition: {composition}.")
+        if themes.get("layout_patterns"):
+            lines.append(f"Layouts: {', '.join(themes['layout_patterns'][:6])}.")
+        if mood:
+            lines.append(f"Mood: {mood}.")
         lines.append(
-            f"Clean white or soft off-white studio background ({secondary or '#FFFFFF'}). "
-            f"Headlines in metallic gold serif ({primary or '#C9A962'}). "
-            f"CTA pill in solid gold ({primary or '#C9A962'}) with white bold text. "
-            "Product hero on white/light surface — catalogue studio shot."
+            "Use Brand Kit primary/secondary hex for headline accent and CTA pill — "
+            "do NOT default to metallic gold serif or black jewellery-studio layouts."
         )
+        if avoid_bits:
+            lines.append("AVOID: " + "; ".join(avoid_bits[:8]) + ".")
+        return " ".join(lines)
+
+    if not mode and not primary and not typography and not lifestyle_scene:
+        return ""
+
+    if lifestyle_scene:
+        if mode in {"gold_on_dark", "gold_on_white"} or _is_gold_hex(primary):
+            return (
+                "SOCIAL FEED TYPOGRAPHY LOCK: apply feed accent "
+                f"({primary or '#C9A962'}) to headline/CTA text only + white sans sublines. "
+                "Keep the lifestyle scene — do NOT replace with product-only pedestal or "
+                "full-frame black studio catalog."
+            )
+        accent = primary or "brand accent from their feed"
+        type_note = typography or "bold sans-serif or brand headline style from their posts"
+        return (
+            f"SOCIAL FEED TYPOGRAPHY LOCK: match their feed — {type_note}. "
+            f"Headline/CTA accent {accent}. Keep the lifestyle photograph intact. "
+            "Do NOT substitute generic gold serif jewellery styling unless their feed uses it."
+        )
+
+    if mode == "gold_on_dark":
+        lines = [
+            "SOCIAL FEED SCENE LOCK (gold-on-dark — match this jeweller/luxury feed):",
+            (
+                f"Solid matte BLACK or dark charcoal background ({secondary or '#0A0A0A'}) — "
+                "NOT a gold-to-cream gradient, NOT a diagonal split panel. "
+                f"Headlines in metallic gold luxury serif ({primary or '#C9A962'}). "
+                f"CTA pill: solid gold ({primary or '#C9A962'}) with white text. "
+                "Product hero on dark pedestal with dramatic studio lighting."
+            ),
+        ]
+    elif mode == "gold_on_white":
+        lines = [
+            "SOCIAL FEED SCENE LOCK (gold-on-white — match this feed):",
+            (
+                f"Clean white or soft off-white studio background ({secondary or '#FFFFFF'}). "
+                f"Headlines in metallic gold serif ({primary or '#C9A962'}). "
+                f"CTA pill in solid gold ({primary or '#C9A962'}) with white bold text."
+            ),
+        ]
     else:
+        lines = [
+            "SOCIAL FEED SCENE LOCK (match this client's actual posts — not generic gold serif):",
+        ]
+        if secondary:
+            lines.append(f"Background/frame: {secondary}.")
+        if primary:
+            lines.append(f"CTA pill + headline accent: {primary}.")
+        if typography:
+            lines.append(f"Typography: {typography}.")
+        if cta_style:
+            lines.append(f"CTA style: {cta_style}.")
+        if composition:
+            lines.append(f"Composition: {composition}.")
+        if mood:
+            lines.append(f"Mood: {mood}.")
         lines.append(
-            f"Solid matte BLACK or dark charcoal background ({secondary or '#0A0A0A'}) — "
-            "NOT a gold-to-cream gradient, NOT a diagonal split panel, NOT blue/navy tones. "
-            f"Headlines in metallic gold luxury serif ({primary or '#C9A962'}) with subtle foil sheen. "
-            "Subline in clean WHITE thin sans-serif when needed. "
-            f"CTA pill: solid gold ({primary or '#C9A962'}) with white text — NEVER blue. "
-            "Product hero: ring/jewellery on dark grey pedestal or black reflective surface, "
-            "dramatic studio lighting exactly like their social posts."
+            "Use ONLY colours and type styles from this feed profile. "
+            "Do NOT default to metallic gold serif on black unless listed above."
         )
 
     default_avoid = [
-        "blue CTAs or navy headlines",
-        "gold-to-cream gradient split cards",
-        "generic lifestyle desk/office stress scenes",
-        "orange-washed or duotone colour filters",
+        "off-brand colour palettes",
+        "generic stock-photo look",
+        "borrowed luxury jeweller gold foil from other brands",
     ]
+    if mode in {"gold_on_dark", "gold_on_white"}:
+        default_avoid = [
+            "blue CTAs or navy headlines",
+            "gold-to-cream gradient split cards",
+            "generic lifestyle desk/office stress scenes",
+        ]
     merged_avoid = list(dict.fromkeys([*avoid_bits, *default_avoid]))
     lines.append("AVOID: " + "; ".join(merged_avoid[:8]) + ".")
     return " ".join(lines)
@@ -330,24 +459,36 @@ def _normalize_post(item: dict[str, Any], *, platform: str) -> dict[str, Any]:
     }
 
 
-def format_social_style_for_llm(profile: dict[str, Any] | None) -> str:
+def format_social_style_for_llm(
+    profile: dict[str, Any] | None,
+    *,
+    brand_primary: str = "",
+    brand_secondary: str = "",
+) -> str:
     """Inject stored social style into image-plan LLM prompts."""
     if not isinstance(profile, dict):
         return ""
 
     themes = profile.get("visual_themes") if isinstance(profile.get("visual_themes"), dict) else {}
     guidance = str(profile.get("prompt_guidance") or "").strip()
+    if guidance and _guidance_is_stale_gold_template(guidance) and not social_style_applies_color_override(
+        profile, brand_primary=brand_primary, brand_secondary=brand_secondary
+    ):
+        guidance = ""
     social_primary, social_secondary = social_style_color_overrides(profile)
+    use_social_colours = social_style_applies_color_override(
+        profile, brand_primary=brand_primary, brand_secondary=brand_secondary
+    )
 
-    if not guidance and not themes and not social_primary:
+    if not guidance and not themes and not (use_social_colours and social_primary):
         return ""
 
     lines = [
-        "CLIENT SOCIAL MEDIA VISUAL STYLE (from their live feed — match this look in generated ad images):",
+        "CLIENT SOCIAL MEDIA VISUAL STYLE (from their live feed — match layout/typography; Brand Kit owns colours unless gold jewellery feed):",
     ]
     if guidance:
         lines.append(guidance)
-    if social_primary or social_secondary:
+    if use_social_colours and (social_primary or social_secondary):
         colour_bits = []
         if social_primary:
             colour_bits.append(f"accent/CTA/headline {social_primary}")
@@ -358,6 +499,16 @@ def format_social_style_for_llm(profile: dict[str, Any] | None) -> str:
             + ", ".join(colour_bits)
             + ". Do NOT default to generic blue CTAs or navy headlines if the feed is black/gold."
         )
+    elif brand_primary or brand_secondary:
+        kit_bits = []
+        if brand_primary:
+            kit_bits.append(f"Brand Kit primary {brand_primary} for CTA + headline accent")
+        if brand_secondary:
+            kit_bits.append(f"Brand Kit secondary {brand_secondary} for backgrounds/highlights")
+        if kit_bits:
+            lines.append(
+                "COLOURS: " + "; ".join(kit_bits) + ". Do NOT substitute gold serif or jewellery styling."
+            )
     if themes.get("color_palette"):
         lines.append(f"Palette: {', '.join(themes['color_palette'][:8])}")
     if themes.get("layout_patterns"):
@@ -370,13 +521,23 @@ def format_social_style_for_llm(profile: dict[str, Any] | None) -> str:
         lines.append(f"Recurring: {', '.join(themes['recurring_elements'][:6])}")
     if themes.get("avoid"):
         lines.append(f"Avoid: {', '.join(themes['avoid'][:6])}")
-    scene_lock = format_social_style_scene_lock(profile)
+    scene_lock = format_social_style_scene_lock(
+        profile,
+        brand_primary=brand_primary,
+        brand_secondary=brand_secondary,
+    )
     if scene_lock:
         lines.append(scene_lock)
-    lines.append(
-        "When writing image prompts, mirror this client's existing social ad aesthetic — "
-        "gold + dark OR gold + white only; do NOT invent blue, navy, or gradient split layouts."
-    )
+    if use_social_colours:
+        lines.append(
+            "When writing image prompts, mirror this client's gold + dark OR gold + white feed aesthetic — "
+            "do NOT invent blue, navy, or gradient split layouts."
+        )
+    else:
+        lines.append(
+            "When writing image prompts, mirror THIS client's feed composition and typography. "
+            "Always use Brand Kit colours for CTA/headline — never default to gold serif unless Brand Kit uses gold."
+        )
     return "\n".join(lines)
 
 
@@ -410,13 +571,12 @@ async def _analyze_posts_with_llm(
     system = (
         "You analyze a brand's public social media feed to guide AI ad image generation. "
         "Return ONLY valid JSON describing their VISUAL style (not copy strategy). "
-        "Focus on: colors (include hex codes in color_palette), layout, product vs lifestyle mix, typography on images, "
-        "CTA pill style, backgrounds, mood, and what to avoid. "
-        "For luxury/jewellery feeds with black backgrounds and gold type, color_palette MUST include "
-        '"#0A0A0A", "#C9A962", and "#FFFFFF". '
-        "layout_patterns should describe: product on dark pedestal, gold serif headline on black, "
-        "studio jewellery hero — NOT gradient split cards. "
-        'avoid MUST include: "blue CTAs", "gold gradient split", "lifestyle desk scenes". '
+        "Focus on: colors (include hex codes in color_palette when visible), layout, product vs lifestyle mix, "
+        "typography on images, CTA pill style, backgrounds, mood, and what to avoid. "
+        "Describe what you ACTUALLY see — supplements may use bold sans-serif on bright photos; "
+        "medical brands may use green/white; only jewellery feeds use gold serif on black. "
+        "Do NOT assume gold unless feed images clearly use gold type or accents. "
+        'avoid MUST NOT force gold on feeds that use other brand colours. '
         "JSON shape:\n"
         "{"
         '"visual_themes": {'
@@ -480,45 +640,57 @@ def _heuristic_style(
 ) -> dict[str, Any]:
     kinds = [p.get("kind") for p in posts]
     image_ratio = sum(1 for k in kinds if k == "image") / max(1, len(posts))
+    caption_sample = " ".join(
+        str(p.get("caption") or "")[:120] for p in posts[:6]
+    ).lower()
+    is_jewellery_hint = any(
+        k in caption_sample for k in ("jewel", "diamond", "ring", "pendant", "engagement")
+    )
+    if is_jewellery_hint:
+        palette = ["#0A0A0A", "#C9A962", "#FFFFFF"]
+        typography = "metallic gold luxury serif headlines, white thin sans sublines"
+        cta = "gold pill button with white text on dark background"
+        guidance = (
+            f"Match {brand_name or handle}'s {platform} feed (@{handle}): "
+            "solid black/dark backgrounds with gold serif headlines when seen in feed posts."
+        )
+    else:
+        palette = []
+        typography = "match on-image type from feed — bold sans-serif, clean modern headlines as observed"
+        cta = "match CTA pill style and colour from feed posts"
+        guidance = (
+            f"Match {brand_name or handle}'s {platform} feed (@{handle}): "
+            "use the same on-image colours, typography, photo style, and CTA treatment as their posts. "
+            "Do NOT default to gold serif on black unless their feed clearly uses that look."
+        )
     return {
         "visual_themes": {
-            "color_palette": ["#0A0A0A", "#C9A962", "#FFFFFF"],
-            "layout_patterns": [
-                "product hero on dark grey pedestal",
-                "gold serif headline on solid black background",
-                "studio jewellery close-up with dramatic lighting",
-            ],
-            "typography_style": "metallic gold luxury serif headlines, white thin sans sublines",
-            "image_composition": "product-forward studio shots on dark backgrounds",
-            "cta_style": "gold pill button with white text on dark background",
-            "mood": "luxury, elegant, high-end",
-            "recurring_elements": ["dark backgrounds", "gold typography", "pedestal product shots"],
+            "color_palette": palette,
+            "layout_patterns": ["match native layouts from analyzed posts"],
+            "typography_style": typography,
+            "image_composition": "match product vs lifestyle mix from feed",
+            "cta_style": cta,
+            "mood": "match feed mood and energy",
+            "recurring_elements": [],
             "avoid": [
-                "blue CTAs or navy headlines",
-                "gold-to-cream gradient split cards",
-                "lifestyle desk stress scenes",
+                "generic gold serif jewellery styling when feed does not use gold",
+                "off-brand colour palettes",
             ],
         },
         "caption_tone": "match feed captions",
         "content_mix": {"product": int(image_ratio * 100), "promo": 20, "lifestyle": 10, "other": 0},
-        "prompt_guidance": (
-            f"Match {brand_name or handle}'s {platform} feed (@{handle}): "
-            "solid BLACK or dark charcoal backgrounds with metallic GOLD serif headlines and white sublines; "
-            "OR clean white studio backgrounds with gold type. "
-            "Product hero shots on dark pedestals with dramatic studio lighting. "
-            "Never blue/navy CTAs, never gold-to-cream gradient split cards, never generic desk lifestyle scenes."
-        ),
+        "prompt_guidance": guidance,
         "post_summaries": [f"{p.get('kind')}: {(p.get('caption') or '')[:80]}" for p in posts[:8]],
     }
 
 
-async def fetch_and_analyze_social_style(
+async def fetch_social_feed_posts(
     *,
     platform: str,
     handle_or_url: str,
     brand_name: str = "",
-) -> dict[str, Any]:
-    """One-time SociaVault fetch + LLM style profile for storage on Brand."""
+) -> tuple[str, str, str, list[dict[str, Any]], dict[str, Any]]:
+    """SociaVault fetch — returns (platform, handle, profile_url, normalized_posts, raw_profile)."""
     plat, handle = parse_social_input(platform=platform, handle_or_url=handle_or_url)
     profile: dict[str, Any] = {}
     raw_posts: list[dict[str, Any]] = []
@@ -571,6 +743,21 @@ async def fetch_and_analyze_social_style(
         raise ValueError(
             f"No public posts found for {plat} @{handle}. Check the handle/URL is correct and the profile is public."
         )
+    return plat, handle, profile_url, posts, profile if isinstance(profile, dict) else {}
+
+
+async def fetch_and_analyze_social_style(
+    *,
+    platform: str,
+    handle_or_url: str,
+    brand_name: str = "",
+) -> dict[str, Any]:
+    """One-time SociaVault fetch + LLM style profile for storage on Brand."""
+    plat, handle, profile_url, posts, profile = await fetch_social_feed_posts(
+        platform=platform,
+        handle_or_url=handle_or_url,
+        brand_name=brand_name,
+    )
 
     analysis = await _analyze_posts_with_llm(
         brand_name=brand_name,
@@ -596,11 +783,15 @@ async def fetch_and_analyze_social_style(
         "post_summaries": analysis.get("post_summaries") if isinstance(analysis.get("post_summaries"), list) else [],
     })
     effective_primary, effective_secondary = social_style_color_overrides(out)
-    if effective_primary:
-        out["effective_primary_color"] = effective_primary
-    if effective_secondary:
-        out["effective_secondary_color"] = effective_secondary
     mode = social_style_aesthetic_mode(out)
-    if mode:
+    if mode in {"gold_on_dark", "gold_on_white"} and _is_gold_hex(effective_primary):
+        if effective_primary:
+            out["effective_primary_color"] = effective_primary
+        if effective_secondary:
+            out["effective_secondary_color"] = effective_secondary
         out["aesthetic_mode"] = mode
+    elif effective_primary and not _is_gold_hex(effective_primary):
+        out["effective_primary_color"] = effective_primary
+        if effective_secondary:
+            out["effective_secondary_color"] = effective_secondary
     return out

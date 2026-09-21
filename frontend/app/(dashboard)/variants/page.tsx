@@ -260,7 +260,9 @@ export default function VariantsPage() {
               ) {
                 return (
                   <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                    Image not generated. {imageError || 'Add Runway credits and regenerate this brief.'}
+                    Image not generated.{' '}
+                    {imageError ||
+                      'Check OpenAI image model / credits, then regenerate this brief.'}
                   </p>
                 )
               }
