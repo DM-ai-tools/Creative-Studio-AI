@@ -77,6 +77,34 @@ def require_ffmpeg() -> str:
     return exe
 
 
+def probe_has_audio(video_path: Path | str) -> bool | None:
+    """Check the actual stream, including installations with FFmpeg but no ffprobe."""
+    path = Path(video_path)
+    if not path.is_file():
+        return None
+    probe = ffprobe_executable()
+    if probe:
+        proc = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+             "stream=index", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            return bool(proc.stdout.strip())
+    ffmpeg = ffmpeg_executable()
+    if not ffmpeg:
+        return None
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    import re
+    metadata = proc.stderr or ""
+    if not re.search(r"Stream #.*Video:", metadata):
+        return None
+    return bool(re.search(r"Stream #.*Audio:", metadata))
+
+
 def probe_video_duration(video_path: Path | str) -> float | None:
     """Actual media length in seconds (Path or str)."""
     path = Path(video_path)

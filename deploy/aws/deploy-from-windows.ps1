@@ -32,8 +32,23 @@ $pscpBase = @("-batch", "-hostkey", $HostKey, "-i", $PpkPath)
 
 Write-Host "==> Packaging project..."
 if (Test-Path $TarPath) { Remove-Item $TarPath -Force }
+Write-Host "==> Clearing read-only flags (OneDrive/Windows)..."
+cmd /c "attrib -R `"$RepoRoot\*.*`" /S /D" | Out-Null
 Push-Location $RepoRoot
-tar -czf $TarPath --exclude=node_modules --exclude=frontend/node_modules --exclude=frontend/.next --exclude=backend/venv --exclude=backend/uploads --exclude=.git --exclude=__pycache__ .
+tar -czf $TarPath `
+  --exclude=node_modules `
+  --exclude=frontend/node_modules `
+  --exclude=frontend/.next `
+  --exclude=backend/venv `
+  --exclude=backend/venv313 `
+  --exclude=backend/uploads `
+  --exclude=mcp-server/.venv `
+  --exclude=verification `
+  --exclude=.pytest_cache `
+  --exclude=backend/.pytest_cache `
+  --exclude=backend/tests `
+  --exclude=.git `
+  --exclude=__pycache__ .
 Pop-Location
 
 function Convert-ToUnixLf([string]$text) {

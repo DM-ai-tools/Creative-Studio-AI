@@ -15,8 +15,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True))
+    # Older local installs created this compatibility column at application
+    # startup before the Alembic revision existed. Treat that valid schema as
+    # already migrated so a clean backend restart can advance the revision.
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("users")}
+    if "last_login_at" not in columns:
+        op.add_column(
+            "users",
+            sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("users", "last_login_at")
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("users")}
+    if "last_login_at" in columns:
+        op.drop_column("users", "last_login_at")

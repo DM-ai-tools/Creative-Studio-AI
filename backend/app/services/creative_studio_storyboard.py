@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from app.services.creative_studio_timeline import SHOT_HEADER
+from app.services.creative_studio_picture import (
+    extract_brand_terms,
+    natural_capture_directive,
+    sanitize_visual_direction,
+)
 
 
 _SCENE_HEADER = re.compile(
@@ -16,10 +22,7 @@ _OVERLAY_BLOCK = re.compile(
 
 
 def looks_like_multi_scene_brief(text: str) -> bool:
-    raw = text or ""
-    return len(re.findall(r"(?i)\bScene\s*\d+\b", raw)) >= 2 or len(
-        re.findall(r"(?i)\bCLIP\s*\d+\b", raw)
-    ) >= 2
+    return len(list(SHOT_HEADER.finditer(text or ""))) >= 2
 
 
 def _extract_overlays(block: str) -> tuple[str, list[str]]:
@@ -41,6 +44,26 @@ def _extract_overlays(block: str) -> tuple[str, list[str]]:
         cleaned = block[:end_idx]
         if stop:
             cleaned += after[stop.start() :]
+    # Common production-brief layout: only VISUAL DIRECTION is sent to the
+    # image/video model. VO and copy remain available to deterministic finishers.
+    visual_heading = re.search(r"(?im)^\s*VISUAL\s+DIRECTION\s*:\s*$", block)
+    if visual_heading:
+        after = block[visual_heading.end():]
+        stop = re.search(
+            r"(?im)^\s*(?:VOICEOVER|VO|NARRATION|(?:FINAL\s+)?ON-SCREEN\s+TEXT|"
+            r"TEXT\s+REQUIREMENTS|BRANDING\s+REQUIREMENTS)\s*:\s*$",
+            after,
+        )
+        cleaned = after[:stop.start()] if stop else after
+
+    for copy_match in re.finditer(
+        r"(?ims)^\s*(?:FINAL\s+)?ON-SCREEN\s+TEXT\s*:\s*(.*?)(?=^\s*[A-Z][A-Z /+-]{2,}\s*:\s*$|^\s*[-=]{4,}\s*$|\Z)",
+        block,
+    ):
+        section = copy_match.group(1)
+        quoted = re.findall(r"[“\"]([^”\"\n]+)[”\"]", section)
+        overlays.extend(item.strip() for item in quoted if item.strip())
+
     cleaned = re.sub(r"(?im)^\s*Video\s*text\s*overlay\s*:?\s*.*$", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, overlays
@@ -66,16 +89,31 @@ def scene_wants_product(*, title: str, visual: str, index: int = 1) -> bool:
         "orbit the",
         "push-in on the front",
     )
+    product_visual_markers = (
+        "product box",
+        "holding box",
+        "package",
+        "unbox",
+        "unboxing",
+        "product photo",
+        "product hero",
+        "close-up",
+        "close up",
+        "detail",
+        "feature",
+        "reveal",
+        "shop now",
+        "cta",
+        "brand finish",
+    )
     problem_markers = (
         "problem",
         "manual routine",
-        "hook",
         "basic wooden",
         "weathered wooden",
         "old coop",
         "dirty egg",
         "soiled egg",
-        "tired",
         "avoidable",
         "checking the chicken coop every",
         "opening the coop",
@@ -84,19 +122,18 @@ def scene_wants_product(*, title: str, visual: str, index: int = 1) -> bool:
     )
     if any(m in blob for m in product_markers):
         return True
+    if any(m in blob for m in product_visual_markers):
+        return True
     if any(m in blob for m in problem_markers):
         return False
-    # Scene 1–2 default to problem world unless explicitly product
-    if int(index or 1) <= 2:
-        return False
-    # Scene 3+ default to product if not clearly a problem beat
+    # Unspecified scenes may contain the product; never invent a "before" scene.
     return True
 
 
 def parse_storyboard_scenes(
     brief: str,
     *,
-    max_scenes: int = 6,
+    max_scenes: int = 40,
     product_name: str = "",
 ) -> list[dict[str, Any]]:
     """
@@ -107,21 +144,30 @@ def parse_storyboard_scenes(
     if not text:
         return []
 
-    parts = [p.strip() for p in re.split(r"(?i)(?=\bScene\s*\d+\b)", text) if p.strip()]
-    if len(parts) < 2:
-        parts = [p.strip() for p in re.split(r"(?i)(?=\bCLIP\s*\d+\b)", text) if p.strip()]
+    # Only line-start headings delimit scenes; references to "Scene 2" inside a
+    # direction are content, not a new scene.
+    text = re.sub(r"(?m)^\s*#{1,6}\s*(?=(?:Scene|CLIP)\s*\d+)", "", text, flags=re.I)
+    starts = list(SHOT_HEADER.finditer(text))
+    parts = [
+        text[match.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)].strip()
+        for i, match in enumerate(starts)
+    ]
 
     product_label = (product_name or "the product").strip() or "the product"
     scenes: list[dict[str, Any]] = []
     for part in parts[: max_scenes + 2]:
-        header = _SCENE_HEADER.match(part)
+        header = SHOT_HEADER.match(part)
         if not header:
             continue
-        num = int(header.group(1))
-        title = (header.group(2) or "").strip(" —-:") or f"Scene {num}"
+        numbered = _SCENE_HEADER.match(part)
+        num = int(numbered.group(1)) if numbered else len(scenes) + 1
+        title = (numbered.group(2) if numbered else header.group()).strip(" —-:") or f"Scene {num}"
         body = part[header.end() :].strip()
-        visual, overlays = _extract_overlays(body)
-        visual = re.sub(r"\s+", " ", visual).strip()
+        visual, overlays = _extract_overlays(body or title)
+        visual = re.sub(
+            r"\s+", " ",
+            sanitize_visual_direction(visual, brand_terms=extract_brand_terms(text)),
+        ).strip()
         if len(visual) < 8:
             visual = f"{title}: {visual}".strip(": ")
         if len(visual) < 6:
@@ -130,9 +176,12 @@ def parse_storyboard_scenes(
         wants_product = scene_wants_product(title=title, visual=visual, index=num)
         image_prompt = (
             f"{visual} "
-            "Single photoreal still — this scene only, one composition. "
+            "Single live-action documentary frame — this scene only, one composition. "
             "FULL FRAME. No collage, no split screen, no on-image text, captions, "
-            "subtitles, watermarks, or UI chrome."
+            "subtitles, logos, brand names, signage, labels, watermarks, UI chrome, or "
+            "placeholder tokens like [BRAND] or [website]. Keep screens, uniforms and "
+            "packaging clean and unbranded. Brand graphics are added in post."
+            f" {natural_capture_directive(text)}"
         )
         if wants_product:
             image_prompt += (
@@ -142,9 +191,8 @@ def parse_storyboard_scenes(
         else:
             # Explicit ban — stop model from pasting the product into problem beats
             image_prompt += (
-                f" CRITICAL: Do NOT show {product_label}, any modern white trailer coop, "
-                "or any branded mobile caravan. This is the BEFORE / problem state — "
-                "only a basic weathered wooden chicken coop and manual chores."
+                f" Do NOT show {product_label} in this explicitly described problem beat. "
+                "Use only the setting, objects and actions specified in the brief."
             )
 
         scenes.append(
@@ -154,7 +202,8 @@ def parse_storyboard_scenes(
                 "title": title[:80],
                 "image_prompt": image_prompt[:2200],
                 "overlays": overlays[:6],
-                "raw": part[:2000],
+                "raw": part,
+                "visual": visual,
                 "wants_product": wants_product,
             }
         )
@@ -172,8 +221,8 @@ def parse_storyboard_scenes(
                 "index": 1,
                 "title": "Opening",
                 "image_prompt": (
-                    f"{(visual or text)[:1800]} Single photoreal still. "
-                    "No on-image text or captions."
+                    f"{(visual or text)[:1800]} Single live-action documentary frame. "
+                    f"No on-image text or captions. {natural_capture_directive(text)}"
                 ),
                 "overlays": overlays[:4],
                 "raw": text[:2000],
@@ -198,11 +247,15 @@ def build_storyboard_video_prompt(
 
     clips: list[str] = []
     for i, scene in enumerate(scenes):
-        a, b = edges[i], edges[i + 1]
+        timing = re.search(
+            r"(\d+(?:\.\d+)?)\s*[–—-]\s*(\d+(?:\.\d+)?)\s*(?:s|seconds?)\b",
+            str(scene.get("title") or ""), re.I,
+        )
+        a, b = (float(timing.group(1)), float(timing.group(2))) if timing else (edges[i], edges[i + 1])
         if b <= a:
             b = a + 1
         title = str(scene.get("title") or f"Scene {i + 1}")
-        visual = str(scene.get("image_prompt") or scene.get("raw") or "")[:700]
+        visual = str(scene.get("visual") or scene.get("raw") or scene.get("image_prompt") or "")
         visual = re.sub(
             r"(?i)\s*Single photoreal still[^.]*\.",
             "",
@@ -211,11 +264,9 @@ def build_storyboard_video_prompt(
         overlays = scene.get("overlays") or []
         overlay_line = ""
         if overlays:
-            joined = " | ".join(str(o) for o in overlays[:4])
             overlay_line = (
-                f" ON-SCREEN TEXT — render these exact words legibly in the video, "
-                f"without paraphrasing or inventing text: {joined}. "
-                "Use clean high-contrast advertising typography, placed safely inside frame."
+                " Reserve clean negative space for the approved campaign copy, which is "
+                "composited after generation. Do not render letters, logos or symbols."
             )
         clips.append(
             f"CLIP {i + 1} — {a}–{b} SECONDS ({title}): {visual}.{overlay_line}"
@@ -227,7 +278,7 @@ def build_storyboard_video_prompt(
         else ""
     )
     audio = (
-        "AUDIO: Native diegetic sound — ambient farm/yard, foley, soft natural presence. Not silent."
+        "AUDIO: Native ambient sound and foley appropriate to the specified scene. Not silent."
         if sound_on
         else "AUDIO: Silent — no speech, no music."
     )
@@ -239,23 +290,22 @@ def build_storyboard_video_prompt(
         "Hard cuts between scenes are OK inside one continuous generation. "
         "Do NOT freeze on a single opening frame.\n\n"
         f"{product_line}"
-        "CHARACTER CONTINUITY: The same adult woman must appear in every scene: same face, "
-        "age, hairstyle, body type, wardrobe and colour palette. Preserve her identity across "
-        "cuts; do not replace her with a different person. Keep the same farm/yard geography "
-        "and natural morning-light progression unless a beat explicitly changes it.\n\n"
+        "CHARACTER CONTINUITY: Preserve the subjects, appearance, wardrobe, location "
+        "and lighting specified in the brief unless a beat explicitly changes them. "
+        "Do not invent people, animals, settings or actions.\n\n"
         + "\n\n".join(clips)
         + f"\n\n{audio}\n"
-        "TEXT RULE: Every listed overlay is intentional campaign copy. Render it exactly and "
-        "legibly; do not omit, rewrite, misspell or add unrelated text. "
+        "TEXT RULE: Generate clean footage only. Do not render campaign copy, logos, labels, "
+        "websites or unrelated text; approved graphics are composited in post-production. "
         "PRODUCT RULE: Product beats must match the supplied product reference exactly. "
         "PRODUCT COVERAGE: Use motivated cinematic views across product beats — hero wide, "
         "three-quarter, side/profile, close detail of defining hardware/stripe/door, "
         "slow tracking or orbit, practical usage view, and a final hero composition. "
         "Each view must describe the same physical product, never a generic substitute. "
-        "MOTION RULE: natural human hand/weight/eye movement, physically plausible chickens, "
+        "MOTION RULE: natural human hand/weight/eye movement, physically plausible action, "
         "realistic camera exposure and focus pulls; avoid plastic faces, warped hands, floaty "
         "objects, impossible cuts and glossy AI-looking motion."
-    )[:4800]
+    )
 
 
 def opening_still_prompt(scenes: list[dict[str, Any]]) -> str:

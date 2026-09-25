@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
 from uuid import UUID
 import logging
 
@@ -1389,8 +1389,14 @@ class CreativeStudioGenerateResponse(BaseModel):
     duration_seconds: int | None = None
     requested_duration_seconds: int | None = None
     segment_count: int | None = None
+    continuity_chained: bool = False
+    continuity_frame_count: int | None = None
     partial: bool = False
     credits_estimate: float | None = None
+    audio_present: bool | None = None
+    audio_warning: str | None = None
+    voiceover: dict | None = None
+    provider_usage: list[dict] | None = None
     duration_warning: str | None = None
     note: str | None = None
     storyboard: list[dict] | None = None
@@ -1426,6 +1432,11 @@ class CreativeStudioChatMessage(BaseModel):
     content: str = ""
 
 
+class CreativeStudioReference(BaseModel):
+    url: str = Field(min_length=1)
+    role: Literal["product", "logo", "scene", "character", "reference"]
+
+
 class CreativeStudioChatRequest(BaseModel):
     messages: list[CreativeStudioChatMessage] = Field(default_factory=list)
     mode: str = Field(default="auto", description="auto | ask | generate")
@@ -1451,6 +1462,7 @@ class CreativeStudioChatRequest(BaseModel):
     product_reference_url: str = ""
     logo_reference_url: str = ""
     additional_reference_urls: list[str] = Field(default_factory=list)
+    reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
     storyboard_image_urls: list[str] = Field(default_factory=list)
 
 
@@ -1585,6 +1597,7 @@ async def creative_studio_chat(
         ) or "",
         logo_reference_url=data.logo_reference_url,
         additional_reference_urls=list(data.additional_reference_urls or []),
+        reference_assets=[asset.model_dump() for asset in data.reference_assets],
         storyboard_image_urls=list(data.storyboard_image_urls or []),
     )
     return CreativeStudioChatResponse(**result)
@@ -1694,6 +1707,15 @@ async def creative_studio_job_status(
         error=job.get("error"),
         seed_image_url=job.get("seed_image_url"),
         duration_seconds=job.get("duration_seconds"),
+        requested_duration_seconds=job.get("requested_duration_seconds"),
+        segment_count=job.get("segment_count"),
+        continuity_chained=bool(job.get("continuity_chained")),
+        continuity_frame_count=job.get("continuity_frame_count"),
+        partial=bool(job.get("partial")),
+        audio_present=job.get("audio_present"),
+        audio_warning=job.get("audio_warning"),
+        voiceover=job.get("voiceover"),
+        provider_usage=job.get("provider_usage"),
         credits_estimate=job.get("credits_estimate"),
         duration_warning=job.get("duration_warning"),
         note=job.get("note"),

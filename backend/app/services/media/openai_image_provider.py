@@ -21,6 +21,10 @@ from app.services.media_content import image_suffix_and_type
 
 logger = logging.getLogger(__name__)
 
+
+class ImagePersistenceError(RuntimeError):
+    """The provider returned media, but the local asset could not be saved."""
+
 # High quality on complex ad prompts often exceeds 180s and surfaces as an empty
 # httpx.ReadTimeout message — prefer auto, then fall back to low on timeout.
 _DEFAULT_GPT_IMAGE_QUALITY = "auto"
@@ -129,6 +133,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
         reference_image_url: str | None = None,
+        reference_purpose: str = "product",
     ) -> dict:
         api_model = resolve_openai_image_model(model)
         if not openai_configured():
@@ -152,13 +157,25 @@ class OpenAIImageProvider(ImageGenerationProvider):
 
         # Product / style reference → GPT Image edits endpoint (image + text)
         ref_url = (reference_image_url or "").strip() or None
+        purpose = (reference_purpose or "product").strip().lower()
         if ref_url and api_model.startswith("gpt-image"):
-            safe_prompt = (
-                f"{safe_prompt}\n\n"
-                "PRODUCT FIDELITY: Match the attached product photo exactly — same shape, "
-                "colours, materials, proportions, and branding. Place that real product in the "
-                "new scene. Do not invent a different product."
-            )[:prompt_limit]
+            if purpose in {"character", "cast", "person"}:
+                fidelity = (
+                    "CAST CONTINUITY: Match the attached reference person's face, hair, build, "
+                    "skin tone, and wardrobe exactly across scenes. Do not swap to a different person."
+                )
+            elif purpose in {"style", "scene"}:
+                fidelity = (
+                    "STYLE CONTINUITY: Match the attached reference for lighting, palette, and "
+                    "environment tone. Keep any people identical to the reference when present."
+                )
+            else:
+                fidelity = (
+                    "PRODUCT FIDELITY: Match the attached product photo exactly — same shape, "
+                    "colours, materials, proportions, and branding. Place that real product in the "
+                    "new scene. Do not invent a different product."
+                )
+            safe_prompt = f"{safe_prompt}\n\n{fidelity}"[:prompt_limit]
             edited = await self._generate_with_reference(
                 api_model=api_model,
                 prompt=safe_prompt,
@@ -171,6 +188,8 @@ class OpenAIImageProvider(ImageGenerationProvider):
                 original_prompt=prompt,
             )
             if edited.get("status") in {"done", "mock"} or edited.get("url"):
+                return edited
+            if edited.get("retryable") is False:
                 return edited
             logger.warning(
                 "GPT Image reference edit failed (%s) — falling back to text-only generation",
@@ -305,6 +324,17 @@ class OpenAIImageProvider(ImageGenerationProvider):
                     logo_on_light_url=logo_on_light_url,
                     note="Generated from attached product photo (GPT Image edit).",
                 )
+        except ImagePersistenceError as exc:
+            logger.exception("OpenAI image edit completed but could not be saved")
+            return {
+                "status": "failed",
+                "model": api_model,
+                "prompt": original_prompt,
+                "url": None,
+                "provider": "openai",
+                "error": _exc_message(exc),
+                "retryable": False,
+            }
         except Exception as exc:
             logger.exception("OpenAI image edit (product reference) failed")
             return {
@@ -343,13 +373,19 @@ class OpenAIImageProvider(ImageGenerationProvider):
             raise ValueError("OpenAI image response had no image bytes")
 
         suffix, content_type = image_suffix_and_type(content)
-        saved = file_service.save_bytes(
-            content=content,
-            tenant_id=tenant_id,
-            subfolder="generated",
-            suffix=suffix,
-            content_type=content_type,
-        )
+        try:
+            saved = file_service.save_bytes(
+                content=content,
+                tenant_id=tenant_id,
+                subfolder="generated",
+                suffix=suffix,
+                content_type=content_type,
+            )
+        except OSError as exc:
+            raise ImagePersistenceError(
+                "The image was generated, but Creative Studio could not save it locally. "
+                "Check backend write access to the uploads directory."
+            ) from exc
         final_url = saved["file_url"]
         logo_applied = False
         if logo_url and final_url:

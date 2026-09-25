@@ -91,8 +91,10 @@ async def create_video_task(
     Seedance 2.0 accepts multiple reference images (up to ~9) in one unified pass —
     pass storyboard frames via extra_image_refs: [{url, role}].
     """
+    from app.services.creative_studio_timeline import validate_video_prompt
+
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": (prompt or "").strip()[:4000] or "Product ad scene"},
+        {"type": "text", "text": validate_video_prompt(prompt)},
     ]
     if image_data_uri_or_url:
         content.append(
@@ -102,7 +104,12 @@ async def create_video_task(
                 "role": image_role,
             }
         )
-    for ref in (extra_image_refs or [])[:8]:
+    # BytePlus rejects a task that mixes first/last-frame conditioning with
+    # reference media. Enforce the provider contract at the HTTP boundary as a
+    # final safeguard even if an upstream caller accidentally supplies both.
+    frame_locked = bool(image_data_uri_or_url) and image_role in {"first_frame", "last_frame"}
+    safe_extra_refs = [] if frame_locked else (extra_image_refs or [])
+    for ref in safe_extra_refs[:9 - int(bool(image_data_uri_or_url))]:
         url = str(ref.get("url") or "").strip()
         if not url:
             continue

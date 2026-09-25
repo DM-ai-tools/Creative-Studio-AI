@@ -8,7 +8,7 @@ import { generationApi, variantsApi, brandsApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { assetUrl } from '@/lib/utils'
-import type { GenerationModelOption } from '@/types'
+import type { Asset, GenerationModelOption } from '@/types'
 import {
   emptyCsSession,
   getCsActiveChatId,
@@ -19,13 +19,18 @@ import {
   type CsChatMessage,
   type CsChatSession,
   type CsPipelineAction,
+  storyboardFramesForVideo,
 } from '@/lib/csChatHistory'
+import CsMessageContent from '@/components/brief/CsMessageContent'
 
 type ChatMode = 'auto' | 'ask' | 'generate'
-type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120' | '300' | '600'
+type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
 type AspectId = '9/16' | '1/1' | '16/9' | '4/3'
 type ResolutionId = '480p' | '720p' | '1080p'
 type PipelineAction = CsPipelineAction
+type MediaLibrarySection = 'uploads' | 'generations' | 'liked'
+type MediaLibraryFilter = 'recent' | 'all' | 'images' | 'videos' | 'audio'
+type MediaLibrarySort = 'newest' | 'oldest' | 'name'
 
 type ChatAttachment = NonNullable<CsChatMessage['attachments']>[number]
 type ChatMessage = CsChatMessage
@@ -47,8 +52,6 @@ const DURATIONS: { id: DurationId; label: string }[] = [
   { id: '30', label: '30s' },
   { id: '60', label: '1m' },
   { id: '120', label: '2m' },
-  { id: '300', label: '5m' },
-  { id: '600', label: '10m max' },
 ]
 
 const ASPECTS: { id: AspectId; label: string }[] = [
@@ -135,6 +138,7 @@ export default function CreativeStudioTab({
   const [aspect, setAspect] = useState<AspectId>('9/16')
   const [resolution, setResolution] = useState<ResolutionId>('720p')
   const [soundOn, setSoundOn] = useState(true)
+  const [useStoryboardReferences, setUseStoryboardReferences] = useState(true)
   const [busy, setBusy] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -146,15 +150,27 @@ export default function CreativeStudioTab({
   const [approvedImageUrl, setApprovedImageUrl] = useState('')
   const [productReferenceUrl, setProductReferenceUrl] = useState('')
   const [logoReferenceUrl, setLogoReferenceUrl] = useState('')
+  const [characterReferenceUrl, setCharacterReferenceUrl] = useState('')
   const [additionalReferenceUrls, setAdditionalReferenceUrls] = useState<string[]>([])
+  const [imageLibraryOpen, setImageLibraryOpen] = useState(false)
+  const [imageLibrary, setImageLibrary] = useState<Asset[]>([])
+  const [imageLibraryLoading, setImageLibraryLoading] = useState(false)
+  const [mediaLibrarySection, setMediaLibrarySection] = useState<MediaLibrarySection>('uploads')
+  const [mediaLibraryFilter, setMediaLibraryFilter] = useState<MediaLibraryFilter>('recent')
+  const [mediaLibrarySort, setMediaLibrarySort] = useState<MediaLibrarySort>('newest')
+  const [likedAssetIds, setLikedAssetIds] = useState<string[]>([])
   const [phase, setPhase] = useState('')
   const [imageModel, setImageModel] = useState('openai-gpt-image-2')
+  const [previewFrame, setPreviewFrame] = useState<{ src: string; title: string } | null>(
+    null,
+  )
 
   const threadRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const activeChatIdRef = useRef('')
   const stoppedJobsRef = useRef<Set<string>>(new Set())
   const pollingJobsRef = useRef<Set<string>>(new Set())
+  const savingLibraryUrlsRef = useRef<Set<string>>(new Set())
   const skipNextHistorySaveRef = useRef(false)
   const resumeCheckedSessionRef = useRef('')
 
@@ -169,16 +185,45 @@ export default function CreativeStudioTab({
   }, [chatModel, chatModels])
 
   const applySession = useCallback((session: CsChatSession) => {
+    const storedMessages = session.messages || []
+    const recoveredNarrationFailure = storedMessages.some(
+      (message) =>
+        message.status === 'failed' &&
+        /narration at .*exceeds .*shorter deliveries/i.test(message.error || ''),
+    )
+    const restoredMessages = storedMessages.map((message) => {
+      if (
+        message.status !== 'failed' ||
+        !/narration at .*exceeds .*shorter deliveries/i.test(message.error || '')
+      ) {
+        return message
+      }
+      return {
+        ...message,
+        content:
+          'The previous narration timing issue has been fixed. Your approved still is preserved; retry Seedance to continue.',
+        status: 'idle' as const,
+        error: undefined,
+        mediaMode: 'video' as const,
+        suggestedActions: ['approve_next' as const],
+        phase: 'awaiting_video',
+      }
+    })
     activeChatIdRef.current = session.id
     setActiveChatId(session.id)
-    setMessages(session.messages || [])
+    setMessages(restoredMessages)
     setImagePrompt(session.imagePrompt || '')
     setVideoPrompt(session.videoPrompt || '')
     setApprovedImageUrl(session.approvedImageUrl || '')
     setProductReferenceUrl(session.productReferenceUrl || '')
     setLogoReferenceUrl(session.logoReferenceUrl || '')
+    setCharacterReferenceUrl(session.characterReferenceUrl || '')
     setAdditionalReferenceUrls(session.additionalReferenceUrls || [])
-    setPhase(session.phase || '')
+    setPhase(
+      recoveredNarrationFailure && session.approvedImageUrl
+        ? 'awaiting_video'
+        : session.phase || '',
+    )
     setAttachments([])
     setComposer('')
   }, [])
@@ -239,6 +284,7 @@ export default function CreativeStudioTab({
         approvedImageUrl,
         productReferenceUrl,
         logoReferenceUrl,
+        characterReferenceUrl,
         additionalReferenceUrls,
         phase,
       }
@@ -254,6 +300,7 @@ export default function CreativeStudioTab({
     approvedImageUrl,
     productReferenceUrl,
     logoReferenceUrl,
+    characterReferenceUrl,
     additionalReferenceUrls,
     phase,
     activeChatId,
@@ -308,6 +355,125 @@ export default function CreativeStudioTab({
   const updateMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
   }, [])
+
+  const loadImageLibrary = useCallback(async () => {
+    setImageLibraryLoading(true)
+    try {
+      const assets = await assetsApi.list({
+        asset_type: 'creative_studio_reference',
+      })
+      setImageLibrary(assets)
+    } catch (err) {
+      toast.error(extractApiError(err, 'Could not load saved images'))
+    } finally {
+      setImageLibraryLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (imageLibraryOpen) void loadImageLibrary()
+  }, [imageLibraryOpen, loadImageLibrary])
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(
+        'creative-studio-liked-media',
+      )
+      setLikedAssetIds(stored ? JSON.parse(stored) : [])
+    } catch {
+      setLikedAssetIds([])
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!imageLibraryOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setImageLibraryOpen(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [imageLibraryOpen])
+
+  const visibleLibraryAssets = useMemo(() => {
+    const isGenerated = (asset: Asset) =>
+      asset.metadata?.source === 'creative_studio_generated'
+    let assets = imageLibrary.filter((asset) => {
+      if (mediaLibrarySection === 'generations') return isGenerated(asset)
+      if (mediaLibrarySection === 'liked') return likedAssetIds.includes(asset.id)
+      return !isGenerated(asset)
+    })
+    if (mediaLibraryFilter === 'images') {
+      assets = assets.filter((asset) => asset.file_type.startsWith('image/'))
+    } else if (mediaLibraryFilter === 'videos') {
+      assets = assets.filter((asset) => asset.file_type.startsWith('video/'))
+    } else if (mediaLibraryFilter === 'audio') {
+      assets = assets.filter((asset) => asset.file_type.startsWith('audio/'))
+    }
+    assets = [...assets].sort((a, b) => {
+      if (mediaLibrarySort === 'name') return a.file_name.localeCompare(b.file_name)
+      const direction = mediaLibrarySort === 'oldest' ? 1 : -1
+      return direction * String(a.created_at).localeCompare(String(b.created_at))
+    })
+    return mediaLibraryFilter === 'recent' ? assets.slice(0, 30) : assets
+  }, [imageLibrary, likedAssetIds, mediaLibraryFilter, mediaLibrarySection, mediaLibrarySort])
+
+  const storeGeneratedImages = useCallback(
+    async (
+      images: Array<{ url: string; title: string; role: 'still' | 'storyboard' }>,
+      jobId: string,
+    ) => {
+      const fresh = images.filter(
+        (image) => image.url && !savingLibraryUrlsRef.current.has(image.url),
+      )
+      if (!fresh.length) return
+      fresh.forEach((image) => savingLibraryUrlsRef.current.add(image.url))
+      try {
+        const saved = await Promise.all(
+          fresh.map((image) =>
+            assetsApi.registerGenerated({
+              file_url: image.url,
+              brand_id: brandId,
+              file_name: image.title,
+              metadata: {
+                role: image.role,
+                title: image.title,
+                creative_studio_job_id: jobId,
+              },
+            }),
+          ),
+        )
+        setImageLibrary((current) => {
+          const byId = new Map(current.map((asset) => [asset.id, asset]))
+          saved.forEach((asset) => byId.set(asset.id, asset))
+          return Array.from(byId.values()).sort((a, b) =>
+            String(b.created_at).localeCompare(String(a.created_at)),
+          )
+        })
+      } catch (err) {
+        console.warn('Could not save generated Creative Studio image', err)
+      } finally {
+        fresh.forEach((image) => savingLibraryUrlsRef.current.delete(image.url))
+      }
+    },
+    [brandId],
+  )
+
+  const patchStoryboardFrame = useCallback(
+    (messageId: string, frameId: string, patch: Partial<NonNullable<ChatMessage['storyboard']>[number]>) => {
+      setMessages((prev) =>
+        prev.map((message) => {
+          if (message.id !== messageId || !message.storyboard) return message
+          return {
+            ...message,
+            storyboard: message.storyboard.map((frame) =>
+              frame.id === frameId ? { ...frame, ...patch } : frame,
+            ),
+          }
+        }),
+      )
+    },
+    [],
+  )
 
   const pollJobIntoMessage = useCallback(
     async (
@@ -376,6 +542,8 @@ export default function CreativeStudioTab({
               imagePrompt: f.image_prompt || undefined,
               overlays: f.overlays || [],
               status: f.status || undefined,
+              selected: f.url ? true : undefined,
+              discarded: false,
             }))
 
           patchMessage({
@@ -388,7 +556,7 @@ export default function CreativeStudioTab({
             durationSeconds: res.duration_seconds || undefined,
             ...(done && mediaMode === 'video' && res.note
               ? {
-                  content: `${res.partial ? 'Partial video ready.' : 'Video ready.'} ${res.note}`,
+                  content: `${res.audio_warning ? 'Video ready with audio issues.' : res.partial ? 'Partial video ready.' : 'Video ready.'} ${res.note}`,
                 }
               : {}),
             storyboard: board.length ? board : undefined,
@@ -402,7 +570,9 @@ export default function CreativeStudioTab({
               (res.url || board.some((b) => b.url))
                 ? ['regenerate_image', 'approve_next']
                 : failed || cancelled
-                  ? ['generate_image']
+                  ? mediaMode === 'video'
+                    ? ['approve_next']
+                    : ['generate_image']
                   : [],
             phase: done
               ? mediaMode === 'video'
@@ -424,6 +594,25 @@ export default function CreativeStudioTab({
             return
           }
           if (done && (res.url || board.some((b) => b.url)) && mediaMode !== 'video') {
+            const imagesToStore =
+              mediaMode === 'storyboard'
+                ? board
+                    .filter((frame) => frame.url)
+                    .map((frame) => ({
+                      url: frame.url as string,
+                      title: frame.title || `Scene ${frame.index}`,
+                      role: 'storyboard' as const,
+                    }))
+                : res.url
+                  ? [
+                      {
+                        url: res.url,
+                        title: 'Creative Studio still',
+                        role: 'still' as const,
+                      },
+                    ]
+                  : []
+            void storeGeneratedImages(imagesToStore, jobId)
             const hero =
               board.find((b) => /reveal|feature|close|product/i.test(b.title || ''))?.url ||
               board.find((b) => b.url)?.url ||
@@ -440,6 +629,10 @@ export default function CreativeStudioTab({
           if (done && res.url && mediaMode === 'video') {
             setPhase('done')
             const warn = res.duration_warning || res.note || ''
+            if (res.audio_warning) {
+              toast.error(res.audio_warning, { duration: 9000 })
+              return
+            }
             if (res.partial) {
               toast.error('Partial video saved — one or more segments failed', { duration: 7000 })
               return
@@ -463,13 +656,16 @@ export default function CreativeStudioTab({
           }
         } catch (pollErr) {
           const pollMessage = extractApiError(pollErr, 'Connection error')
-          if (/job not found|server may have restarted|\b404\b/i.test(pollMessage)) {
+          const pollStatus = (
+            pollErr as { response?: { status?: number } }
+          )?.response?.status
+          if (pollStatus === 404 || /job not found|server may have restarted|\b404\b|not found/i.test(pollMessage)) {
             patchMessage({
               status: 'failed',
               progress: 'Generation interrupted',
               error:
                 'This generation stopped when the backend restarted. Start a new generation; no further segments are being submitted.',
-              suggestedActions: ['generate_image'],
+              suggestedActions: mediaMode === 'video' ? ['approve_next'] : ['generate_image'],
             })
             setBusy(false)
             toast.error('Generation was interrupted by a backend restart')
@@ -485,9 +681,10 @@ export default function CreativeStudioTab({
       patchMessage({
         status: 'failed',
         error: 'Timed out waiting for generation.',
+        suggestedActions: mediaMode === 'video' ? ['approve_next'] : ['generate_image'],
       })
     },
-    [activeChatId, brandId, briefId, updateMessage],
+    [activeChatId, brandId, briefId, storeGeneratedImages, updateMessage],
   )
 
   useEffect(() => {
@@ -558,6 +755,10 @@ export default function CreativeStudioTab({
             : !productAssigned
               ? 'product'
               : 'reference'
+        setImageLibrary((current) => [
+          asset,
+          ...current.filter((item) => item.id !== asset.id),
+        ])
         setAttachments((prev) => [
           ...prev,
           {
@@ -592,7 +793,7 @@ export default function CreativeStudioTab({
       const demoted = prev.filter(
         (item) =>
           item.id !== attachment.id &&
-          (role === 'product' || role === 'logo') &&
+          (role === 'product' || role === 'logo' || role === 'character') &&
           item.role === role,
       )
       if (demoted.length) {
@@ -602,7 +803,7 @@ export default function CreativeStudioTab({
       }
       return prev.map((item) => {
         if (item.id === attachment.id) return { ...item, role }
-        if ((role === 'product' || role === 'logo') && item.role === role) {
+        if ((role === 'product' || role === 'logo' || role === 'character') && item.role === role) {
           return { ...item, role: 'reference' as const }
         }
         return item
@@ -610,9 +811,11 @@ export default function CreativeStudioTab({
     })
     if (productReferenceUrl === attachment.url) setProductReferenceUrl('')
     if (logoReferenceUrl === attachment.url) setLogoReferenceUrl('')
+    if (characterReferenceUrl === attachment.url) setCharacterReferenceUrl('')
     setAdditionalReferenceUrls((prev) => prev.filter((url) => url !== attachment.url))
     if (role === 'product') setProductReferenceUrl(attachment.url)
     if (role === 'logo') setLogoReferenceUrl(attachment.url)
+    if (role === 'character') setCharacterReferenceUrl(attachment.url)
     if (role === 'reference') {
       setAdditionalReferenceUrls((prev) =>
         Array.from(new Set([...prev, attachment.url])).slice(0, 7),
@@ -624,7 +827,77 @@ export default function CreativeStudioTab({
     setAttachments((prev) => prev.filter((item) => item.id !== attachment.id))
     if (productReferenceUrl === attachment.url) setProductReferenceUrl('')
     if (logoReferenceUrl === attachment.url) setLogoReferenceUrl('')
+    if (characterReferenceUrl === attachment.url) setCharacterReferenceUrl('')
     setAdditionalReferenceUrls((prev) => prev.filter((url) => url !== attachment.url))
+  }
+
+  const attachLibraryAsset = (asset: Asset, preferredRole?: ChatAttachment['role']) => {
+    const url = asset.file_url || ''
+    if (!url) return
+    const allowedRoles: ChatAttachment['role'][] = [
+      'product',
+      'logo',
+      'scene',
+      'character',
+      'reference',
+    ]
+    const metadataRole = String(asset.metadata?.role || '') as ChatAttachment['role']
+    const role = preferredRole || (allowedRoles.includes(metadataRole) ? metadataRole : 'reference')
+    const attachment: ChatAttachment = {
+      id: asset.id,
+      name: asset.file_name || 'Saved image',
+      url,
+      previewUrl: assetUrl(url) || undefined,
+      mime: asset.file_type,
+      role,
+    }
+    setAttachments((current) => {
+      const withoutUrl = current.filter((item) => item.url !== url)
+      const withoutDuplicateRole = withoutUrl.map((item) =>
+        (role === 'product' || role === 'logo' || role === 'character') && item.role === role
+          ? { ...item, role: 'reference' as const }
+          : item,
+      )
+      return [...withoutDuplicateRole, attachment].slice(-9)
+    })
+    if (role === 'product') setProductReferenceUrl(url)
+    if (role === 'logo') setLogoReferenceUrl(url)
+    if (role === 'character') setCharacterReferenceUrl(url)
+    if (role === 'reference') {
+      setAdditionalReferenceUrls((current) =>
+        Array.from(new Set([...current, url])).slice(-7),
+      )
+    }
+  }
+
+  const toggleLikedAsset = (assetId: string) => {
+    setLikedAssetIds((current) => {
+      const next = current.includes(assetId)
+        ? current.filter((id) => id !== assetId)
+        : [...current, assetId]
+      try {
+        window.localStorage.setItem(
+          'creative-studio-liked-media',
+          JSON.stringify(next),
+        )
+      } catch {
+        // The picker still works when browser storage is unavailable.
+      }
+      return next
+    })
+  }
+
+  const toggleLibraryAttachment = (asset: Asset) => {
+    const existing = attachments.find((attachment) => attachment.url === asset.file_url)
+    if (existing) {
+      removeAttachment(existing)
+      return
+    }
+    if (!asset.file_type.startsWith('image/')) {
+      toast.error('Seedance reference selection currently supports images')
+      return
+    }
+    attachLibraryAsset(asset)
   }
 
   const saveToVariants = async (msg: ChatMessage) => {
@@ -667,6 +940,7 @@ export default function CreativeStudioTab({
   }) => {
     if (busy) return
     const action = opts.action || 'continue'
+    const isVideoAction = action === 'approve_next' || action === 'generate_video'
     const userText = (opts.userText || '').trim()
     const userAttachments = opts.userAttachments || []
     const imgP = opts.imagePromptOverride ?? imagePrompt
@@ -686,13 +960,30 @@ export default function CreativeStudioTab({
     if (attachedProduct) setProductReferenceUrl(attachedProduct)
     if (attachedLogo) setLogoReferenceUrl(attachedLogo)
     if (attachedReferences.length) setAdditionalReferenceUrls(turnAdditionalRefs)
-    const boardUrls =
+    // Stored message attachments retain roles after approval and browser reload.
+    const referenceByUrl = new Map<string, ChatAttachment>()
+    for (const asset of [...messages.flatMap((message) => message.attachments || []), ...userAttachments]) {
+      referenceByUrl.set(asset.url, asset)
+    }
+    if (characterReferenceUrl) {
+      referenceByUrl.set(characterReferenceUrl, {
+        id: `character-${characterReferenceUrl}`,
+        name: 'Character anchor',
+        url: characterReferenceUrl,
+        previewUrl: assetUrl(characterReferenceUrl) || undefined,
+        mime: 'image/*',
+        role: 'character',
+      })
+    }
+    const referenceAssets = Array.from(referenceByUrl.values())
+      .filter((asset) => asset.role === 'scene' || asset.role === 'character' ||
+        asset.url === turnProductRef || asset.url === turnLogoRef || turnAdditionalRefs.includes(asset.url))
+      .map((asset) => ({ url: asset.url, role: asset.role || 'reference' as const }))
+      .slice(0, 9)
+    const boardUrls = (
       opts.storyboardImageUrls ||
-      messages
-        .flatMap((m) => m.storyboard || [])
-        .map((f) => f.url)
-        .filter((u): u is string => Boolean(u))
-        .slice(0, 9)
+      storyboardFramesForVideo(messages.flatMap((m) => m.storyboard || []))
+    ).slice(0, 9)
 
     if (action === 'continue' && !userText && userAttachments.length === 0) {
       toast.error('Type a message or attach a file')
@@ -707,7 +998,8 @@ export default function CreativeStudioTab({
       const userMsg: ChatMessage = {
         id: uid(),
         role: 'user',
-        content: userText || `(${action.replace(/_/g, ' ')})`,
+        content: (userText || `(${action.replace(/_/g, ' ')})`) +
+          (isVideoAction && !useStoryboardReferences ? '\nUse original uploads for video references; exclude generated storyboard images.' : ''),
         attachments: userAttachments,
       }
       setMessages((prev) => [...prev, userMsg])
@@ -754,11 +1046,12 @@ export default function CreativeStudioTab({
         action,
         image_prompt: imgP,
         video_prompt: vidP,
-        approved_image_url: approved,
+        approved_image_url: isVideoAction && !useStoryboardReferences ? turnProductRef : approved,
         product_reference_url: turnProductRef,
         logo_reference_url: turnLogoRef,
         additional_reference_urls: turnAdditionalRefs,
-        storyboard_image_urls: boardUrls,
+        reference_assets: referenceAssets,
+        storyboard_image_urls: useStoryboardReferences ? boardUrls : [],
         image_model: imageModel,
         revision_notes: opts.revisionNotes || '',
         phase,
@@ -811,7 +1104,12 @@ export default function CreativeStudioTab({
       }
     } catch (err) {
       const msg = extractApiError(err, 'Chat failed')
-      updateMessage(pendingId, { content: msg, status: 'failed', error: msg })
+      updateMessage(pendingId, {
+        content: msg,
+        status: 'failed',
+        error: msg,
+        suggestedActions: isVideoAction ? ['approve_next'] : ['generate_image'],
+      })
       toast.error(msg)
     } finally {
       setBusy(false)
@@ -826,7 +1124,42 @@ export default function CreativeStudioTab({
     await runTurn({ userText: text, userAttachments: atts, action: 'continue', appendUser: true })
   }
 
+  const selectSavedStill = (asset: Asset) => {
+    if (!asset.file_url) return
+    setApprovedImageUrl(asset.file_url)
+    setPhase('awaiting_video')
+    attachLibraryAsset(asset, 'scene')
+    toast.success('Saved image selected — you can use it with uploads or send it to Seedance')
+  }
+
+  const startVideoFromSavedStill = async (asset: Asset) => {
+    if (!asset.file_url) return
+    selectSavedStill(asset)
+    setImageLibraryOpen(false)
+    const text = composer.trim()
+    await runTurn({
+      userText: text,
+      userAttachments: [...attachments],
+      action: 'generate_video',
+      appendUser: Boolean(text || attachments.length),
+      approvedImageOverride: asset.file_url,
+      videoPromptOverride: (videoPrompt || text || imagePrompt).trim(),
+    })
+  }
+
   const handlePipelineAction = async (action: PipelineAction, fromMsg?: ChatMessage) => {
+    if (
+      (action === 'approve_next' || action === 'generate_video') &&
+      useStoryboardReferences &&
+      fromMsg?.storyboard?.length
+    ) {
+      const selected = storyboardFramesForVideo(fromMsg.storyboard)
+      if (!selected.length) {
+        toast.error('Select at least one storyboard frame for Seedance, or turn off storyboard references.')
+        return
+      }
+    }
+
     const nextImagePrompt = fromMsg?.imagePrompt || imagePrompt
     const nextVideoPrompt = fromMsg?.videoPrompt || videoPrompt
     const nextApproved =
@@ -879,10 +1212,7 @@ export default function CreativeStudioTab({
       imagePromptOverride: nextImagePrompt,
       videoPromptOverride: nextVideoPrompt,
       approvedImageOverride: nextApproved || undefined,
-      storyboardImageUrls: (fromMsg?.storyboard || [])
-        .map((f) => f.url)
-        .filter((u): u is string => Boolean(u))
-        .slice(0, 9),
+      storyboardImageUrls: storyboardFramesForVideo(fromMsg?.storyboard).slice(0, 9),
     })
   }
 
@@ -923,6 +1253,239 @@ export default function CreativeStudioTab({
 
   const composerCard = (
     <div className="w-full max-w-3xl mx-auto">
+      {imageLibraryOpen && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/75 backdrop-blur-sm p-3 sm:p-8 grid place-items-center"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setImageLibraryOpen(false)
+          }}
+        >
+          <div className="w-full max-w-6xl h-[min(780px,90vh)] rounded-[28px] border border-white/10 bg-[#1d1f22] shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center gap-1 px-4 sm:px-6 pt-4 border-b border-white/10">
+              {(['uploads', 'generations', 'liked'] as MediaLibrarySection[]).map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  onClick={() => setMediaLibrarySection(section)}
+                  className={`px-4 py-2.5 rounded-t-xl text-sm font-semibold capitalize ${
+                    mediaLibrarySection === section
+                      ? 'bg-accent-dim text-charcoal border border-accent/30'
+                      : 'text-mid hover:text-charcoal'
+                  }`}
+                >
+                  {section}
+                </button>
+              ))}
+              <button
+                type="button"
+                aria-label="Close media library"
+                onClick={() => setImageLibraryOpen(false)}
+                className="ml-auto mb-2 h-10 w-10 rounded-full bg-surface text-xl text-mid hover:bg-surface-hover hover:text-charcoal"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 px-4 sm:px-6 py-3 border-b border-white/10 bg-white/[0.025]">
+              {(['recent', 'all', 'images', 'videos', 'audio'] as MediaLibraryFilter[]).map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  onClick={() => setMediaLibraryFilter(filter)}
+                  className={`rounded-full px-3.5 py-2 text-xs font-semibold capitalize ${
+                    mediaLibraryFilter === filter
+                      ? 'bg-accent-dim text-charcoal border border-accent/30'
+                      : 'text-mid hover:text-charcoal'
+                  }`}
+                >
+                  {filter}
+                </button>
+              ))}
+              <label className="ml-auto flex items-center gap-2 text-xs text-mid">
+                Sort by
+                <select
+                  value={mediaLibrarySort}
+                  onChange={(event) =>
+                    setMediaLibrarySort(event.target.value as MediaLibrarySort)
+                  }
+                  className="rounded-lg border border-border bg-white px-2 py-1.5 text-charcoal"
+                >
+                  <option value="newest">Newest</option>
+                  <option value="oldest">Oldest</option>
+                  <option value="name">Name</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="flex-1 overflow-y-auto cs-message-scroll p-4 sm:p-6">
+              {imageLibraryLoading ? (
+                <div className="h-full grid place-items-center text-sm text-white/45">
+                  Loading your media…
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                  {mediaLibrarySection === 'uploads' &&
+                    (mediaLibraryFilter === 'recent' ||
+                      mediaLibraryFilter === 'all' ||
+                      mediaLibraryFilter === 'images') && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="aspect-square rounded-2xl border border-dashed border-white/20 bg-white/[0.035] grid place-items-center hover:border-[#b8f000]/60 hover:bg-[#b8f000]/5 disabled:opacity-40"
+                      >
+                        <span className="grid place-items-center gap-2 text-white/80">
+                          <span className="grid h-12 w-12 place-items-center rounded-full border border-white/20 bg-white/5 text-2xl">
+                            ↑
+                          </span>
+                          <span className="text-sm font-semibold">Upload files</span>
+                        </span>
+                      </button>
+                    )}
+
+                  {visibleLibraryAssets.map((asset) => {
+                    const src = assetUrl(asset.file_url)
+                    const picked = attachments.find(
+                      (attachment) => attachment.url === asset.file_url,
+                    )
+                    const isImage = asset.file_type.startsWith('image/')
+                    const isVideo = asset.file_type.startsWith('video/')
+                    const isAudio = asset.file_type.startsWith('audio/')
+                    const isLiked = likedAssetIds.includes(asset.id)
+                    return (
+                      <div
+                        key={asset.id}
+                        className={`group relative rounded-2xl overflow-hidden border bg-[#292b2e] ${
+                          picked
+                            ? 'border-[#b8f000] ring-2 ring-[#b8f000]/25'
+                            : 'border-white/5 hover:border-white/20'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => toggleLibraryAttachment(asset)}
+                          className="relative block w-full aspect-square text-left disabled:opacity-50"
+                          title={isImage ? 'Select image' : 'Only images can be used as Seedance references'}
+                        >
+                          {isImage && src ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={src}
+                              alt={asset.file_name}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : isVideo && src ? (
+                            <video src={src} muted className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="h-full grid place-items-center text-white/45">
+                              <span className="text-center">
+                                <span className="block text-3xl mb-2">
+                                  {isAudio ? '♪' : isVideo ? '▶' : '▧'}
+                                </span>
+                                <span className="text-[10px] uppercase tracking-wider">
+                                  {asset.file_type.split('/')[0] || 'file'}
+                                </span>
+                              </span>
+                            </span>
+                          )}
+                          {picked ? (
+                            <span className="absolute top-2 left-2 h-6 w-6 rounded-full bg-[#b8f000] text-black grid place-items-center text-xs font-black">
+                              ✓
+                            </span>
+                          ) : null}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={isLiked ? 'Remove from liked' : 'Add to liked'}
+                          onClick={() => toggleLikedAsset(asset.id)}
+                          className={`absolute top-2 right-2 h-8 w-8 rounded-full grid place-items-center backdrop-blur ${
+                            isLiked
+                              ? 'bg-[#b8f000] text-black'
+                              : 'bg-black/55 text-white/80 opacity-0 group-hover:opacity-100'
+                          }`}
+                        >
+                          {isLiked ? '♥' : '♡'}
+                        </button>
+                        <div className="p-2.5 space-y-2">
+                          <p className="truncate text-[11px] text-white/75" title={asset.file_name}>
+                            {asset.file_name}
+                          </p>
+                          {picked && isImage ? (
+                            <div className="flex gap-1.5">
+                              <select
+                                value={picked.role || 'reference'}
+                                onChange={(event) =>
+                                  setAttachmentRole(
+                                    picked,
+                                    event.target.value as ChatAttachment['role'],
+                                  )
+                                }
+                                className="min-w-0 flex-1 rounded-lg bg-black/45 border border-white/10 px-1.5 py-1 text-[10px] text-white/80"
+                              >
+                                <option value="reference">Reference</option>
+                                <option value="product">Product</option>
+                                <option value="character">Character</option>
+                                <option value="scene">Scene</option>
+                                <option value="logo">Logo</option>
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => selectSavedStill(asset)}
+                                className={`rounded-lg px-2 py-1 text-[10px] border ${
+                                  approvedImageUrl === asset.file_url
+                                    ? 'border-[#b8f000] text-[#b8f000]'
+                                    : 'border-white/10 text-white/65'
+                                }`}
+                              >
+                                Still
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void startVideoFromSavedStill(asset)}
+                                className="rounded-lg border border-[#b8f000]/40 px-2 py-1 text-[10px] text-[#b8f000] disabled:opacity-40"
+                                title="Use this still and start Seedance"
+                              >
+                                Video
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {!imageLibraryLoading && visibleLibraryAssets.length === 0 && (
+                <p className="py-12 text-center text-sm text-white/40">
+                  {mediaLibrarySection === 'generations'
+                    ? 'Generated images will appear here automatically.'
+                    : mediaLibrarySection === 'liked'
+                      ? 'Like media with the heart button to keep it here.'
+                      : mediaLibraryFilter === 'videos' || mediaLibraryFilter === 'audio'
+                        ? `No ${mediaLibraryFilter} in this library yet.`
+                        : 'Upload your first reference image.'}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-t border-white/10 bg-[#17181b]">
+              <p className="text-xs text-white/45">
+                {attachments.length} of 9 selected · choose a role for each image
+              </p>
+              <button
+                type="button"
+                onClick={() => setImageLibraryOpen(false)}
+                className="rounded-full bg-[#b8f000] px-5 py-2 text-xs font-bold text-black"
+              >
+                Add selected
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-2 px-1">
           {attachments.map((a) => (
@@ -943,7 +1506,7 @@ export default function CreativeStudioTab({
                 onChange={(event) =>
                   setAttachmentRole(
                     a,
-                    event.target.value as 'product' | 'logo' | 'reference',
+                    event.target.value as ChatAttachment['role'],
                   )
                 }
                 className="mt-1 block w-full max-w-28 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white"
@@ -951,7 +1514,9 @@ export default function CreativeStudioTab({
               >
                 <option value="product">Product</option>
                 <option value="logo">Brand logo</option>
-                <option value="reference">Scene/style</option>
+                <option value="scene">Scene / location</option>
+                <option value="character">Character</option>
+                <option value="reference">Other reference</option>
               </select>
               <button
                 type="button"
@@ -972,7 +1537,7 @@ export default function CreativeStudioTab({
           onKeyDown={onKeyDown}
           rows={hasMessages ? 3 : 4}
           placeholder="Make a 10s UGC product video for my campaign…"
-          className="w-full resize-none bg-transparent px-4 pt-4 pb-2 text-[15px] text-white placeholder:text-white/35 focus:outline-none"
+          className="w-full resize-none overflow-y-auto cs-message-scroll bg-transparent px-4 pt-4 pb-2 text-[15px] text-white placeholder:text-white/35 focus:outline-none max-h-[min(9rem,22vh)]"
           disabled={busy}
         />
 
@@ -987,9 +1552,9 @@ export default function CreativeStudioTab({
           />
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setImageLibraryOpen(true)}
             className="h-9 w-9 rounded-full border border-white/15 bg-white/5 text-white/80 hover:bg-white/10 text-lg"
-            title="Upload reference"
+            title="Open uploads and generated media"
           >
             +
           </button>
@@ -1120,9 +1685,28 @@ export default function CreativeStudioTab({
             Product photo locked
           </span>
         ) : null}
+        {characterReferenceUrl ? (
+          <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
+            Character locked
+          </span>
+        ) : null}
         <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
           {phaseLabel}
         </span>
+        {productReferenceUrl && (
+          <label
+            className="flex items-center gap-1.5"
+            title="Turn off to send only your uploaded product/logo to Seedance. Use per-frame checkboxes to pick which storyboard stills are included."
+          >
+            <input
+              type="checkbox"
+              checked={useStoryboardReferences}
+              disabled={busy}
+              onChange={(event) => setUseStoryboardReferences(event.target.checked)}
+            />
+            Use selected storyboard frames in video
+          </label>
+        )}
         <select
           value={duration}
           onChange={(e) => setDuration(e.target.value as DurationId)}
@@ -1134,6 +1718,14 @@ export default function CreativeStudioTab({
             </option>
           ))}
         </select>
+        {duration !== 'auto' && Number(duration) > 15 ? (
+          <span
+            className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
+            title="Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."
+          >
+            {Math.ceil(Number(duration) / 15)} continuity-linked chapters
+          </span>
+        ) : null}
         <select
           value={aspect}
           onChange={(e) => setAspect(e.target.value as AspectId)}
@@ -1174,7 +1766,7 @@ export default function CreativeStudioTab({
   )
 
   return (
-    <div className="w-full max-w-[1600px] mx-auto p-4 md:p-6">
+    <div className="creative-studio-light w-full max-w-[1600px] mx-auto p-4 md:p-6">
       <div className="rounded-2xl border border-[#2a2b30] bg-[#0c0d10] overflow-hidden min-h-[72vh] flex shadow-soft">
         {/* Chat history sidebar (ChatGPT-style) */}
         <aside
@@ -1311,8 +1903,8 @@ export default function CreativeStudioTab({
                 </h2>
               </div>
               <p className="text-sm text-white/45 max-w-lg mx-auto">
-                Like Higgsfield Supercomputer: we draft a plan, generate a GPT Image 2 background
-                still, you approve or regenerate, then Seedance 2.0 animates that frame.
+                Plan your ad, review a GPT Image 2 still, then generate a Seedance 2.0 video.
+                Label uploaded images as product, scene, character or brand logo to guide continuity.
               </p>
             </div>
             {composerCard}
@@ -1324,7 +1916,9 @@ export default function CreativeStudioTab({
                 const isUser = m.role === 'user'
                 const preview = assetUrl(m.mediaUrl || null)
                 const actions =
-                  m.suggestedActions && m.suggestedActions.length
+                  m.status === 'failed' && m.mediaMode === 'video'
+                    ? (['approve_next'] as PipelineAction[])
+                    : m.suggestedActions && m.suggestedActions.length
                     ? m.suggestedActions
                     : m.mediaMode === 'image' && m.status === 'done' && m.mediaUrl
                       ? (['regenerate_image', 'approve_next'] as PipelineAction[])
@@ -1348,7 +1942,10 @@ export default function CreativeStudioTab({
                       <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
                         {isUser ? 'You' : 'Creative Studio'}
                       </p>
-                      <p className="text-sm whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                      <CsMessageContent
+                        content={m.content}
+                        variant={isUser ? 'user' : 'assistant'}
+                      />
 
                       {!isUser && (m.imagePrompt || m.videoPrompt) && !preview && (
                         <div className="rounded-lg bg-black/30 border border-white/10 p-2 space-y-1 text-[11px] text-white/55">
@@ -1423,30 +2020,59 @@ export default function CreativeStudioTab({
                           m.status === 'queued' ||
                           m.status === 'running') && (
                           <div className="pt-2 space-y-2">
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
-                              Storyboard · {m.storyboard.length} scenes
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                                Storyboard · {m.storyboard.length} scenes
+                              </p>
+                              <p className="text-[10px] text-white/45">
+                                {storyboardFramesForVideo(m.storyboard).length} selected for Seedance
+                              </p>
+                            </div>
+                            <p className="text-[10px] text-white/40">
+                              Tick frames to include in video. Discard wrong product/person shots before Approve.
                             </p>
                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                               {m.storyboard.map((frame) => {
                                 const src = assetUrl(frame.url || null)
+                                const selected =
+                                  Boolean(frame.url) &&
+                                  frame.selected !== false &&
+                                  !frame.discarded
                                 return (
                                   <div
                                     key={frame.id}
-                                    className="rounded-xl border border-white/10 bg-black/40 overflow-hidden"
+                                    className={`rounded-xl border overflow-hidden bg-black/40 ${
+                                      frame.discarded
+                                        ? 'border-white/10 opacity-45'
+                                        : selected
+                                          ? 'border-[#b8f000]/70 ring-1 ring-[#b8f000]/40'
+                                          : 'border-white/10'
+                                    }`}
                                   >
                                     {src ? (
-                                      // eslint-disable-next-line @next/next/no-img-element
-                                      <img
-                                        src={src}
-                                        alt={frame.title || 'Scene'}
-                                        className="w-full aspect-[9/16] object-cover bg-black"
-                                      />
+                                      <button
+                                        type="button"
+                                        className="block w-full"
+                                        onClick={() =>
+                                          setPreviewFrame({
+                                            src,
+                                            title: frame.title || `Scene ${frame.index}`,
+                                          })
+                                        }
+                                      >
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img
+                                          src={src}
+                                          alt={frame.title || 'Scene'}
+                                          className="w-full aspect-[9/16] object-cover bg-black"
+                                        />
+                                      </button>
                                     ) : (
                                       <div className="w-full aspect-[9/16] grid place-items-center text-[10px] text-white/35 animate-pulse">
                                         Rendering…
                                       </div>
                                     )}
-                                    <div className="px-2 py-1.5 border-t border-white/10">
+                                    <div className="px-2 py-1.5 border-t border-white/10 space-y-1.5">
                                       <p className="text-[10px] font-semibold text-[#b8f000] truncate">
                                         {frame.title || `Scene ${frame.index}`}
                                       </p>
@@ -1454,6 +2080,73 @@ export default function CreativeStudioTab({
                                         <p className="text-[9px] text-white/40 truncate">
                                           {frame.overlays[0]}
                                         </p>
+                                      ) : null}
+                                      {src ? (
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <label className="flex items-center gap-1 text-[9px] text-white/70">
+                                            <input
+                                              type="checkbox"
+                                              checked={selected}
+                                              disabled={busy || frame.discarded}
+                                              onChange={(event) =>
+                                                patchStoryboardFrame(m.id, frame.id, {
+                                                  selected: event.target.checked,
+                                                  discarded: false,
+                                                })
+                                              }
+                                            />
+                                            Use
+                                          </label>
+                                          <button
+                                            type="button"
+                                            disabled={busy}
+                                            className="text-[9px] px-2 py-0.5 rounded-full border border-white/15 text-white/75"
+                                            onClick={() =>
+                                              setPreviewFrame({
+                                                src,
+                                                title: frame.title || `Scene ${frame.index}`,
+                                              })
+                                            }
+                                          >
+                                            Preview
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={busy}
+                                            className={`text-[9px] px-2 py-0.5 rounded-full border ${
+                                              characterReferenceUrl === frame.url
+                                                ? 'border-[#b8f000] bg-[#b8f000]/15 text-[#b8f000]'
+                                                : 'border-white/15 text-white/75'
+                                            }`}
+                                            onClick={() => {
+                                              if (!frame.url) return
+                                              setCharacterReferenceUrl(frame.url)
+                                              patchStoryboardFrame(m.id, frame.id, {
+                                                selected: true,
+                                                discarded: false,
+                                              })
+                                              toast.success('Character anchor selected')
+                                            }}
+                                          >
+                                            {characterReferenceUrl === frame.url ? 'Character ✓' : 'Character'}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            disabled={busy}
+                                            className="text-[9px] px-2 py-0.5 rounded-full border border-red-400/35 text-red-200"
+                                            onClick={() => {
+                                              if (characterReferenceUrl === frame.url) {
+                                                setCharacterReferenceUrl('')
+                                              }
+                                              patchStoryboardFrame(m.id, frame.id, {
+                                                selected: false,
+                                                discarded: true,
+                                              })
+                                            }}
+                                          >
+                                            Discard
+                                          </button>
+                                        </div>
                                       ) : null}
                                     </div>
                                   </div>
@@ -1496,6 +2189,25 @@ export default function CreativeStudioTab({
                                 Open Variants
                               </Link>
                             )}
+                            {m.mediaMode === 'image' && m.mediaUrl ? (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setCharacterReferenceUrl(m.mediaUrl || '')
+                                  toast.success('Character anchor selected')
+                                }}
+                                className={`text-[11px] font-semibold px-3 py-1.5 rounded-full border ${
+                                  characterReferenceUrl === m.mediaUrl
+                                    ? 'border-[#b8f000] bg-[#b8f000]/15 text-[#b8f000]'
+                                    : 'border-white/20 bg-white/10 text-white'
+                                }`}
+                              >
+                                {characterReferenceUrl === m.mediaUrl
+                                  ? 'Character locked ✓'
+                                  : 'Use as character'}
+                              </button>
+                            ) : null}
                             {m.model && (
                               <span className="text-[10px] text-white/40 self-center">
                                 {m.model}
@@ -1550,6 +2262,42 @@ export default function CreativeStudioTab({
         )}
         </div>
       </div>
+
+      {previewFrame ? (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setPreviewFrame(null)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setPreviewFrame(null)
+          }}
+          role="presentation"
+        >
+          <div
+            className="max-w-3xl w-full rounded-2xl border border-white/15 bg-[#121316] p-4 space-y-3"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Storyboard frame preview"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white truncate">{previewFrame.title}</p>
+              <button
+                type="button"
+                className="text-xs px-3 py-1 rounded-full border border-white/20 text-white/80"
+                onClick={() => setPreviewFrame(null)}
+              >
+                Close
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={previewFrame.src}
+              alt={previewFrame.title}
+              className="w-full max-h-[75vh] object-contain rounded-xl bg-black"
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

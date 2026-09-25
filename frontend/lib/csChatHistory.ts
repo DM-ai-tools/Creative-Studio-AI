@@ -16,6 +16,15 @@ export interface CsStoryboardFrame {
   imagePrompt?: string
   overlays?: string[]
   status?: string
+  /** When false or discarded, frame is excluded from Seedance references. */
+  selected?: boolean
+  discarded?: boolean
+}
+
+export function storyboardFramesForVideo(frames: CsStoryboardFrame[] | undefined): string[] {
+  return (frames || [])
+    .filter((frame) => frame.url && frame.selected !== false && !frame.discarded)
+    .map((frame) => frame.url as string)
 }
 
 export interface CsChatAttachment {
@@ -24,7 +33,7 @@ export interface CsChatAttachment {
   url: string
   previewUrl?: string
   mime?: string
-  role?: 'product' | 'logo' | 'reference'
+  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference'
 }
 
 export interface CsChatMessage {
@@ -60,6 +69,7 @@ export interface CsChatSession {
   approvedImageUrl: string
   productReferenceUrl: string
   logoReferenceUrl: string
+  characterReferenceUrl: string
   additionalReferenceUrls: string[]
   phase: string
 }
@@ -100,6 +110,7 @@ export function emptyCsSession(title = 'New chat'): CsChatSession {
     approvedImageUrl: '',
     productReferenceUrl: '',
     logoReferenceUrl: '',
+    characterReferenceUrl: '',
     additionalReferenceUrls: [],
     phase: '',
   }
@@ -141,6 +152,7 @@ export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSe
             approvedImageUrl: String(s.approvedImageUrl || ''),
             productReferenceUrl: String(s.productReferenceUrl || ''),
             logoReferenceUrl: String(s.logoReferenceUrl || ''),
+            characterReferenceUrl: String(s.characterReferenceUrl || ''),
             additionalReferenceUrls: Array.isArray(s.additionalReferenceUrls)
               ? s.additionalReferenceUrls.map(String).filter(Boolean).slice(0, 7)
               : [],
@@ -183,6 +195,7 @@ export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSe
         session.imagePrompt = String(parsed?.imagePrompt || '')
         session.videoPrompt = String(parsed?.videoPrompt || '')
         session.approvedImageUrl = String(parsed?.approvedImageUrl || '')
+        session.characterReferenceUrl = String(parsed?.characterReferenceUrl || '')
         session.phase = String(parsed?.phase || '')
         saveCsChatSessions(briefId, brandId, [session])
         setCsActiveChatId(briefId, brandId, session.id)

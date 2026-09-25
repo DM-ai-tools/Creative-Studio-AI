@@ -1,4 +1,4 @@
-"""Plan and stitch multi-scene Seedance videos (up to 90s) via Higgsfield API."""
+"""Plan, continuity-chain, and stitch multi-scene Seedance videos."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,62 @@ logger = logging.getLogger(__name__)
 
 def is_seedance_job_set_type(job_set_type: str | None) -> bool:
     return (job_set_type or "").lower() in SEEDANCE_JOB_TYPES
+
+
+def coalesce_shot_windows(
+    windows: list[tuple[float, float]], clip_cap: float = 15.0
+) -> list[tuple[float, float]]:
+    """Pack contiguous authored shots into provider chapters of at most clip_cap."""
+    if not windows:
+        return []
+    cap = max(4.0, float(clip_cap or 15.0))
+    chapters: list[tuple[float, float]] = []
+    chapter_start, chapter_end = windows[0]
+    for start, end in windows[1:]:
+        if abs(start - chapter_end) > 0.05:
+            raise ValueError("Shot windows must be contiguous before chapter planning")
+        if end - chapter_start <= cap + 0.05:
+            chapter_end = end
+            continue
+        chapters.append((chapter_start, chapter_end))
+        chapter_start, chapter_end = start, end
+    chapters.append((chapter_start, chapter_end))
+    return chapters
+
+
+def build_continuity_contract(
+    *,
+    segment_index: int,
+    segment_count: int,
+    start: float,
+    end: float,
+    total_duration: float,
+    has_previous_frame: bool,
+) -> str:
+    """Provider-facing handoff rules shared by every chapter in a long film."""
+    opening = (
+        "The CONTINUITY FRAME is the exact final frame of the previous chapter. "
+        "Begin from the same pose, expression, wardrobe, object positions, camera axis, "
+        "lighting and scene state, then continue the action forward without replaying it."
+        if has_previous_frame
+        else "Begin from the approved opening references and establish every locked identity clearly."
+    )
+    closing = (
+        "Finish on a clean, stable handoff frame with the character and important props visible "
+        "so the next chapter can continue from that exact state."
+        if segment_index + 1 < segment_count
+        else "Complete the story and hold the authored final composition."
+    )
+    return (
+        "\n\nLONG-FORM CONTINUITY CONTRACT:\n"
+        f"Chapter {segment_index + 1}/{segment_count}, global timeline {start:g}–{end:g}s "
+        f"of {total_duration:g}s. {opening} "
+        "Keep the same people: identical face, age, build, hair, skin tone and wardrobe. "
+        "Keep the same product geometry, colours, scene layout, props, time of day and grade. "
+        "Camera movement may follow this chapter's direction, but do not reset the cast, set, "
+        "product or story state. Do not repeat an earlier chapter. "
+        f"{closing}"
+    )
 
 
 def seedance_multiscene_requested(job_set_type: str, requested_duration: int) -> bool:
@@ -284,6 +341,65 @@ def extract_last_frame_png(video_path: Path) -> bytes | None:
     return _extract_png_frame(ffmpeg, video_path, seconds=at)
 
 
+def save_continuity_frame(video_path: Path, *, tenant_id: str) -> str:
+    """Persist a compact final-frame anchor for the next Seedance chapter."""
+    png = extract_last_frame_png(video_path)
+    if not png:
+        raise RuntimeError("Could not extract the final frame for long-video continuity")
+    try:
+        from PIL import Image
+
+        output = BytesIO()
+        with Image.open(BytesIO(png)) as image:
+            image.convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
+        content = output.getvalue()
+        suffix = ".jpg"
+        content_type = "image/jpeg"
+    except Exception:
+        content = png
+        suffix = ".png"
+        content_type = "image/png"
+    saved = file_service.save_bytes(
+        content=content,
+        tenant_id=tenant_id,
+        subfolder="generated/continuity",
+        suffix=suffix,
+        content_type=content_type,
+    )
+    return str(saved["file_url"])
+
+
+def save_privacy_safe_scene_frame(video_path: Path, *, tenant_id: str) -> str:
+    """Persist the lower scene/product area without resubmitting a person's face.
+
+    BytePlus can reject a generated photoreal handoff frame as privacy-sensitive.
+    This crop keeps useful object, wardrobe and set continuity while deliberately
+    excluding the usual face area. It is submitted as a scene reference, never as
+    a character identity reference.
+    """
+    png = extract_last_frame_png(video_path)
+    if not png:
+        raise RuntimeError("Could not extract a privacy-safe scene handoff")
+
+    from PIL import Image
+
+    output = BytesIO()
+    with Image.open(BytesIO(png)) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        top = min(height - 2, max(0, int(round(height * 0.55))))
+        cropped = image.crop((0, top, width, height))
+        cropped.save(output, format="JPEG", quality=90, optimize=True)
+    saved = file_service.save_bytes(
+        content=output.getvalue(),
+        tenant_id=tenant_id,
+        subfolder="generated/continuity-safe",
+        suffix=".jpg",
+        content_type="image/jpeg",
+    )
+    return str(saved["file_url"])
+
+
 async def upload_frame_png(png_bytes: bytes, *, tenant_id: str) -> str:
     """Upload a video last-frame as JPEG to Higgsfield (for stitch continuity)."""
     from app.services.media.higgsfield_client_service import (
@@ -310,6 +426,84 @@ async def upload_frame_png(png_bytes: bytes, *, tenant_id: str) -> str:
 
 
 def concat_video_files(paths: list[Path], output_path: Path) -> None:
+    """Preserve later audio even if the first clip is silent."""
+    from app.services.ffmpeg_util import probe_has_audio
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(paths) <= 1:
+        return _concat_encoded_video_files(paths, output_path)
+    audio_flags = [probe_has_audio(path) for path in paths]
+    if any(flag is None for flag in audio_flags):
+        raise RuntimeError("Cannot verify clip audio streams before stitching")
+    if all(audio_flags) or not any(audio_flags):
+        return _concat_encoded_video_files(paths, output_path)
+    ffmpeg = require_ffmpeg()
+    with tempfile.TemporaryDirectory(prefix="cs_concat_") as tmp:
+        normalized: list[Path] = []
+        for i, (path, has_audio) in enumerate(zip(paths, audio_flags)):
+            duration = probe_video_duration(path)
+            if duration is None:
+                raise RuntimeError("Cannot determine clip duration before audio normalization")
+            output = Path(tmp) / f"{i}.mp4"
+            cmd = [ffmpeg, "-y", "-i", str(path)]
+            if not has_audio:
+                cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            cmd += [
+                "-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                "-af", "apad", "-t", str(duration), str(output),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Clip audio normalization failed: {proc.stderr[-400:]}")
+            normalized.append(output)
+        _concat_encoded_video_files(normalized, output_path)
+
+
+def conform_shot_duration(source: Path, output: Path, seconds: float) -> Path:
+    """Trim excess provider footage without slowing a short clip.
+
+    A short Seedance result must be continued with another generation. Retiming
+    it to fill the authored window produces visibly slow motion and invents no
+    missing action, so short media is returned unchanged.
+    """
+    actual = probe_video_duration(source)
+    if actual is None or actual <= 0.1:
+        raise RuntimeError("Cannot determine provider clip duration")
+    target = max(0.1, float(seconds))
+    if actual <= target + 0.05:
+        if actual < target - 0.05:
+            logger.info(
+                "Seedance clip is %.3fs for a %.3fs window; keeping normal speed "
+                "so the caller can generate a continuation",
+                actual,
+                target,
+            )
+        return source
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Trimming %.3fs Seedance clip to the remaining %.3fs authored window",
+        actual,
+        target,
+    )
+
+    command = [
+        require_ffmpeg(), "-v", "error", "-y", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?", "-t", f"{target:.6f}",
+        "-vf", "fps=24",
+    ]
+    command += [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "aac", "-movflags", "+faststart", str(output),
+    ]
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    if proc.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"Shot edit failed: {proc.stderr[-400:]}")
+    return output
+
+
+def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
     """Concatenate MP4 clips with re-encode (stream-copy often yields wrong duration)."""
     if not paths:
         raise ValueError("No video clips to concatenate")
@@ -360,9 +554,32 @@ def concat_video_files(paths: list[Path], output_path: Path) -> None:
             str(output_path),
         ]
         proc2 = subprocess.run(reencode_cmd, capture_output=True, text=True)
-        if proc2.returncode != 0 or not output_path.is_file():
+        expected_duration = sum(
+            duration
+            for duration in (probe_video_duration(path) for path in paths)
+            if duration is not None
+        )
+        output_duration = (
+            probe_video_duration(output_path)
+            if output_path.is_file() and output_path.stat().st_size > 0
+            else None
+        )
+        duration_tolerance = max(0.5, expected_duration * 0.05)
+        valid_output = bool(
+            output_duration
+            and expected_duration > 0
+            and output_duration >= expected_duration - duration_tolerance
+        )
+        if proc2.returncode != 0 and valid_output:
+            logger.warning(
+                "FFmpeg returned %s after producing a valid %.3fs stitched video; keeping it",
+                proc2.returncode,
+                output_duration,
+            )
+        elif proc2.returncode != 0 or not valid_output:
             raise RuntimeError(
-                f"Failed to stitch video clips: {(proc2.stderr or proc2.stdout or '')[:400]}"
+                "Failed to stitch video clips: "
+                f"{(proc2.stderr or proc2.stdout or 'no FFmpeg diagnostic')[-400:]}"
             )
     finally:
         list_path.unlink(missing_ok=True)

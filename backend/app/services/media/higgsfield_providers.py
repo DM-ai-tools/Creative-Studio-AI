@@ -100,7 +100,9 @@ class HiggsfieldImageProvider(ImageGenerationProvider):
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
         reference_image_url: str | None = None,
+        reference_purpose: str = "product",
     ) -> dict:
+        _ = reference_purpose
         spec = resolve_image_spec(model)
         if not spec:
             return {

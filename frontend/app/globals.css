@@ -259,6 +259,147 @@ input:focus, textarea:focus, select:focus {
 .stagger-3 { animation-delay: 0.12s; }
 .stagger-4 { animation-delay: 0.16s; }
 
+/* Creative Studio uses the same light surface system as the other brief tabs. */
+.creative-studio-light {
+  color: var(--charcoal);
+}
+
+.creative-studio-light [class~="bg-[#0c0d10]"],
+.creative-studio-light [class~="bg-[#0a0b0e]"],
+.creative-studio-light [class~="bg-[#121316]"],
+.creative-studio-light [class~="bg-[#151619]"],
+.creative-studio-light [class~="bg-[#16171a]"],
+.creative-studio-light [class~="bg-[#17181b]"],
+.creative-studio-light [class~="bg-[#1a1b1e]"],
+.creative-studio-light [class~="bg-[#1d1f22]"] {
+  background-color: var(--surface-elevated) !important;
+}
+
+.creative-studio-light [class~="bg-[#292b2e]"],
+.creative-studio-light [class~="bg-white/5"],
+.creative-studio-light [class~="bg-white/10"],
+.creative-studio-light [class~="bg-white/12"],
+.creative-studio-light [class~="bg-white/15"],
+.creative-studio-light [class~="bg-white/[0.025]"],
+.creative-studio-light [class~="bg-white/[0.03]"],
+.creative-studio-light [class~="bg-white/[0.035]"],
+.creative-studio-light [class~="bg-black/30"],
+.creative-studio-light [class~="bg-black/25"],
+.creative-studio-light [class~="bg-black/35"],
+.creative-studio-light [class~="bg-black/40"],
+.creative-studio-light [class~="bg-black/45"],
+.creative-studio-light [class~="bg-black/55"],
+.creative-studio-light [class~="bg-black/70"],
+.creative-studio-light [class~="bg-black"] {
+  background-color: var(--surface-hover) !important;
+}
+
+.creative-studio-light [class~="bg-black/75"],
+.creative-studio-light [class~="bg-black/80"] {
+  background-color: rgba(51, 52, 59, 0.28) !important;
+}
+
+.creative-studio-light .text-white,
+.creative-studio-light [class~="text-white/60"],
+.creative-studio-light [class~="text-white/65"],
+.creative-studio-light [class~="text-white/70"],
+.creative-studio-light [class~="text-white/75"],
+.creative-studio-light [class~="text-white/80"],
+.creative-studio-light [class~="text-white/85"],
+.creative-studio-light [class~="text-white/90"] {
+  color: var(--charcoal) !important;
+}
+
+.creative-studio-light [class~="text-white/35"],
+.creative-studio-light [class~="text-white/40"],
+.creative-studio-light [class~="text-white/45"],
+.creative-studio-light [class~="text-white/50"],
+.creative-studio-light [class~="text-white/55"] {
+  color: var(--muted) !important;
+}
+
+.creative-studio-light [class*="border-white/"] {
+  border-color: var(--border) !important;
+}
+
+.creative-studio-light [class~="border-[#2a2b30]"] {
+  border-color: var(--border) !important;
+}
+
+.creative-studio-light [class~="bg-[#b8f000]"] {
+  background-color: var(--accent) !important;
+}
+
+.creative-studio-light [class~="bg-[#b8f000]/5"] {
+  background-color: rgba(163, 209, 107, 0.05) !important;
+}
+
+.creative-studio-light [class~="bg-[#b8f000]/10"] {
+  background-color: rgba(163, 209, 107, 0.10) !important;
+}
+
+.creative-studio-light [class~="bg-[#b8f000]/15"] {
+  background-color: rgba(163, 209, 107, 0.15) !important;
+}
+
+.creative-studio-light [class*="text-[#b8f000]"] {
+  color: #668f38 !important;
+}
+
+.creative-studio-light [class*="border-[#b8f000]"] {
+  border-color: var(--accent-dark) !important;
+}
+
+.creative-studio-light [class*="ring-[#b8f000]"] {
+  --tw-ring-color: rgba(163, 209, 107, 0.4) !important;
+}
+
+.creative-studio-light [class~="bg-red-500/15"],
+.creative-studio-light [class~="bg-red-500/25"] {
+  background-color: #fef2f2 !important;
+}
+
+.creative-studio-light [class*="border-red-400/"] {
+  border-color: #fecaca !important;
+}
+
+.creative-studio-light [class~="text-red-200"],
+.creative-studio-light [class~="text-red-300"] {
+  color: #b91c1c !important;
+}
+
+.creative-studio-light [class~="text-amber-200/90"] {
+  color: #a16207 !important;
+}
+
+.creative-studio-light [class~="bg-red-500/90"] {
+  color: #ffffff !important;
+}
+
+.creative-studio-light textarea,
+.creative-studio-light select {
+  color: var(--charcoal);
+}
+
+.creative-studio-light textarea::placeholder {
+  color: var(--muted) !important;
+  opacity: 0.72;
+}
+
+.creative-studio-light select option {
+  background: var(--surface-elevated) !important;
+  color: var(--charcoal) !important;
+}
+
+.creative-studio-light aside {
+  background-color: #f8f9fb !important;
+}
+
+.creative-studio-light > div {
+  background-color: var(--surface-elevated) !important;
+  box-shadow: var(--shadow-card);
+}
+
 /* Page loader */
 .page-loader-spinner { width: 2rem; height: 2rem; flex-shrink: 0; }
 
@@ -276,6 +417,26 @@ input:focus, textarea:focus, select:focus {
 .glow-divider {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(163,209,107,0.3), transparent);
+}
+
+/* Creative Studio — compact long chat prompts */
+.cs-message-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(184, 240, 0, 0.45) rgba(255, 255, 255, 0.06);
+}
+.cs-message-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.cs-message-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+}
+.cs-message-scroll::-webkit-scrollbar-thumb {
+  background: rgba(184, 240, 0, 0.45);
+  border-radius: 999px;
+}
+.cs-message-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(184, 240, 0, 0.65);
 }
 
 /* ---------------------------------------------

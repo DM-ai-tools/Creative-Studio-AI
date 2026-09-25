@@ -48,7 +48,7 @@ Respond with ONLY valid JSON (no markdown fences):
   "scenes": [
     {"title": "Hook", "image_prompt": "visual still for this scene only — NO on-image text", "overlays": ["optional overlay copy"]}
   ],
-  "duration_seconds": integer 5-600 (or null when Auto/script-derived),
+  "duration_seconds": integer 5-120 (or null when Auto/script-derived),
   "aspect": "9/16" | "1/1" | "16/9" | "4/3",
   "suggested_actions": ["generate_image"]
 }
@@ -102,13 +102,13 @@ def _explicit_duration_from_text(text: str) -> int | None:
         raw,
     )
     if seconds:
-        return max(5, min(600, int(seconds.group(1))))
+        return max(5, min(120, int(seconds.group(1))))
     minutes = re.search(
         r"(?i)\b(\d{1,2})\s*[- ]?\s*(?:minutes?|mins?)\b",
         raw,
     )
     if minutes:
-        return max(5, min(600, int(minutes.group(1)) * 60))
+        return max(5, min(120, int(minutes.group(1)) * 60))
     return None
 
 
@@ -147,7 +147,7 @@ def _normalize_duration(value: Any, fallback: int) -> int:
         n = int(fallback or 10)
     if n <= 5:
         return 5
-    return min(600, n)
+    return min(120, n)
 
 
 def _motion_prompt_is_weak(prompt: str) -> bool:
@@ -197,7 +197,11 @@ def _heuristic_timed_motion(
         chunks.append(chunks[-1])
     clips: list[str] = []
     for i, (a, b) in enumerate(windows):
-        beat = chunks[i][:420]
+        # Partition all instructions across the windows; the old first-three-only
+        # fallback silently lost the closing action and CTA in longer briefs.
+        first = i * len(chunks) // len(windows)
+        last = (i + 1) * len(chunks) // len(windows)
+        beat = ". ".join(chunks[first:last])
         if i == 0 and still:
             beat = (
                 f"Start locked to the approved opening still, then immediately move: {beat}. "
@@ -219,7 +223,7 @@ def _heuristic_timed_motion(
         f"Camera: motivated handheld / gimbal moves; actions must progress beat by beat.\n"
         f"{audio}\n"
         f"STRICT: no on-screen text, captions, logos, or watermarks."
-    )[:4800]
+    )
 
 
 async def _ensure_rich_motion_prompt(
@@ -241,7 +245,7 @@ async def _ensure_rich_motion_prompt(
             motion = (
                 f"{motion}\n\nAUDIO: Native diegetic sound — ambient + foley; "
                 "short natural dialogue only if it fits. Not silent."
-            )[:4800]
+            )
         return motion
 
     import asyncio
@@ -271,12 +275,12 @@ async def _ensure_rich_motion_prompt(
             if sound_on
             else "End with AUDIO: silent — no speech/music."
         )
-        + " Max 4500 characters."
+        + " Preserve every requested action and narration line. Max 12000 characters."
     )
     user_msg = (
         f"Brand: {brand_name or '—'}\nProduct: {product_name or '—'}\n"
         f"Duration: {duration_seconds}s\nSound: {'on' if sound_on else 'off'}\n\n"
-        f"USER BRIEF:\n{(user_brief or '')[:3000]}\n\n"
+        f"USER BRIEF:\n{user_brief or ''}\n\n"
         f"OPENING STILL PROMPT:\n{(image_prompt or '')[:1200]}\n\n"
         f"CURRENT (WEAK) VIDEO PROMPT:\n{(video_prompt or '')[:1200]}\n\n"
         "Write the full timed Seedance prompt now."
@@ -287,7 +291,7 @@ async def _ensure_rich_motion_prompt(
             lambda: client.chat.completions.create(
                 model=model_slug,
                 temperature=0.35,
-                max_tokens=1600,
+                max_tokens=4000,
                 messages=[
                     {"role": "system", "content": expand_system},
                     {"role": "user", "content": user_msg},
@@ -297,7 +301,7 @@ async def _ensure_rich_motion_prompt(
         raw = (completion.choices[0].message.content or "").strip()
         raw = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", raw).strip()
         if len(raw) >= 180:
-            return raw[:4800]
+            return raw
     except Exception as exc:
         logger.warning("Motion prompt expand failed, using heuristic: %s", exc)
     return fallback
@@ -342,7 +346,7 @@ async def _llm_plan(
         content = str(m.get("content") or "").strip()
         if not content:
             continue
-        history_lines.append(f"{role.upper()}: {content[:2000]}")
+        history_lines.append(f"{role.upper()}: {content}")
 
     context_bits = [
         f"Mode: {mode_norm}",
@@ -404,7 +408,7 @@ async def _llm_plan(
             lambda: client.chat.completions.create(
                 model=model_slug,
                 temperature=0.4,
-                max_tokens=1400,
+                max_tokens=6000,
                 messages=[
                     {"role": "system", "content": _SYSTEM},
                     {"role": "user", "content": user_payload},
@@ -437,9 +441,11 @@ async def _start_job(
     seed_image_url: str | None,
     seed_image_role: str = "first_frame",
     product_name: str = "",
+    brand_name: str = "",
     product_reference_url: str | None = None,
     logo_reference_url: str | None = None,
     additional_reference_urls: list[str] | None = None,
+    reference_assets: list[dict[str, str]] | None = None,
     source_brief: str = "",
     storyboard_scenes: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
@@ -462,6 +468,7 @@ async def _start_job(
             "resolution": resolution or "1080p",
             "sound_on": bool(sound_on) if media_mode == "video" else False,
             "product_name": product_name or "",
+            "brand_name": brand_name or "",
             # Video overlays are intentional campaign copy; do not globally ban text.
             "negative_prompt": "watermark, random unreadable text, UI chrome",
             "seed_image_url": seed_image_url,
@@ -469,6 +476,7 @@ async def _start_job(
             "product_reference_url": product_reference_url,
             "logo_reference_url": logo_reference_url,
             "additional_reference_urls": additional_reference_urls or [],
+            "reference_assets": reference_assets or [],
             "source_brief": source_brief,
             "storyboard_scenes": storyboard_scenes or [],
             "storyboard_image_urls": storyboard_image_urls or [],
@@ -513,7 +521,7 @@ def _scenes_from_llm_or_brief(
 
     out: list[dict[str, Any]] = []
     if isinstance(parsed_scenes, list):
-        for i, s in enumerate(parsed_scenes[:6]):
+        for i, s in enumerate(parsed_scenes[:40]):
             if not isinstance(s, dict):
                 continue
             title = str(s.get("title") or f"Scene {i + 1}").strip()
@@ -534,8 +542,8 @@ def _scenes_from_llm_or_brief(
                 r"(?i)do NOT show|problem state|wooden chicken coop", ip
             ):
                 ip = (
-                    f"{ip} CRITICAL: Do NOT show {label} or any modern trailer caravan. "
-                    "Only a basic weathered wooden chicken coop (problem state)."
+                    f"{ip} Do NOT show {label} in this explicit problem beat. "
+                    "Follow the brief's setting and objects."
                 )
             out.append(
                 {
@@ -561,7 +569,7 @@ def _with_product_fidelity(prompt: str, product_ref: str | None) -> str:
     return (
         f"{text}\n\nPRODUCT FIDELITY: Match the attached product photo exactly "
         f"(shape, colour, materials, proportions, branding). Same product — do not invent another."
-    )[:4800]
+    )
 
 
 async def run_creative_studio_chat_turn(
@@ -587,6 +595,7 @@ async def run_creative_studio_chat_turn(
     product_reference_url: str = "",
     logo_reference_url: str = "",
     additional_reference_urls: list[str] | None = None,
+    reference_assets: list[dict[str, str]] | None = None,
     storyboard_image_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """
@@ -606,7 +615,7 @@ async def run_creative_studio_chat_turn(
         action_norm = "continue"
 
     attachments = [u for u in (attachment_urls or []) if (u or "").strip()]
-    product_ref = (product_reference_url or "").strip() or (attachments[0] if attachments else "")
+    product_ref = (product_reference_url or "").strip() or (attachments[0] if attachments and not reference_assets else "")
     logo_ref = (logo_reference_url or "").strip()
     extra_refs = [
         u.strip()
@@ -752,7 +761,10 @@ async def run_creative_studio_chat_turn(
                 sound_on=False,
                 seed_image_url=None,
                 product_name=product_name,
+                brand_name=brand_name,
                 product_reference_url=product_ref or None,
+                logo_reference_url=logo_ref or None,
+                reference_assets=reference_assets,
                 storyboard_scenes=scenes,
             )
             titles = ", ".join(str(s.get("title") or f"Scene {i+1}") for i, s in enumerate(scenes[:5]))
@@ -793,6 +805,7 @@ async def run_creative_studio_chat_turn(
             sound_on=False,
             seed_image_url=None,
             product_name=product_name,
+            brand_name=brand_name,
             product_reference_url=product_ref or None,
         )
         verb = "Regenerating" if action_norm == "regenerate_image" else "Generating"
@@ -915,11 +928,22 @@ async def run_creative_studio_chat_turn(
                 brief_for_motion, product_name=product_name or ""
             )
             if len(board) >= 2:
-                motion = build_storyboard_video_prompt(
-                    board,
-                    duration_seconds=out_duration,
-                    sound_on=sound_on,
-                    product_name=product_name or "",
+                # The complete authored brief is authoritative, including product/cast
+                # constraints before the first timestamp and the closing narration.
+                from app.services.creative_studio_timeline import explicit_shot_windows
+                authored_windows = explicit_shot_windows(brief_for_motion)
+                if authored_windows:
+                    # Duration presets are coarse (for example 30s), while an authored
+                    # brief can end at an exact time such as 26s. Generate the authored
+                    # timeline instead of rejecting the harmless preset mismatch.
+                    out_duration = max(5, min(120, int(round(authored_windows[-1][1]))))
+                motion = (
+                    brief_for_motion
+                    if explicit_shot_windows(brief_for_motion, total=out_duration)
+                    else build_storyboard_video_prompt(
+                        board, duration_seconds=out_duration,
+                        sound_on=sound_on, product_name=product_name or "",
+                    )
                 )
 
         if len(brief_for_motion) < 80:
@@ -939,7 +963,7 @@ async def run_creative_studio_chat_turn(
 
         multi_beat = bool(
             re.search(r"(?i)\bCLIP\s*2\b|\bHOOK\b|\bBODY\b|\bScene\s*2\b", motion)
-        )
+        ) or looks_like_multi_scene_brief(motion)
         job_id = await _start_job(
             tenant_id=tenant_id,
             media_mode="video",
@@ -950,11 +974,16 @@ async def run_creative_studio_chat_turn(
             resolution=resolution,
             sound_on=sound_on,
             seed_image_url=seed or None,
-            seed_image_role="reference_image" if multi_beat else "first_frame",
+            # The image the user approved is the exact opening composition for
+            # every video, including multi-scene stories. Later storyboard
+            # frames remain references; they must not demote the approved still.
+            seed_image_role="first_frame",
             product_name=product_name,
+            brand_name=brand_name,
             product_reference_url=product_ref or None,
             logo_reference_url=logo_ref or None,
             additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
             source_brief=full_brief,
             storyboard_image_urls=[
                 u for u in (storyboard_image_urls or []) if (u or "").strip()
@@ -967,9 +996,7 @@ async def run_creative_studio_chat_turn(
                 f"{out_aspect.replace('/', ':')} · {audio_note}. "
                 "Driving the FULL timed story from your brief"
                 + (
-                    " (still as style/reference — not a frozen pan)."
-                    if multi_beat
-                    else " (still as opening frame, then progressing through each beat)."
+                    " (approved still as opening frame, then progressing through each beat)."
                 )
                 + (" Product photo fidelity kept in the motion brief." if product_ref else "")
             ),
@@ -1102,6 +1129,10 @@ async def run_creative_studio_chat_turn(
             revision_notes="",
             phase="image_running",
             product_reference_url=product_ref,
+            logo_reference_url=logo_ref,
+            additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
+            storyboard_image_urls=storyboard_image_urls,
         )
 
     if intent == "generate_video" and approved_image_url:
@@ -1125,6 +1156,10 @@ async def run_creative_studio_chat_turn(
             revision_notes="",
             phase="video_running",
             product_reference_url=product_ref,
+            logo_reference_url=logo_ref,
+            additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
+            storyboard_image_urls=storyboard_image_urls,
         )
 
     if intent in {"draft_plan", "generate_video"} or (intent == "reply" and mode_norm == "generate"):
@@ -1170,6 +1205,10 @@ async def run_creative_studio_chat_turn(
                 revision_notes="",
                 phase="image_running",
                 product_reference_url=product_ref,
+                logo_reference_url=logo_ref,
+                additional_reference_urls=extra_refs,
+                reference_assets=reference_assets,
+                storyboard_image_urls=storyboard_image_urls,
             )
             plan_lead = (assistant_message or "").strip()
             gen_msg = str(chained.get("assistant_message") or "").strip()

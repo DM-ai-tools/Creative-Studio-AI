@@ -5,9 +5,21 @@ set -euo pipefail
 REMOTE_ROOT="/opt/creativestudio"
 PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-http://13.235.37.173}"
 
-mkdir -p "$REMOTE_ROOT"
-tar -xzf /tmp/creativestudio-deploy.tar.gz -C "$REMOTE_ROOT"
 mkdir -p "$REMOTE_ROOT/backend/uploads"
+if [ -d "$REMOTE_ROOT" ]; then
+  sudo chown -R "$(whoami):$(whoami)" "$REMOTE_ROOT"
+  sudo chmod -R u+rwX "$REMOTE_ROOT"
+fi
+STAGE="$(mktemp -d)"
+tar -xzf /tmp/creativestudio-deploy.tar.gz -C "$STAGE" --no-same-owner --no-same-permissions --mode=u+rwX
+sudo rsync -a --delete \
+  --exclude 'backend/uploads/' \
+  --exclude 'backend/.env' \
+  --exclude 'deploy/aws/.env' \
+  "$STAGE/" "$REMOTE_ROOT/"
+sudo rm -rf "$STAGE"
+sudo chown -R "$(whoami):$(whoami)" "$REMOTE_ROOT"
+sudo chmod -R u+rwX "$REMOTE_ROOT"
 mv /tmp/backend.env "$REMOTE_ROOT/backend/.env"
 mkdir -p "$REMOTE_ROOT/deploy/aws"
 mv /tmp/deploy.env "$REMOTE_ROOT/deploy/aws/.env"

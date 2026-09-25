@@ -160,7 +160,9 @@ class RunwayImageProvider(ImageGenerationProvider):
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
         reference_image_url: str | None = None,
+        reference_purpose: str = "product",
     ) -> dict:
+        _ = reference_purpose
         provider_model = resolve_image_model(model)
         if not runway_configured():
             return {"status": "mock", "model": provider_model, "prompt": prompt, "url": None}

@@ -11,6 +11,22 @@ class FileService:
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
 
+    def assert_writable(self, tenant_id: str, subfolder: str = "generated") -> None:
+        """Fail before a paid provider call when completed media cannot be saved."""
+        # Keep this robust when tests or runtime configuration supply the
+        # upload root as a string instead of a Path.
+        dest_dir = Path(self.upload_dir) / tenant_id / subfolder
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            probe = dest_dir / f".write-probe-{uuid.uuid4().hex}.tmp"
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as exc:
+            raise PermissionError(
+                f"Creative Studio cannot write to the upload folder: {dest_dir}. "
+                "Restart the backend from an account with write access before generating."
+            ) from exc
+
     async def save_file(
         self,
         file: UploadFile,

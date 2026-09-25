@@ -287,6 +287,13 @@ export const assetsApi = {
   list: (params?: { variant_id?: string; brand_id?: string; asset_type?: string }) =>
     api.get<Asset[]>('/assets/', { params }).then((r) => r.data),
 
+  registerGenerated: (data: {
+    file_url: string
+    brand_id?: string
+    file_name?: string
+    metadata?: Record<string, unknown>
+  }) => api.post<Asset>('/assets/register-generated', data).then((r) => r.data),
+
   delete: (id: string) => api.delete(`/assets/${id}`),
 }
 
@@ -685,6 +692,8 @@ export const generationApi = {
         duration_seconds?: number | null
         requested_duration_seconds?: number | null
         segment_count?: number | null
+        continuity_chained?: boolean
+        continuity_frame_count?: number | null
         partial?: boolean
         credits_estimate?: number | null
         duration_warning?: string | null
@@ -696,6 +705,10 @@ export const generationApi = {
     api
       .get<{
         status: string
+        audio_present?: boolean | null
+        audio_warning?: string | null
+        voiceover?: { status?: string; reason?: string; error?: string } | null
+        provider_usage?: { task_id: string; total_tokens?: number | null; cost_usd?: number | null; cost_status: string }[] | null
         job_id?: string | null
         progress?: string | null
         url?: string | null
@@ -706,6 +719,8 @@ export const generationApi = {
         duration_seconds?: number | null
         requested_duration_seconds?: number | null
         segment_count?: number | null
+        continuity_chained?: boolean
+        continuity_frame_count?: number | null
         partial?: boolean
         credits_estimate?: number | null
         duration_warning?: string | null
@@ -783,6 +798,7 @@ export const generationApi = {
     product_reference_url?: string
     logo_reference_url?: string
     additional_reference_urls?: string[]
+    reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' }[]
     storyboard_image_urls?: string[]
     image_model?: string
     revision_notes?: string

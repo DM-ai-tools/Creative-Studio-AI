@@ -90,40 +90,14 @@ def seed_frame_prompt(prompt: str) -> str:
 
 
 def build_spoken_voiceover(prompt: str, *, duration_seconds: int = 15) -> str:
-    """Short natural VO — never the technical Seedance/shot-list prompt."""
-    raw = (prompt or "").strip()
-    # Reject shot-list / continuity prompts entirely for TTS
-    low = raw.lower()
-    if any(
-        m in low
-        for m in (
-            "clip 1",
-            "subject continuity",
-            "strict negative",
-            "timing beats",
-            "visual style",
-            "single continuous story",
-            "editing / timing",
+    """Only explicitly labelled narration is eligible for speech synthesis."""
+    from app.services.creative_studio_video_finishing import extract_voiceover_events
+
+    return " ".join(
+        line for _, _, line in extract_voiceover_events(
+            prompt, duration_seconds=duration_seconds
         )
-    ):
-        return ""
-    cleaned = re.sub(r"(?is)\bSTRICT NEGATIVE REQUIREMENTS\b.*$", "", raw)
-    cleaned = re.sub(
-        r"(?i)\b(?:CLIP\s*\d+|SUBJECT CONTINUITY|ENVIRONMENT|PRODUCT)\b[:\s]*",
-        " ",
-        cleaned,
     )
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if len(cleaned) < 20:
-        return ""
-    vibe = cleaned[:160]
-    secs = max(5, int(duration_seconds or 15))
-    if secs <= 6:
-        return "Soft natural voice matching this moment — authentic, unhurried."[:200]
-    return (
-        f"Warm, short spoken line only — never read camera directions: {vibe}. "
-        "One or two sentences max."
-    )[:280]
 
 
 def _clip_windows(duration_seconds: int) -> list[tuple[int, int]]:
