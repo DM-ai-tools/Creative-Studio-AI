@@ -52,6 +52,25 @@ async def _tenant_for_member(db, email: str) -> Tenant:
     return tenant
 
 
+async def remove_members(emails: list[str]) -> int:
+    async with AsyncSessionLocal() as db:
+        for raw in emails:
+            email = raw.strip().lower()
+            if not email:
+                continue
+            result = await db.execute(select(User).where(User.email == email))
+            user = result.scalar_one_or_none()
+            if not user:
+                print(f"No user to remove: {email}")
+                continue
+            if user.role == "admin":
+                raise ValueError(f"Refusing to remove admin account: {email}")
+            await db.delete(user)
+            print(f"Removed member: {email}")
+        await db.commit()
+    return 0
+
+
 async def upsert_members(specs: list[str]) -> int:
     async with AsyncSessionLocal() as db:
         for spec in specs:
@@ -94,11 +113,23 @@ def main() -> int:
     parser.add_argument(
         "--user",
         action="append",
-        required=True,
+        default=[],
         help="Member credentials in username:password form; repeat for each member.",
     )
+    parser.add_argument(
+        "--remove",
+        action="append",
+        default=[],
+        help="Remove a member account by email.",
+    )
     args = parser.parse_args()
-    return asyncio.run(upsert_members(args.user))
+    if not args.user and not args.remove:
+        parser.error("Provide --user and/or --remove.")
+    if args.remove:
+        asyncio.run(remove_members(args.remove))
+    if args.user:
+        return asyncio.run(upsert_members(args.user))
+    return 0
 
 
 if __name__ == "__main__":
