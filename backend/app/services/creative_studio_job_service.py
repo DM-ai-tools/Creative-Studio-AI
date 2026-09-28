@@ -124,6 +124,67 @@ async def get_job(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any
         }
 
 
+async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+    """Queue the next reviewed Seedance chapter for a staged long video."""
+    async with _LOCK:
+        parent = _JOBS.get(job_id)
+        if not parent or parent.get("tenant_id") != tenant_id:
+            return None
+        result = parent.get("result") if isinstance(parent.get("result"), dict) else {}
+        if not result.get("continuation_available"):
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": "This video part has no pending continuation.",
+            }
+        existing_id = str(result.get("next_job_id") or "").strip()
+        if existing_id and existing_id in _JOBS:
+            existing = _JOBS[existing_id]
+            return {
+                "job_id": existing_id,
+                "status": existing.get("status") or "queued",
+                "progress": existing.get("progress") or "Queued — starting next part…",
+            }
+
+        next_id = str(uuid.uuid4())
+        payload = dict(parent.get("payload") or {})
+        payload.update({
+            "stage_index": int(result.get("completed_segments") or 0),
+            "staged_segment_paths": list(result.get("staged_segment_paths") or []),
+            "continuity_reference_url": result.get("continuity_reference_url"),
+            "cast_reference_url": result.get("cast_reference_url"),
+            "continuity_frame_count": int(result.get("continuity_frame_count") or 0),
+            "continuity_privacy_fallback_count": int(
+                result.get("continuity_privacy_fallback_count") or 0
+            ),
+            "generated_duration_seconds": int(result.get("generated_duration_seconds") or 0),
+        })
+        _JOBS[next_id] = {
+            "job_id": next_id,
+            "tenant_id": tenant_id,
+            "status": "queued",
+            "progress": "Queued — starting next Seedance part…",
+            "created_at": _now(),
+            "updated_at": _now(),
+            "payload": payload,
+            "result": None,
+            "error": None,
+            "cancel_requested": False,
+            "provider_task_id": None,
+        }
+        result["continuation_available"] = False
+        result["next_job_id"] = next_id
+        parent["result"] = result
+        parent["updated_at"] = _now()
+
+    asyncio.create_task(run_creative_studio_job(next_id))
+    return {
+        "job_id": next_id,
+        "status": "queued",
+        "progress": "Queued — starting next Seedance part…",
+    }
+
+
 async def run_creative_studio_job(job_id: str) -> None:
     """Background worker — updates job status until done/failed."""
     from app.services.creative_studio_prompt_service import (
@@ -175,6 +236,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         file_service.assert_writable(tenant_id, "generated")
         prompt = (data.get("prompt") or "").strip()
         model = (data.get("model") or "").strip()
+        prompt_only_requested = bool(data.get("prompt_only_video"))
         neg = (data.get("negative_prompt") or "").strip()
         # Image prompts must exclude typography, but video prompts must retain the user's
         # exact overlay copy. Sanitizing both was silently deleting all requested text.
@@ -482,9 +544,10 @@ async def run_creative_studio_job(job_id: str) -> None:
 
         seed_url: str | None = None
         use_byteplus = is_byteplus_seedance_model(model)
+        prompt_only_video = prompt_only_requested and use_byteplus
         video_spec = resolve_video_spec(model) if is_higgsfield_video_model(model) else None
         # Chat / uploads can supply a reference frame for Seedance.
-        attached_seed = str(data.get("seed_image_url") or "").strip() or None
+        attached_seed = None if prompt_only_video else str(data.get("seed_image_url") or "").strip() or None
         if attached_seed:
             seed_url = attached_seed
         # BytePlus Seedance supports text-to-video — seed frame optional (faster path).
@@ -546,7 +609,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         preflight_report = validate_video_preflight(
             prompt=visual_prompt,
             duration_seconds=requested_duration,
-            storyboard_image_urls=list(data.get("storyboard_image_urls") or []),
+            storyboard_image_urls=[] if prompt_only_video else list(data.get("storyboard_image_urls") or []),
             seed_image_url=seed_url,
             sound_on=sound_on,
             voice_events=voice_events,
@@ -757,7 +820,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             "creative_studio_generate_audio": bool(sound_on),
             "creative_studio_job_id": job_id,
             "seed_image_role": seed_image_role,
-            "storyboard_image_urls": list(data.get("storyboard_image_urls") or [])[:9],
+            "storyboard_image_urls": [] if prompt_only_video else list(data.get("storyboard_image_urls") or [])[:9],
             "product_reference_url": str(data.get("product_reference_url") or "").strip() or None,
             "additional_reference_urls": list(data.get("additional_reference_urls") or [])[:7],
             "reference_assets": list(data.get("reference_assets") or []),
@@ -768,6 +831,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 for asset in data.get("reference_assets") or []
             ),
             "logo_reference_url": str(data.get("logo_reference_url") or "").strip() or None,
+            "prompt_only_video": prompt_only_video,
         }
         copy = {
             "hook": (spoken[:120] if spoken else ""),
@@ -797,6 +861,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 conform_shot_duration,
                 save_continuity_frame,
                 save_privacy_safe_scene_frame,
+                save_privacy_safe_storyboard_frame,
                 trim_video_to_duration,
             )
 
@@ -805,6 +870,8 @@ async def run_creative_studio_job(job_id: str) -> None:
                 for url in brief.get("storyboard_image_urls") or []
                 if str(url or "").strip()
             ]
+            if prompt_only_video:
+                storyboard_urls = []
             # When every authored scene has an approved storyboard frame, animate
             # each exact scene from its own frame. Packing unrelated locations into
             # one 15s call causes skipped beats, replacement actors and invented
@@ -821,15 +888,24 @@ async def run_creative_studio_job(job_id: str) -> None:
             segment_durations = [b - a for a, b in chapter_windows] or _seedance_segment_durations(
                 generate_duration
             )
-            generated_seconds = 0
-            segment_paths: list[Path] = []
+            interactive_staging = bool(data.get("interactive_staging")) and len(segment_durations) > 1
+            stage_index = max(0, min(
+                int(data.get("stage_index") or 0), len(segment_durations) - 1
+            ))
+            generated_seconds = int(data.get("generated_duration_seconds") or 0)
+            segment_paths: list[Path] = [
+                Path(value) for value in (data.get("staged_segment_paths") or [])
+                if Path(value).is_file()
+            ]
             segment_results: list[dict[str, Any]] = []
             partial_warning: str | None = None
-            continuity_reference_url: str | None = None
-            cast_reference_url: str | None = None
-            continuity_frame_count = 0
-            continuity_privacy_fallback_count = 0
-            elapsed = 0
+            continuity_reference_url: str | None = data.get("continuity_reference_url") or None
+            cast_reference_url: str | None = data.get("cast_reference_url") or None
+            continuity_frame_count = int(data.get("continuity_frame_count") or 0)
+            continuity_privacy_fallback_count = int(
+                data.get("continuity_privacy_fallback_count") or 0
+            )
+            elapsed = float(sum(segment_durations[:stage_index]))
             # Preflight every chapter before submitting any billable provider task.
             segment_prompts: list[str] = []
             offset = 0
@@ -842,6 +918,14 @@ async def run_creative_studio_job(job_id: str) -> None:
                 # never be lost with another global finishing section.
                 if "BRAND-SURFACE LOCK:" not in local_prompt:
                     local_prompt += "\n\n" + brand_surface_lock()
+                if prompt_only_video and (segment_index == 0 or not interactive_staging):
+                    local_prompt += (
+                        "\n\nDIRECT UPLOAD-GUIDED CHAPTER: Use only the explicitly uploaded "
+                        "product, character and scene references. No GPT-generated storyboard "
+                        "or generated continuity frame is attached to the first chapter. Follow the written character, "
+                        "product, environment, camera and brand locks exactly. "
+                        "Render only this chapter's authored time range; do not recap earlier beats."
+                    )
                 # Validate the complete first-pass prompt for every chapter before
                 # submitting any billable task. Continuation instructions are short
                 # and use this already validated chapter prompt as their base.
@@ -865,6 +949,8 @@ async def run_creative_studio_job(job_id: str) -> None:
                 segment_prompts.append(local_prompt)
                 offset += seconds
             for segment_index, segment_duration in enumerate(segment_durations):
+                if interactive_staging and segment_index != stage_index:
+                    continue
                 if is_job_cancel_requested(job_id):
                     await update_job(
                         job_id,
@@ -961,7 +1047,17 @@ async def run_creative_studio_job(job_id: str) -> None:
                     segment_result: dict[str, Any] = {}
                     source_path: Path | None = None
                     use_privacy_safe_handoff = False
-                    for attempt in range(2):
+                    use_privacy_safe_storyboard = False
+                    privacy_safe_storyboard_url: str | None = None
+                    # Three staged attempts: exact approved frame, one transient
+                    # retry, and (only after a privacy rejection) a face-free crop
+                    # of that same frame. Repeating an identical blocked request
+                    # wastes time and cannot improve the result.
+                    # A plain text-to-video request has no safer alternate input,
+                    # so resubmitting it can only duplicate spend. Extra attempts
+                    # are reserved for a materially different privacy-safe frame.
+                    attempt_limit = 2 if (exact_storyboard_mode or continuity_reference_url) else 1
+                    for attempt in range(attempt_limit):
                         attempt_prompt = segment_prompt
                         # The official logo is reserved for deterministic finishing.
                         # Giving it to Seedance encourages approximate badges and
@@ -976,6 +1072,42 @@ async def run_creative_studio_job(job_id: str) -> None:
                         attempt_cast_reference_url = cast_reference_url
                         attempt_continuity_reference_url = continuity_reference_url
                         attempt_strict_continuity = bool(continuity_reference_url)
+                        attempt_strict_character = bool(brief.get("strict_character_reference"))
+                        attempt_source_image_url = (
+                            chapter_storyboard_urls[0]
+                            if chapter_storyboard_urls and continuation_index == 0
+                            else seed_url
+                            if segment_index == 0 and continuation_index == 0
+                            else None
+                        )
+                        attempt_strict_opening = bool(
+                            exact_storyboard_mode
+                            and chapter_storyboard_urls
+                            and continuation_index == 0
+                        )
+                        if use_privacy_safe_storyboard:
+                            if privacy_safe_storyboard_url is None:
+                                privacy_safe_storyboard_url = save_privacy_safe_storyboard_frame(
+                                    chapter_storyboard_urls[0], tenant_id=tenant_id,
+                                )
+                            attempt_source_image_url = privacy_safe_storyboard_url
+                            attempt_reference_assets = [
+                                asset for asset in attempt_reference_assets
+                                if not (
+                                    isinstance(asset, dict)
+                                    and str(asset.get("role") or "").lower() == "character"
+                                )
+                            ]
+                            attempt_cast_reference_url = None
+                            attempt_strict_character = False
+                            attempt_prompt += (
+                                "\n\nPRIVACY-SAFE STORYBOARD RETRY: The attached image is a "
+                                "lower crop of the approved storyboard for this exact scene. "
+                                "Preserve its product, wardrobe colours, action area, lighting, "
+                                "camera axis and set geometry. Keep every person framed below "
+                                "the shoulders or facing away for this shot; do not invent or "
+                                "show a replacement face. Complete the same authored action."
+                            )
                         if use_privacy_safe_handoff:
                             safe_handoff_url = save_privacy_safe_scene_frame(
                                 segment_paths[-1], tenant_id=tenant_id,
@@ -1014,18 +1146,14 @@ async def run_creative_studio_job(job_id: str) -> None:
                                 "cast_reference_url": attempt_cast_reference_url,
                                 "continuity_reference_url": attempt_continuity_reference_url,
                                 "strict_continuity_reference": attempt_strict_continuity,
+                                "strict_character_reference": attempt_strict_character,
+                                "strict_opening_reference": attempt_strict_opening,
                             },
                             copy=copy,
                             format_type=format_type,
                             model=model,
                             tenant_id=tenant_id,
-                            source_image_url=(
-                                chapter_storyboard_urls[0]
-                                if chapter_storyboard_urls and continuation_index == 0
-                                else seed_url
-                                if segment_index == 0 and continuation_index == 0
-                                else None
-                            ),
+                            source_image_url=attempt_source_image_url,
                             duration_seconds=provider_duration,
                         )
                         generated_seconds += provider_duration
@@ -1078,14 +1206,108 @@ async def run_creative_studio_job(job_id: str) -> None:
                             # another generation just because its media could not be
                             # persisted locally; preserve a partial result instead.
                             break
-                        if attempt == 0:
+                        # A provider task ID proves BytePlus accepted a potentially
+                        # billable generation. Never submit another task after that;
+                        # try to recover the existing task output instead.
+                        existing_task_id = str(
+                            (segment_result or {}).get("task_id")
+                            or (_JOBS.get(job_id) or {}).get("provider_task_id")
+                            or ""
+                        ).strip()
+                        if existing_task_id:
+                            from app.services.media.byteplus_seedance_provider import (
+                                recover_byteplus_seedance_task,
+                            )
+
+                            await update_job(
+                                job_id,
+                                progress=(
+                                    f"Recovering existing Seedance task {existing_task_id[:12]}… "
+                                    "(no new BytePlus charge)"
+                                ),
+                            )
+                            recovered = await recover_byteplus_seedance_task(
+                                existing_task_id,
+                                tenant_id=tenant_id,
+                                cs_job_id=job_id,
+                                cancel_check=lambda: is_job_cancel_requested(job_id),
+                                model=model,
+                            )
+                            if recovered and str(recovered.get("url") or "").strip():
+                                segment_result = recovered
+                                segment_results[-1] = recovered
+                                segment_url = str(
+                                    recovered.get("url") or recovered.get("remote_url") or ""
+                                ).strip()
+                                source_path = file_url_to_local_path(segment_url)
+                                if (
+                                    (not source_path or not source_path.is_file())
+                                    and segment_url.startswith(("http://", "https://"))
+                                ):
+                                    import httpx
+                                    from app.services.media.runway_providers import _download_asset
+
+                                    async with httpx.AsyncClient(
+                                        timeout=300.0,
+                                        follow_redirects=True,
+                                    ) as download_client:
+                                        downloaded = await _download_asset(
+                                            download_client,
+                                            segment_url,
+                                            tenant_id=tenant_id,
+                                            kind="video",
+                                        )
+                                    source_path = file_url_to_local_path(
+                                        str(downloaded.get("url") or "")
+                                    )
+                                if source_path and source_path.is_file():
+                                    break
+                                if segment_url:
+                                    break
+                            break
+                        if attempt < attempt_limit - 1:
                             provider_error = str((segment_result or {}).get("error") or "")
+                            connection_failed = any(
+                                marker in provider_error.lower()
+                                for marker in (
+                                    "all connection attempts failed",
+                                    "connecterror",
+                                    "connection refused",
+                                    "connection reset",
+                                    "temporary failure in name resolution",
+                                    "timed out while connecting",
+                                )
+                            )
+                            storyboard_privacy_blocked = bool(
+                                exact_storyboard_mode
+                                and chapter_storyboard_urls
+                                and continuation_index == 0
+                            ) and any(
+                                marker in provider_error.lower()
+                                for marker in (
+                                    "approved storyboard opening frame",
+                                    "photoreal identity",
+                                    "privacy",
+                                    "real person",
+                                    "sensitivecontent",
+                                )
+                            )
                             privacy_blocked = bool(continuity_reference_url) and (
                                 "previous chapter's continuity frame" in provider_error.lower()
                                 or "privacy" in provider_error.lower()
                                 or "real person" in provider_error.lower()
                             )
-                            if privacy_blocked and not brief.get("strict_character_reference"):
+                            if storyboard_privacy_blocked and not use_privacy_safe_storyboard:
+                                use_privacy_safe_storyboard = True
+                                await update_job(
+                                    job_id,
+                                    progress=(
+                                        f"BytePlus blocked scene {segment_index + 1}'s full "
+                                        "storyboard frame; retrying the same scene with a "
+                                        "face-free crop…"
+                                    ),
+                                )
+                            elif privacy_blocked and not brief.get("strict_character_reference"):
                                 use_privacy_safe_handoff = True
                                 await update_job(
                                     job_id,
@@ -1094,20 +1316,33 @@ async def run_creative_studio_job(job_id: str) -> None:
                                         "with a product/scene continuity crop…"
                                     ),
                                 )
+                            elif connection_failed:
+                                await update_job(
+                                    job_id,
+                                    progress=(
+                                        f"BytePlus connection dropped during chapter {segment_index + 1}. "
+                                        "Checking whether an existing Seedance task can be recovered…"
+                                    ),
+                                )
+                                break
                             else:
                                 await update_job(
                                     job_id,
                                     progress=(
                                         f"Seedance chapter {segment_index + 1}, part "
-                                        f"{continuation_index + 1} returned no media; retrying once…"
+                                        f"{continuation_index + 1} returned no media. "
+                                        "No automatic retry was submitted."
                                     ),
                                 )
+                                break
 
                     if not source_path or not source_path.is_file():
+                        provider_error = str((segment_result or {}).get("error") or "").strip()
                         partial_warning = (
                             f"Chapter {segment_index + 1}/{len(segment_durations)}, part "
                             f"{continuation_index + 1} returned no usable video. "
-                            "A partial video was preserved."
+                            "The incomplete attempt will not be published."
+                            + (f" BytePlus: {provider_error[:220]}" if provider_error else "")
                         )
                         logger.error(
                             "%s Provider response: %r",
@@ -1121,7 +1356,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         partial_warning = (
                             f"Chapter {segment_index + 1}/{len(segment_durations)}, part "
                             f"{continuation_index + 1} had no measurable video duration. "
-                            "A partial video was preserved."
+                            "The incomplete attempt will not be published."
                         )
                         logger.error("%s", partial_warning)
                         break
@@ -1137,10 +1372,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                     chapter_remaining = max(0.0, float(segment_duration) - chapter_elapsed)
 
                     needs_handoff = (
-                        chapter_remaining > 0.08
+                        (chapter_remaining > 0.08 and (not prompt_only_video or interactive_staging))
                         or (
                             segment_index + 1 < len(segment_durations)
                             and not exact_storyboard_mode
+                            and (not prompt_only_video or interactive_staging)
                         )
                     )
                     if needs_handoff:
@@ -1175,19 +1411,84 @@ async def run_creative_studio_job(job_id: str) -> None:
                         partial_warning = (
                             f"Chapter {segment_index + 1}/{len(segment_durations)} remained "
                             f"{chapter_remaining:.1f}s short after {max_parts} continuation parts. "
-                            "A partial video was preserved."
+                            "The incomplete attempt will not be published."
                         )
                     break
                 elapsed = segment_end
 
+                if interactive_staging and segment_index + 1 < len(segment_durations):
+                    prior_count = len(data.get("staged_segment_paths") or [])
+                    chapter_paths = segment_paths[prior_count:]
+                    if not chapter_paths:
+                        raise RuntimeError("Seedance completed a chapter without a reviewable video file")
+                    if len(chapter_paths) == 1:
+                        preview_path = chapter_paths[0]
+                    else:
+                        preview_dir = (
+                            Path(file_service.upload_dir) / tenant_id / "generated" / "seedance-stitch"
+                        ).resolve()
+                        preview_dir.mkdir(parents=True, exist_ok=True)
+                        preview_path = preview_dir / f"part-{job_id[:12]}.mp4"
+                        concat_video_files(chapter_paths, preview_path)
+                    preview_duration = probe_video_duration(preview_path) or float(segment_duration)
+                    saved_part = file_service.save_bytes(
+                        content=preview_path.read_bytes(),
+                        tenant_id=tenant_id,
+                        subfolder="generated",
+                        suffix=".mp4",
+                        content_type="video/mp4",
+                    )
+                    completed = segment_index + 1
+                    await update_job(
+                        job_id,
+                        status="done",
+                        progress=f"Part {completed}/{len(segment_durations)} ready for review",
+                        error=None,
+                        result={
+                            "status": "done",
+                            "url": saved_part["file_url"],
+                            "model": str((segment_results[-1] or {}).get("model") or model),
+                            "provider": "byteplus",
+                            "duration_seconds": int(round(preview_duration)),
+                            "requested_duration_seconds": generate_duration,
+                            "segment_count": len(segment_durations),
+                            "completed_segments": completed,
+                            "continuation_available": True,
+                            "continuity_chained": continuity_frame_count > 0,
+                            "continuity_frame_count": continuity_frame_count,
+                            "continuity_privacy_fallback_count": continuity_privacy_fallback_count,
+                            "partial": True,
+                            "note": (
+                                f"Part {completed}/{len(segment_durations)} is ready. Review this "
+                                "chapter, then generate the next part. The next Seedance call will "
+                                "use this part's exact final frame and the remaining timed prompt."
+                            ),
+                            "staged_segment_paths": [str(path) for path in segment_paths],
+                            "continuity_reference_url": continuity_reference_url,
+                            "cast_reference_url": cast_reference_url,
+                            "generated_duration_seconds": generated_seconds,
+                            "provider_usage": [
+                                usage for r in segment_results for usage in (r.get("provider_usage") or [])
+                            ],
+                        },
+                    )
+                    return
+
             if not segment_paths:
                 raise RuntimeError(
-                    "Seedance returned no usable video segments after retry."
+                    partial_warning
+                    or "Seedance returned no usable video segments after retry."
+                )
+            if partial_warning or elapsed < generate_duration - 0.08:
+                usable_seconds = sum(
+                    float(probe_video_duration(path) or 0.0) for path in segment_paths
+                )
+                raise RuntimeError(
+                    f"Seedance generated only {usable_seconds:.1f}s of the requested "
+                    f"{generate_duration}s timeline. The incomplete video was not published. "
+                    f"{partial_warning or 'One or more chapters did not complete.'}"
                 )
             if len(segment_paths) == 1:
-                # A later chapter may fail after a usable first chapter was
-                # generated. Preserve that partial result directly instead of
-                # copying it through the transient stitching directory.
                 final_path = segment_paths[0]
             else:
                 stitch_dir = (
@@ -1231,6 +1532,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 "continuity_frame_count": continuity_frame_count,
                 "continuity_privacy_fallback_count": continuity_privacy_fallback_count,
                 "storyboard_scene_anchored": exact_storyboard_mode,
+                "prompt_only_video": prompt_only_video,
                 "partial": bool(partial_warning),
                 "audio_requested": sound_on,
                 "provider_usage": [

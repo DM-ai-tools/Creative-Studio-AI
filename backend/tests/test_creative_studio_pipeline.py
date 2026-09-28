@@ -25,7 +25,11 @@ from app.services.creative_studio_video_finishing import (
     extract_voiceover_events, apply_timed_voiceover, plan_requested_voiceover, voiceover_requested,
 )
 from app.services.creative_studio_prompt_service import build_spoken_voiceover
-from app.services.creative_studio_chat_service import _explicit_duration_from_text, _normalize_duration
+from app.services.creative_studio_chat_service import (
+    _explicit_duration_from_text,
+    _normalize_duration,
+    run_creative_studio_chat_turn,
+)
 from app.services.ffmpeg_util import require_ffmpeg, probe_has_audio, probe_video_duration
 from app.services.media.seedance_multiscene import (
     build_continuity_contract,
@@ -70,6 +74,26 @@ class PromptTests(unittest.TestCase):
         )
         selected = select_complete_timeline_prompt(rounded, rounded, total=26)
         self.assertEqual(explicit_shot_windows(selected, total=26)[-1], (14.0, 26.0))
+        self.assertIn("shorten only its stable ending hold by 4s", selected)
+
+    def test_pipe_shot_headers_support_selected_thirty_second_duration(self):
+        authored = (
+            "FENCE GURU — 26s LIVE-ACTION AD\n"
+            "S1 | 0.0–4.0s | BEFORE\nOpen.\n"
+            "S2 | 4.0–9.0s | SHOWROOM\nExplore.\n"
+            "S3a | 9.0–11.5s | ORDER ONLINE\nOrder.\n"
+            "S3b | 11.5–14.0s | ORDER PREPARED\nPrepare.\n"
+            "S4 | 14.0–18.0s | COLLECTION\nCollect.\n"
+            "S5 | 18.0–26.0s | AFTER + END HOLD\nFinish."
+        )
+        self.assertEqual(_explicit_duration_from_text(authored), 26)
+        self.assertEqual(
+            explicit_shot_windows(authored, total=26),
+            [(0.0, 4.0), (4.0, 9.0), (9.0, 11.5), (11.5, 14.0), (14.0, 18.0), (18.0, 26.0)],
+        )
+        selected = select_complete_timeline_prompt(authored, authored, total=30)
+        self.assertEqual(explicit_shot_windows(selected, total=30)[-1], (18.0, 30.0))
+        self.assertIn("extend only its stable ending composition by 4s", selected)
 
     def test_timeline_selector_does_not_stretch_a_short_script(self):
         short = (
@@ -90,6 +114,57 @@ class PromptTests(unittest.TestCase):
             coalesce_shot_windows(windows),
             [(0.0, 15.0), (15.0, 30.0)],
         )
+
+    def test_two_session_prompt_becomes_two_clean_seedance_calls(self):
+        prompt = (
+            "FENCE GURU — 30s LIVE-ACTION SERVICE AD\n"
+            "GLOBAL LOCKS: keep the uploaded product and character references.\n"
+            "STEP 2 — SESSION A | 0:00–0:15 | one Seedance 2.0 call\n"
+            "SHOT A1 | 0:00–0:05\nShow the unfinished yard.\n"
+            "SHOT A2 | 0:05–0:15\nContinue the same action.\n"
+            "QC SESSION A\nDo not render this checklist.\n"
+            "STEP 3 — SESSION B | 0:15–0:30 | one Seedance 2.0 call\n"
+            "SHOT B1 | 0:00–0:08\nContinue the service story.\n"
+            "SHOT B2 | 0:08–0:15\nFinish naturally.\n"
+            "STEP 4 — STITCH + AUDIO POST\nJoin both files.\n"
+        )
+        self.assertEqual(explicit_shot_windows(prompt, total=30), [(0.0, 15.0), (15.0, 30.0)])
+        first = segment_motion_prompt(prompt, start=0, end=15, total=30)
+        second = segment_motion_prompt(prompt, start=15, end=30, total=30)
+        self.assertIn("SESSION A", first)
+        self.assertNotIn("SESSION B", first)
+        self.assertIn("SESSION B", second)
+        self.assertNotIn("SESSION A", second)
+        for chapter in (first, second):
+            self.assertNotIn("QC SESSION", chapter)
+            self.assertNotIn("STEP 4", chapter)
+
+    def test_decimal_clock_scene_plan_covers_thirty_seconds(self):
+        prompt = (
+            "FENCE GURU — 30s LIVE-ACTION SERVICE AD\n"
+            "CHARACTER & PRODUCT LOCK: same people and product.\n"
+            "Scene 1 | 0:00–0:03.5\nBefore yard.\n"
+            "Scene 2 | 0:03.5–0:08\nShowroom.\n"
+            "Scene 3 | 0:08–0:11\nOnline order.\n"
+            "Scene 4 | 0:11–0:15\nWarehouse handoff.\n"
+            "Scene 5 | 0:15–0:18.5\nContinue handoff.\n"
+            "Scene 6 | 0:18.5–0:21.5\nLoad vehicle.\n"
+            "Scene 7 | 0:21.5–0:30\nFinished backyard.\n"
+            "AVOID: logos and text."
+        )
+        self.assertEqual(
+            explicit_shot_windows(prompt, total=30),
+            [(0.0, 3.5), (3.5, 8.0), (8.0, 11.0), (11.0, 15.0),
+             (15.0, 18.5), (18.5, 21.5), (21.5, 30.0)],
+        )
+        first = segment_motion_prompt(prompt, start=0, end=15, total=30)
+        second = segment_motion_prompt(prompt, start=15, end=30, total=30)
+        self.assertIn("Before yard", first)
+        self.assertIn("Warehouse handoff", first)
+        self.assertNotIn("Continue handoff", first)
+        self.assertIn("Continue handoff", second)
+        self.assertIn("Finished backyard", second)
+        self.assertNotIn("Before yard", second)
 
     def test_continuity_contract_has_opening_and_closing_handoffs(self):
         middle = build_continuity_contract(
@@ -207,6 +282,49 @@ class PromptTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_logo_is_never_promoted_to_product_reference(self):
+        logo = "/files/test/fence-guru-logo.png"
+        with patch(
+            "app.services.media.byteplus_seedance_client.ark_configured",
+            return_value=False,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                messages=[{"role": "user", "content": "Create a 30s service ad."}],
+                action="generate_video",
+                video_prompt="Create a timed service video.",
+                product_reference_url=logo,
+                logo_reference_url=logo,
+                reference_assets=[{"url": logo, "role": "logo"}],
+            )
+        self.assertIsNone(result["product_reference_url"])
+        self.assertIsNone(result["job_id"])
+
+    async def test_old_generate_image_action_becomes_prompt_only_seedance(self):
+        with (
+            patch(
+                "app.services.media.byteplus_seedance_client.ark_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._start_job",
+                new=AsyncMock(return_value="direct-video-job"),
+            ) as start_job,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                messages=[{"role": "user", "content": "Create a 30s two-session service ad."}],
+                action="generate_image",
+                duration_seconds=30,
+            )
+        self.assertEqual(result["intent"], "generate_video")
+        self.assertEqual(result["phase"], "video_running")
+        self.assertEqual(result["job_id"], "direct-video-job")
+        self.assertEqual(result["media_mode"], "video")
+        self.assertIsNone(result["product_reference_url"])
+        self.assertTrue(start_job.await_args.kwargs["prompt_only_video"])
+        self.assertIsNone(start_job.await_args.kwargs["seed_image_url"])
+
     async def test_completed_reference_image_save_failure_is_not_regenerated(self):
         from app.services.media.openai_image_provider import OpenAIImageProvider
 
@@ -483,6 +601,119 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["continuity_frame_count"], 0)
         self.assertTrue(result["storyboard_scene_anchored"])
 
+    async def test_blocked_storyboard_scene_retries_with_face_free_crop(self):
+        from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
+        from app.services.file_service import file_service
+
+        fixture = self.make_clip("provider-storyboard-scene", True, duration=6)
+        privacy_error = (
+            "Seedance blocked the approved storyboard opening frame as photoreal identity content. "
+            "The frame was kept locked, so no replacement person was generated."
+        )
+        provider = Mock()
+        provider.generate = AsyncMock(side_effect=[
+            {"status": "done", "url": "fixture.mp4", "provider": "byteplus"},
+            {"status": "done", "url": "fixture.mp4", "provider": "byteplus"},
+            {"status": "failed", "url": None, "provider": "byteplus", "error": privacy_error},
+            {"status": "done", "url": "fixture.mp4", "provider": "byteplus"},
+        ])
+        job_id = await create_job(tenant_id="test", payload={
+            "media_mode": "video", "model": "ark-seedance-2-0",
+            "prompt": (
+                "Scene 1 - OPENING | 0-6 seconds\nOpen.\n"
+                "Scene 2 - PRODUCT | 6-12 seconds\nContinue.\n"
+                "Scene 3 - RESULT | 12-18 seconds\nFinish."
+            ),
+            "duration_seconds": 18, "sound_on": False,
+            "reference_assets": [{"url": "/files/test/person.png", "role": "character"}],
+            "storyboard_image_urls": [
+                "/files/test/chapter-1.png", "/files/test/chapter-2.png", "/files/test/chapter-3.png",
+            ],
+        })
+        with (
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch(
+                "app.services.logo_overlay.file_url_to_local_path",
+                side_effect=lambda url: fixture if url == "fixture.mp4" else None,
+            ),
+            patch(
+                "app.services.media.seedance_multiscene.save_privacy_safe_storyboard_frame",
+                return_value="/files/test/chapter-3-safe.jpg",
+            ),
+            patch.object(file_service, "upload_dir", self.work),
+            patch("app.services.video_subtitles._ensure_local_video", return_value=fixture),
+        ):
+            await run_creative_studio_job(job_id)
+
+        result = await get_job(job_id)
+        self.assertEqual(result["status"], "done", result.get("error"))
+        self.assertEqual(provider.generate.await_count, 4)
+        retry = provider.generate.call_args_list[3]
+        self.assertEqual(retry.kwargs["source_image_url"], "/files/test/chapter-3-safe.jpg")
+        self.assertFalse(retry.kwargs["brief"]["strict_character_reference"])
+        self.assertTrue(retry.kwargs["brief"]["strict_opening_reference"])
+        self.assertFalse(any(
+            asset.get("role") == "character"
+            for asset in retry.kwargs["brief"]["reference_assets"]
+        ))
+        self.assertIn("do not invent or show a replacement face", retry.kwargs["prompt"])
+
+    async def test_prompt_only_long_video_does_not_auto_retry_connection_failure(self):
+        from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
+        from app.services.file_service import file_service
+
+        fixture = self.make_clip("provider-prompt-only-chapter", True, duration=13)
+        provider = Mock()
+        provider.generate = AsyncMock(side_effect=[
+            {"status": "done", "url": "chapter-1.mp4", "provider": "byteplus"},
+            {"status": "failed", "url": None, "provider": "byteplus", "error": "All connection attempts failed"},
+            {"status": "failed", "url": None, "provider": "byteplus", "error": "All connection attempts failed"},
+            {"status": "done", "url": "chapter-2.mp4", "provider": "byteplus"},
+        ])
+        job_id = await create_job(tenant_id="test", payload={
+            "media_mode": "video", "model": "ark-seedance-2-0",
+            "prompt": (
+                "Scene 1 - OPENING | 0-13 seconds\nShow the first half.\n"
+                "Scene 2 - RESULT | 13-26 seconds\nComplete the second half."
+            ),
+            "duration_seconds": 26, "sound_on": False,
+            "prompt_only_video": True,
+            # The generated opening/storyboards are ignored, while uploads remain authoritative.
+            "seed_image_url": "/files/test/opening.png",
+            "product_reference_url": "/files/test/product.png",
+            "logo_reference_url": "/files/test/logo.png",
+            "reference_assets": [{"url": "/files/test/person.png", "role": "character"}],
+            "storyboard_image_urls": ["/files/test/board-1.png", "/files/test/board-2.png"],
+        })
+        with (
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch(
+                "app.services.logo_overlay.file_url_to_local_path",
+                side_effect=lambda url: fixture if str(url).startswith("chapter-") else None,
+            ),
+            patch.object(file_service, "upload_dir", self.work),
+            patch("app.services.video_subtitles._ensure_local_video", return_value=fixture),
+            patch("app.services.creative_studio_job_service.asyncio.sleep", new_callable=AsyncMock) as sleep,
+        ):
+            await run_creative_studio_job(job_id)
+
+        result = await get_job(job_id)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("All connection attempts failed", result.get("error") or "")
+        self.assertEqual(provider.generate.await_count, 2)
+        self.assertEqual(sleep.await_count, 0)
+        for call in provider.generate.call_args_list:
+            self.assertIsNone(call.kwargs["source_image_url"])
+            self.assertEqual(call.kwargs["brief"]["storyboard_image_urls"], [])
+            self.assertEqual(
+                call.kwargs["brief"]["reference_assets"],
+                [{"url": "/files/test/person.png", "role": "character"}],
+            )
+            self.assertEqual(call.kwargs["brief"]["product_reference_url"], "/files/test/product.png")
+            self.assertIsNone(call.kwargs["brief"]["logo_reference_url"])
+            self.assertIsNone(call.kwargs["brief"]["continuity_reference_url"])
+            self.assertIn("DIRECT UPLOAD-GUIDED CHAPTER", call.kwargs["prompt"])
+
     async def test_short_provider_media_generates_continuations_without_slow_motion(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
         from app.services.file_service import file_service
@@ -531,6 +762,41 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[1].kwargs["brief"]["strict_continuity_reference"])
         self.assertEqual(calls[0].kwargs["source_image_url"], "/files/test/opening.png")
         self.assertIsNone(calls[1].kwargs["source_image_url"])
+
+    async def test_incomplete_provider_output_is_never_published_as_finished_video(self):
+        from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
+        from app.services.file_service import file_service
+
+        eight = self.make_clip("provider-only-eight-seconds", True, duration=8)
+        provider = Mock()
+        provider.generate = AsyncMock(side_effect=[
+            {"status": "done", "url": "eight.mp4", "provider": "byteplus", "model": "ark-seedance-2-0"},
+            {"status": "failed", "url": None, "provider": "byteplus", "error": "temporary provider failure"},
+            {"status": "failed", "url": None, "provider": "byteplus", "error": "temporary provider failure"},
+        ])
+        job_id = await create_job(tenant_id="test", payload={
+            "media_mode": "video", "model": "ark-seedance-2-0",
+            "prompt": (
+                "Scene 1 - FIRST | 0-13 seconds\nShow the opening.\n"
+                "Scene 2 - SECOND | 13-26 seconds\nShow the ending."
+            ),
+            "duration_seconds": 26, "sound_on": False,
+        })
+        with (
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch("app.services.logo_overlay.file_url_to_local_path", side_effect=lambda url: eight if url == "eight.mp4" else None),
+            patch.object(file_service, "upload_dir", self.work),
+        ):
+            await run_creative_studio_job(job_id)
+        result = await get_job(job_id)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("incomplete video was not published", result["error"])
+        self.assertFalse(result.get("url"))
+        self.assertEqual(provider.generate.await_count, 2)
+        calls = provider.generate.call_args_list
+        self.assertEqual([call.kwargs["duration_seconds"] for call in calls], [13, 5])
+        self.assertIn("CONTINUATION PASS", calls[1].kwargs["prompt"])
+        self.assertTrue(calls[1].kwargs["brief"]["strict_continuity_reference"])
 
     async def test_privacy_block_retries_with_scene_continuity_crop(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
@@ -649,6 +915,66 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["duration_seconds"], 15)
         for i in range(6):
             self.assertIn(f"Show action {i}", call.kwargs["prompt"])
+
+    async def test_interactive_long_video_waits_for_review_then_stitches(self):
+        from app.services.creative_studio_job_service import (
+            create_continuation_job,
+            create_job,
+            get_job,
+            run_creative_studio_job,
+        )
+        from app.services.file_service import file_service
+
+        fixture = self.make_clip("staged-fifteen-seconds", True, duration=15)
+        provider = Mock()
+        provider.generate = AsyncMock(return_value={
+            "status": "done", "url": "fixture.mp4", "provider": "byteplus",
+            "model": "ark-seedance-2-0", "duration_seconds": 15,
+        })
+        job_id = await create_job(tenant_id="test", payload={
+            "media_mode": "video", "model": "ark-seedance-2-0",
+            "prompt": (
+                "Scene 1 | 0-15 seconds\nShow the first chapter.\n"
+                "Scene 2 | 15-30 seconds\nContinue and finish the story."
+            ),
+            "duration_seconds": 30, "sound_on": False,
+            "prompt_only_video": True, "interactive_staging": True,
+        })
+        with (
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch("app.services.logo_overlay.file_url_to_local_path", return_value=fixture),
+            patch.object(file_service, "upload_dir", self.work),
+            patch("app.services.video_subtitles._ensure_local_video", return_value=fixture),
+            patch(
+                "app.services.media.seedance_multiscene.save_continuity_frame",
+                return_value="/files/test/final-frame.jpg",
+            ),
+        ):
+            await run_creative_studio_job(job_id)
+            first = await get_job(job_id)
+            self.assertEqual(first["status"], "done", first.get("error"))
+            self.assertTrue(first["continuation_available"])
+            self.assertEqual(first["completed_segments"], 1)
+            self.assertEqual(provider.generate.await_count, 1)
+
+            with patch(
+                "app.services.creative_studio_job_service.asyncio.create_task"
+            ) as create_task:
+                queued = await create_continuation_job(job_id, tenant_id="test")
+                continuation = create_task.call_args.args[0]
+                await continuation
+
+            final = await get_job(queued["job_id"])
+            self.assertEqual(final["status"], "done", final.get("error"))
+            self.assertFalse(final.get("continuation_available"))
+            self.assertEqual(provider.generate.await_count, 2)
+            second_call = provider.generate.await_args_list[1]
+            self.assertEqual(
+                second_call.kwargs["brief"]["continuity_reference_url"],
+                "/files/test/final-frame.jpg",
+            )
+            self.assertIn("15", second_call.kwargs["prompt"])
+            self.assertIn("30", second_call.kwargs["prompt"])
 
     async def test_exact_timed_voiceover_is_mixed_and_video_length_preserved(self):
         wav = self.work / "speech.wav"

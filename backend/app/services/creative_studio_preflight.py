@@ -22,7 +22,7 @@ def validate_video_preflight(
     boards = [str(url).strip() for url in (storyboard_image_urls or []) if str(url).strip()]
     assets = [asset for asset in (reference_assets or []) if isinstance(asset, dict)]
     windows = explicit_shot_windows(prompt, total=duration)
-    scene_count = len(list(SHOT_HEADER.finditer(prompt)))
+    scene_count = max(len(list(SHOT_HEADER.finditer(prompt))), len(windows))
     errors: list[str] = []
     warnings: list[str] = []
     if duration > 15 and scene_count < 2:
@@ -35,9 +35,9 @@ def validate_video_preflight(
             "selected images. Remove stale images that do not belong to the current plan."
         )
     if boards and scene_count and len(boards) < scene_count:
-        warnings.append(
-            f"{len(boards)} approved storyboard images cover {scene_count} timed scenes; "
-            "unanchored beats will continue inside the same natural Seedance chapter."
+        errors.append(
+            f"Storyboard coverage mismatch: select one approved image for every timed scene "
+            f"before long-video generation ({len(boards)} selected for {scene_count} scenes)."
         )
     if duration > 15 and not boards:
         warnings.append("No per-scene storyboard images are selected; later scenes are prompt-guided.")

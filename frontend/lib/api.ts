@@ -695,6 +695,8 @@ export const generationApi = {
         continuity_chained?: boolean
         continuity_frame_count?: number | null
         partial?: boolean
+        continuation_available?: boolean
+        completed_segments?: number | null
         credits_estimate?: number | null
         duration_warning?: string | null
         note?: string | null
@@ -722,6 +724,8 @@ export const generationApi = {
         continuity_chained?: boolean
         continuity_frame_count?: number | null
         partial?: boolean
+        continuation_available?: boolean
+        completed_segments?: number | null
         credits_estimate?: number | null
         duration_warning?: string | null
         note?: string | null
@@ -737,6 +741,18 @@ export const generationApi = {
         }[]
         media_mode?: string | null
       }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}`, {
+        timeout: 30_000,
+      })
+      .then((r) => r.data),
+
+  creativeStudioContinueJob: (jobId: string) =>
+    api
+      .post<{
+        status: string
+        job_id?: string | null
+        progress?: string | null
+        error?: string | null
+      }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}/continue`, {}, {
         timeout: 30_000,
       })
       .then((r) => r.data),
@@ -800,6 +816,7 @@ export const generationApi = {
     additional_reference_urls?: string[]
     reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' }[]
     storyboard_image_urls?: string[]
+    prompt_only_video?: boolean
     image_model?: string
     revision_notes?: string
     phase?: string

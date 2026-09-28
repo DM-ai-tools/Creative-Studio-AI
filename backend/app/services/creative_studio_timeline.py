@@ -6,23 +6,65 @@ import re
 
 MAX_VIDEO_PROMPT_CHARS = 32_000
 SHOT_HEADER = re.compile(
-    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:CLIP|Scene)[ \t]*\d+\b[^\n]*|"
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:(?:CLIP|Scene)[ \t]*\d+|S\d+[A-Za-z]?)[^\n]*|"
     r"\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:seconds?|s)\s*[—–-]\s*[^\n]+)"
 )
 _HEADER = SHOT_HEADER
-_RANGE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:s(?:econds?)?)?\s*[–—-]\s*(\d+(?:\.\d+)?)\s*(?:s(?:econds?)?)?\b", re.I)
+_TIME_VALUE = r"(?:\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)"
+_RANGE = re.compile(
+    rf"({_TIME_VALUE})\s*(?:s(?:econds?)?)?\s*[–—-]\s*"
+    rf"({_TIME_VALUE})\s*(?:s(?:econds?)?)?\b",
+    re.I,
+)
+_SESSION_HEADER = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:STEP\s+\d+\s*[—–-]\s*)?"
+    r"SESSION\s+([A-Za-z0-9]+)\s*\|\s*"
+    rf"({_TIME_VALUE})\s*[–—-]\s*"
+    rf"({_TIME_VALUE})[^\n]*"
+)
 _GLOBAL = re.compile(r"(?im)^\s*(?:AUDIO|TEXT RULE|PRODUCT RULE|MOTION RULE|VISUAL STYLE|EDITING / TIMING|STRICT NEGATIVE|PRODUCT CINEMATOGRAPHY LOCK|FINISHING LOCK|CHARACTER CONTINUITY|On-screen copy and graphic direction|Voiceover performance and synchronisation|Camera, lighting and finishing|Music and sound mix|Generation workflow and final checks)\s*[:\n]")
+
+
+def _clock_seconds(value: str) -> float:
+    raw = str(value or "").strip()
+    if ":" not in raw:
+        return float(raw)
+    minutes, seconds = raw.split(":", 1)
+    return float(minutes) * 60.0 + float(seconds)
+
+
+def _session_windows(prompt: str) -> list[tuple[float, float]]:
+    return [
+        (_clock_seconds(match.group(2)), _clock_seconds(match.group(3)))
+        for match in _SESSION_HEADER.finditer(prompt or "")
+    ]
 
 
 def explicit_shot_windows(prompt: str, *, total: float | None = None) -> list[tuple[float, float]]:
     """Return a contiguous authored edit, or leave unstructured briefs as one clip."""
+    sessions = _session_windows(prompt)
+    if len(sessions) >= 2:
+        previous = 0.0
+        for a, b in sessions:
+            if abs(a - previous) > 0.05 or b <= a or b - a > 15.05:
+                raise ValueError(
+                    "Seedance sessions must be continuous, ordered, and no longer than 15 seconds."
+                )
+            previous = b
+        if total is not None and abs(previous - total) > 0.05:
+            raise ValueError("The session timeline does not cover the requested video duration.")
+        return sessions
     windows = []
     for header in SHOT_HEADER.finditer(prompt):
-        heading = re.sub(r"(?i)^\s*(?:#{1,6}\s*)?(?:CLIP|Scene)\s*\d+\b", "", header.group())
+        heading = re.sub(
+            r"(?i)^\s*(?:#{1,6}\s*)?(?:(?:CLIP|Scene)\s*\d+|S\d+[A-Za-z]?)\b",
+            "",
+            header.group(),
+        )
         timing = _RANGE.search(heading)
         if not timing:
             return []
-        windows.append((float(timing.group(1)), float(timing.group(2))))
+        windows.append((_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2))))
     if len(windows) < 2:
         return []
     previous = 0.0
@@ -111,9 +153,25 @@ def select_complete_timeline_prompt(
             + f"{float(total):g}"
             + heading[timing.end(2) :]
         )
+        adjustment = float(total) - authored_end
+        if adjustment > 0:
+            duration_override = (
+                f"\nSELECTED-DURATION OVERRIDE: Preserve the authored final-shot action and "
+                f"timing, then extend only its stable ending composition by {adjustment:g}s "
+                f"to finish at global {float(total):g}s. This overrides older duration words "
+                "inside this final scene."
+            )
+        else:
+            duration_override = (
+                f"\nSELECTED-DURATION OVERRIDE: Keep the authored final action at natural "
+                f"speed and shorten only its stable ending hold by {abs(adjustment):g}s to "
+                f"finish at global {float(total):g}s. This overrides older duration words "
+                "inside this final scene."
+            )
         normalized = (
             candidate[: final_header.start()]
             + replacement
+            + duration_override
             + candidate[final_header.end() :]
         )
         # Revalidate after rewriting; never return a guessed broken timeline.
@@ -129,6 +187,37 @@ def select_complete_timeline_prompt(
 
 def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float) -> str:
     """Keep overlapping beats only; rebase their timing to this provider request."""
+    session_headers = list(_SESSION_HEADER.finditer(prompt))
+    if len(session_headers) >= 2:
+        prefix = prompt[:session_headers[0].start()].strip()
+        selected: list[str] = []
+        for i, header in enumerate(session_headers):
+            a = _clock_seconds(header.group(2))
+            b = _clock_seconds(header.group(3))
+            if b <= start or a >= end:
+                continue
+            stop = session_headers[i + 1].start() if i + 1 < len(session_headers) else len(prompt)
+            body = prompt[header.end():stop].strip()
+            body = re.split(
+                r"(?im)^\s*(?:---\s*)?QC\s+SESSION\b|^\s*STEP\s+[4-9]\s*[—–-]",
+                body,
+                maxsplit=1,
+            )[0].strip()
+            selected.append(
+                f"SESSION {header.group(1).upper()} — LOCAL 0–{b - a:g} seconds:\n{body}"
+            )
+        if not selected:
+            raise ValueError(
+                f"No Seedance session covers {start:g}–{end:g}s. Correct the session timeline."
+            )
+        context = re.sub(r"\b\d+(?:\.\d+)?[- ]SECOND\b", "FULL-FILM", prefix, flags=re.I)
+        return validate_video_prompt(
+            f"Generate ONLY {end - start:g} seconds for global timeline {start:g}–{end:g}s "
+            f"of a {total:g}s film. This is one complete Seedance call. "
+            "Follow the session's local shot timings exactly. Do not render QC, extraction, "
+            "stitch, audio-post, caption-post or encode instructions as scene content.\n\n"
+            f"{context}\n\n" + "\n\n".join(selected)
+        )
     headers = list(_HEADER.finditer(prompt))
     prefix = prompt[:headers[0].start()].strip() if headers else ""
     suffix = ""
@@ -140,10 +229,14 @@ def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float
         if global_start:
             suffix += "\n" + body[global_start.start():]
             body = body[:global_start.start()].strip()
-        heading = re.sub(r"(?i)^\s*(?:#{1,6}\s*)?(?:CLIP|Scene)\s*\d+\b", "", header.group())
+        heading = re.sub(
+            r"(?i)^\s*(?:#{1,6}\s*)?(?:(?:CLIP|Scene)\s*\d+|S\d+[A-Za-z]?)\b",
+            "",
+            header.group(),
+        )
         timing = _RANGE.search(heading)
         a, b = (
-            (float(timing.group(1)), float(timing.group(2)))
+            (_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2)))
             if timing else (i * total / len(headers), (i + 1) * total / len(headers))
         )
         if b <= a or a >= end or b <= start:

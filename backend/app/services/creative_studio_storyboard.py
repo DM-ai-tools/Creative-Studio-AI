@@ -13,7 +13,7 @@ from app.services.creative_studio_picture import (
 
 
 _SCENE_HEADER = re.compile(
-    r"(?is)^\s*(?:Scene|SCENE|CLIP)\s*(\d+)\s*[—\-:.]*\s*([^\n]*)"
+    r"(?is)^\s*(?:(?:Scene|CLIP)\s*(\d+)|(S\d+[A-Za-z]?))\s*[|—\-:.]*\s*([^\n]*)"
 )
 
 _OVERLAY_BLOCK = re.compile(
@@ -146,7 +146,12 @@ def parse_storyboard_scenes(
 
     # Only line-start headings delimit scenes; references to "Scene 2" inside a
     # direction are content, not a new scene.
-    text = re.sub(r"(?m)^\s*#{1,6}\s*(?=(?:Scene|CLIP)\s*\d+)", "", text, flags=re.I)
+    text = re.sub(
+        r"(?m)^\s*#{1,6}\s*(?=(?:(?:Scene|CLIP)\s*\d+|S\d+[A-Za-z]?))",
+        "",
+        text,
+        flags=re.I,
+    )
     starts = list(SHOT_HEADER.finditer(text))
     parts = [
         text[match.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)].strip()
@@ -160,8 +165,10 @@ def parse_storyboard_scenes(
         if not header:
             continue
         numbered = _SCENE_HEADER.match(part)
-        num = int(numbered.group(1)) if numbered else len(scenes) + 1
-        title = (numbered.group(2) if numbered else header.group()).strip(" —-:") or f"Scene {num}"
+        num = len(scenes) + 1
+        if numbered and numbered.group(1):
+            num = int(numbered.group(1))
+        title = (numbered.group(3) if numbered else header.group()).strip(" |—-:") or f"Scene {num}"
         body = part[header.end() :].strip()
         visual, overlays = _extract_overlays(body or title)
         visual = re.sub(

@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.http_retry import async_request_with_retry, is_transient_http_error
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,36 @@ def ark_headers() -> dict[str, str]:
         "Authorization": f"Bearer {settings.ARK_API_KEY.strip()}",
         "Content-Type": "application/json",
     }
+
+
+def seedance_async_client() -> httpx.AsyncClient:
+    """
+    Seedance jobs poll for several minutes. Disable keep-alive so each request
+    uses a fresh TCP connection (avoids stale-socket ConnectError mid-poll).
+    """
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=45.0, read=120.0, write=120.0, pool=30.0),
+        limits=httpx.Limits(max_keepalive_connections=0, max_connections=20),
+        follow_redirects=True,
+    )
+
+
+def is_seedance_transport_error(exc: BaseException | str) -> bool:
+    """True for network/connect failures talking to BytePlus ModelArk."""
+    if is_transient_http_error(exc if isinstance(exc, BaseException) else RuntimeError(str(exc))):
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "all connection attempts failed",
+            "connecterror",
+            "connection refused",
+            "connection reset",
+            "temporary failure in name resolution",
+            "timed out while connecting",
+        )
+    )
 
 
 def map_aspect_to_ratio(aspect: str | None, format_type: str | None = None) -> str:
@@ -132,7 +163,16 @@ async def create_video_task(
         "watermark": False,
     }
     url = f"{ark_base_url()}/contents/generations/tasks"
-    response = await client.post(url, json=payload, headers=ark_headers(), timeout=120.0)
+    response = await async_request_with_retry(
+        client,
+        "POST",
+        url,
+        json=payload,
+        headers=ark_headers(),
+        timeout=120.0,
+        label="BytePlus Seedance create",
+        max_attempts=6,
+    )
     if response.status_code >= 400:
         body = (response.text or "")[:800]
         raise RuntimeError(f"BytePlus Seedance create failed ({response.status_code}): {body}")
@@ -174,7 +214,15 @@ async def poll_video_task(
             except Exception as exc:
                 logger.warning("Delete Seedance task on cancel failed: %s", exc)
             raise RuntimeError(f"{label} cancelled by user")
-        response = await client.get(url, headers=ark_headers(), timeout=60.0)
+        response = await async_request_with_retry(
+            client,
+            "GET",
+            url,
+            headers=ark_headers(),
+            timeout=60.0,
+            label=f"{label} poll",
+            max_attempts=5,
+        )
         if response.status_code >= 400:
             body = (response.text or "")[:500]
             raise RuntimeError(f"{label} poll failed ({response.status_code}): {body}")

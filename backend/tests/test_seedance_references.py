@@ -140,6 +140,32 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("selected character reference", result["error"])
         self.assertIn("No replacement person", result["error"])
 
+    async def test_locked_storyboard_is_classified_as_the_submitted_reference(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        privacy_error = RuntimeError("InputImageSensitiveContentDetected.PrivacyInformation")
+        submit = AsyncMock(side_effect=privacy_error)
+        strict_brief = {
+            **self.brief,
+            "strict_character_reference": True,
+            "strict_opening_reference": True,
+        }
+        with (
+            patch(module + ".ark_configured", return_value=True),
+            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".create_video_task", submit),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="Animate the approved scene.", brief=strict_brief, copy={},
+                format_type="landscape", model="ark-seedance-2-0", tenant_id="test",
+                source_image_url="https://example.com/approved-opening.png",
+                duration_seconds=6,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(submit.await_count, 1)
+        self.assertIn("approved storyboard opening frame", result["error"])
+        self.assertNotIn("selected character reference", result["error"])
+
     async def test_strict_continuity_never_drops_the_previous_chapter_frame(self):
         module = "app.services.media.byteplus_seedance_provider"
         privacy_error = RuntimeError("InputImageSensitiveContentDetected.PrivacyInformation")
@@ -184,6 +210,49 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["retryable"])
         self.assertEqual(result["error_code"], "AccountOverdueError")
         self.assertIn("Settle/recharge BytePlus billing", result["error"])
+        self.assertEqual(submit.await_count, 1)
+
+    async def test_connection_failure_before_create_is_retryable_without_task_id(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        submit = AsyncMock(side_effect=RuntimeError("All connection attempts failed"))
+        with (
+            patch(module + ".ark_configured", return_value=True),
+            patch(module + ".create_video_task", submit),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="Continue the commercial.", brief={}, copy={},
+                format_type="landscape", model="ark-seedance-2-0", tenant_id="test",
+                duration_seconds=15,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["error_code"], "ProviderConnectionError")
+        self.assertIn("No Seedance task was created", result["error"])
+        self.assertNotIn("task_id", result)
+        self.assertEqual(submit.await_count, 1)
+
+    async def test_poll_connection_failure_after_task_created_is_retryable_with_task_id(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        submit = AsyncMock(return_value="paid-task-123")
+        poll = AsyncMock(side_effect=RuntimeError("All connection attempts failed"))
+        with (
+            patch(module + ".ark_configured", return_value=True),
+            patch(module + ".create_video_task", submit),
+            patch(module + ".poll_video_task", poll),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="Continue the commercial.", brief={}, copy={},
+                format_type="landscape", model="ark-seedance-2-0", tenant_id="test",
+                duration_seconds=15,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["error_code"], "ProviderPollConnectionError")
+        self.assertEqual(result["task_id"], "paid-task-123")
+        self.assertIn("billable", result["error"])
+        self.assertIn("paid-task-123", result["error"])
         self.assertEqual(submit.await_count, 1)
 
     async def test_successful_provider_task_is_not_regenerated_when_local_download_fails(self):

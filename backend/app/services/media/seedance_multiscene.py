@@ -400,6 +400,37 @@ def save_privacy_safe_scene_frame(video_path: Path, *, tenant_id: str) -> str:
     return str(saved["file_url"])
 
 
+def save_privacy_safe_storyboard_frame(image_url: str, *, tenant_id: str) -> str:
+    """Crop a storyboard below the face for a provider-moderation retry.
+
+    The crop retains the authored set, product, wardrobe colours and action area.
+    It is used only after BytePlus rejects the full approved frame, and the retry
+    prompt keeps faces outside the shot so the model cannot invent a replacement
+    identity.
+    """
+    from PIL import Image
+    from app.services.logo_overlay import file_url_to_local_path
+
+    source = file_url_to_local_path(image_url)
+    if not source or not source.is_file():
+        raise RuntimeError("Could not load the approved storyboard frame for privacy-safe retry")
+    output = BytesIO()
+    with Image.open(source) as image:
+        image = image.convert("RGB")
+        width, height = image.size
+        top = min(height - 2, max(0, int(round(height * 0.42))))
+        cropped = image.crop((0, top, width, height))
+        cropped.save(output, format="JPEG", quality=90, optimize=True)
+    saved = file_service.save_bytes(
+        content=output.getvalue(),
+        tenant_id=tenant_id,
+        subfolder="generated/storyboard-safe",
+        suffix=".jpg",
+        content_type="image/jpeg",
+    )
+    return str(saved["file_url"])
+
+
 async def upload_frame_png(png_bytes: bytes, *, tenant_id: str) -> str:
     """Upload a video last-frame as JPEG to Higgsfield (for stitch continuity)."""
     from app.services.media.higgsfield_client_service import (

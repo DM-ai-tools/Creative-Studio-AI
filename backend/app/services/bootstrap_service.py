@@ -52,17 +52,15 @@ async def ensure_default_admin(db: AsyncSession) -> None:
         )
         await db.commit()
 
-    # Self-serve signups used to create their own tenant + admin role.
-    # Demote those accounts to members and move them into the shared workspace
-    # so they appear in the Admin → Team Members list.
-    await _normalize_member_accounts(db, admin_email=admin_email, workspace_id=tenant.id)
+    # Only the platform admin account may hold admin role. Member workspaces stay
+    # isolated — do not merge them into the admin tenant on startup.
+    await _demote_non_platform_admins(db, admin_email=admin_email)
 
 
-async def _normalize_member_accounts(
+async def _demote_non_platform_admins(
     db: AsyncSession,
     *,
     admin_email: str,
-    workspace_id,
 ) -> None:
     result = await db.execute(select(User).where(User.email != admin_email))
     users = list(result.scalars().all())
@@ -70,9 +68,6 @@ async def _normalize_member_accounts(
     for u in users:
         if u.role == "admin":
             u.role = "member"
-            changed = True
-        if u.tenant_id != workspace_id:
-            u.tenant_id = workspace_id
             changed = True
     if changed:
         await db.commit()

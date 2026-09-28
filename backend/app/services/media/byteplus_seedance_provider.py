@@ -16,9 +16,11 @@ from app.services.media.byteplus_seedance_client import (
     create_video_task,
     extract_video_url,
     is_seedance_person_privacy_block,
+    is_seedance_transport_error,
     map_aspect_to_ratio,
     map_resolution,
     poll_video_task,
+    seedance_async_client,
 )
 from app.services.media.runway_client import file_url_to_data_uri
 from app.services.media.runway_providers import _download_asset
@@ -133,12 +135,33 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "task_id": task_id,
             }
 
-        task = await poll_video_task(
-            client,
-            task_id,
-            label=f"BytePlus Seedance ({api_model})",
-            cancel_check=cancel_check,
-        )
+        try:
+            task = await poll_video_task(
+                client,
+                task_id,
+                label=f"BytePlus Seedance ({api_model})",
+                cancel_check=cancel_check,
+            )
+        except Exception as exc:
+            if is_seedance_transport_error(exc):
+                return {
+                    "status": "failed",
+                    "model": api_model,
+                    "catalog_model": model,
+                    "prompt": motion_prompt,
+                    "url": None,
+                    "provider": "byteplus",
+                    "task_id": task_id,
+                    "retryable": True,
+                    "error_code": "ProviderPollConnectionError",
+                    "error": (
+                        f"BytePlus accepted Seedance task {task_id} (this call is billable), "
+                        "but the connection dropped while waiting for the video. The render may "
+                        "still be running — click Generate again to recover without submitting a "
+                        "duplicate task, or check the BytePlus dashboard for task status."
+                    ),
+                }
+            raise
         remote_url = extract_video_url(task)
         from app.services.media.byteplus_usage import video_task_usage
         from app.services.usage_tracker import record_usage
@@ -272,13 +295,28 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             return None
 
         manifest = reference_manifest(brief, source_image_url)
-        strict_character_reference = bool(brief.get("strict_character_reference")) and any(
+        primary_opening_supplied = bool(source_image_url) and image_role in {
+            "first_frame", "last_frame"
+        }
+        # A first/last-frame task sends that frame alone. Character assets that
+        # remain in the manifest are not actually submitted, so they must not
+        # accidentally disable recovery for the submitted opening frame.
+        strict_character_reference = (
+            bool(brief.get("strict_character_reference"))
+            and not primary_opening_supplied
+            and any(
             asset.get("role") == "character" for asset in manifest
+            )
         )
         strict_continuity_reference = bool(brief.get("strict_continuity_reference")) and any(
             asset.get("role") == "continuity" for asset in manifest
         )
-        strict_reference_lock = strict_character_reference or strict_continuity_reference
+        strict_opening_reference = bool(brief.get("strict_opening_reference")) and primary_opening_supplied
+        strict_reference_lock = (
+            strict_character_reference
+            or strict_continuity_reference
+            or strict_opening_reference
+        )
         use_multimodal = image_role == "reference_image" or len(manifest) > 1 or any(
             asset["role"] != "storyboard" for asset in manifest
         )
@@ -384,7 +422,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                     "error": "Cancelled by user",
                 }
 
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            async with seedance_async_client() as client:
                 for tier_index, (tier, assets, multimodal, suffix, warning) in enumerate(attempt_plan):
                     if tier == "anchors" and not assets:
                         continue
@@ -447,6 +485,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         except Exception as exc:
             logger.exception("BytePlus Seedance video failed: %s", exc)
             err = str(exc)
+            transport_failed = is_seedance_transport_error(exc)
             billing_blocked = any(
                 marker in err.lower()
                 for marker in (
@@ -482,6 +521,22 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                     "retryable": False,
                     "error_code": "AccountOverdueError",
                 }
+            if transport_failed:
+                return {
+                    "status": "failed",
+                    "model": api_model,
+                    "catalog_model": model,
+                    "prompt": prompt,
+                    "url": None,
+                    "provider": "byteplus",
+                    "error": (
+                        "Could not reach BytePlus to submit Seedance after automatic retries. "
+                        "No Seedance task was created and no credits should have been consumed. "
+                        "Check your network, VPN, and firewall, then click Generate again."
+                    ),
+                    "retryable": True,
+                    "error_code": "ProviderConnectionError",
+                }
             if is_seedance_person_privacy_block(exc):
                 if strict_continuity_reference:
                     err = (
@@ -494,6 +549,12 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                         "Seedance blocked the selected character reference as photoreal identity content. "
                         "No replacement person was generated. Choose a non-photoreal or 2D character "
                         "anchor, or remove the character lock and try again."
+                    )
+                elif strict_opening_reference:
+                    err = (
+                        "Seedance blocked the approved storyboard opening frame as photoreal "
+                        "identity content. The frame was kept locked, so no replacement person "
+                        "or unanchored scene was generated."
                     )
                 else:
                     err = (
@@ -511,3 +572,93 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "error": err[:500],
                 "retryable": True,
             }
+
+
+async def recover_byteplus_seedance_task(
+    task_id: str,
+    *,
+    tenant_id: str,
+    cs_job_id: str | None = None,
+    cancel_check=None,
+    model: str | None = None,
+) -> dict | None:
+    """
+    Poll an already-submitted Seedance task and download its output.
+
+    Used when create succeeded (billable) but status polling or download failed.
+    Does not submit a new generation task.
+    """
+    tid = str(task_id or "").strip()
+    if not tid or not ark_configured():
+        return None
+
+    api_model = resolve_byteplus_api_model(model)
+    cancel = cancel_check or (lambda: False)
+
+    async with seedance_async_client() as client:
+        try:
+            task = await poll_video_task(
+                client,
+                tid,
+                label=f"BytePlus Seedance recovery ({api_model})",
+                cancel_check=cancel,
+            )
+        except Exception as exc:
+            logger.warning("Seedance recovery poll failed for task %s: %s", tid, exc)
+            return None
+
+        remote_url = extract_video_url(task)
+        if not remote_url:
+            return None
+
+        from app.services.media.byteplus_usage import video_task_usage
+        from app.services.usage_tracker import record_usage
+
+        provider_usage = video_task_usage(task, task_id=tid, model=api_model)
+        record_usage(
+            provider="byteplus",
+            model=api_model,
+            operation="video_generation",
+            prompt_tokens=provider_usage.get("prompt_tokens") or 0,
+            completion_tokens=provider_usage.get("completion_tokens") or 0,
+            total_tokens=provider_usage.get("total_tokens") or 0,
+            tenant_id=tenant_id,
+            extra={**provider_usage, "recovered": True},
+        )
+
+        download_warning: str | None = None
+        try:
+            saved = await _download_asset(
+                client,
+                remote_url,
+                tenant_id=tenant_id,
+                kind="video",
+            )
+        except Exception as exc:
+            logger.exception("Seedance recovery download failed for task %s: %s", tid, exc)
+            saved = {"url": remote_url, "remote_url": remote_url}
+            download_warning = (
+                "Recovered the Seedance output URL, but local download failed: "
+                f"{exc}"[:300]
+            )
+
+        result = {
+            "status": "done",
+            "model": api_model,
+            "url": saved["url"],
+            "remote_url": saved.get("remote_url"),
+            "provider": "byteplus",
+            "task_id": tid,
+            "recovered": True,
+            "provider_usage": [provider_usage],
+        }
+        if download_warning:
+            result["download_warning"] = download_warning
+        if cs_job_id:
+            from app.services.creative_studio_job_service import update_job
+
+            await update_job(
+                cs_job_id,
+                progress="Recovered Seedance output from the existing BytePlus task…",
+            )
+        return result

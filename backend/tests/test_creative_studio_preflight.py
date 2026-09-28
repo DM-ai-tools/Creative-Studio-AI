@@ -35,6 +35,16 @@ class CreativeStudioPreflightTests(unittest.TestCase):
                 product_reference_url=None, logo_reference_url=None,
             )
 
+    def test_missing_storyboard_scene_blocks_before_provider_submission(self):
+        with self.assertRaisesRegex(ValueError, "one approved image for every timed scene"):
+            validate_video_preflight(
+                prompt=self._prompt(), duration_seconds=26,
+                storyboard_image_urls=[f"/files/scene-{i}.png" for i in range(6)],
+                seed_image_url="/files/scene-0.png", sound_on=False,
+                voice_events=[], reference_assets=[], product_reference_url=None,
+                logo_reference_url=None,
+            )
+
     def test_unplanned_long_video_is_blocked(self):
         with self.assertRaisesRegex(ValueError, "explicit timed multi-scene plan"):
             validate_video_preflight(
@@ -102,6 +112,22 @@ class CreativeStudioPreflightTests(unittest.TestCase):
         self.assertNotIn("Plan your project", scenes[0]["visual"])
         self.assertNotIn("Start here", scenes[0]["visual"])
         self.assertEqual(scenes[0]["overlays"], ["Start here"])
+
+    def test_pipe_s_headers_create_one_storyboard_frame_per_authored_shot(self):
+        scenes = parse_storyboard_scenes(
+            "S1 | 0.0–4.0s | BEFORE\nShow the unfinished yard.\n"
+            "S2 | 4.0–9.0s | SHOWROOM\nShow the product range.\n"
+            "S3a | 9.0–11.5s | ORDER ONLINE\nUse a laptop.\n"
+            "S3b | 11.5–14.0s | ORDER PREPARED\nPack the order.\n"
+            "S4 | 14.0–18.0s | COLLECTION\nHand over the order.\n"
+            "S5 | 18.0–26.0s | AFTER\nReveal the finished yard."
+        )
+        self.assertEqual(len(scenes), 6)
+        self.assertEqual(
+            [scene["title"] for scene in scenes],
+            ["0.0–4.0s | BEFORE", "4.0–9.0s | SHOWROOM", "9.0–11.5s | ORDER ONLINE",
+             "11.5–14.0s | ORDER PREPARED", "14.0–18.0s | COLLECTION", "18.0–26.0s | AFTER"],
+        )
 
 
 if __name__ == "__main__":

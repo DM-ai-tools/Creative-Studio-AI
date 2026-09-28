@@ -6,6 +6,7 @@ export type CsPipelineAction =
   | 'regenerate_image'
   | 'approve_next'
   | 'generate_video'
+  | 'continue_video'
   | 'generate_storyboard'
 
 export interface CsStoryboardFrame {
@@ -75,22 +76,24 @@ export interface CsChatSession {
 }
 
 function scopeKey(briefId?: string, brandId?: string) {
-  // Keep a brand's chat history stable when the user navigates between briefs.
-  // Individual sessions remain isolated by their session id.
-  return brandId || briefId || 'draft'
+  // Explicit prefixes prevent a brief id, brand id, and draft workspace from
+  // ever sharing the same browser-storage namespace.
+  if (brandId) return `brand:${brandId}`
+  if (briefId) return `brief:${briefId}`
+  return 'draft'
 }
 
 export function csHistoryStoreKey(briefId?: string, brandId?: string) {
-  return `cs-chat-history-v1:${scopeKey(briefId, brandId)}`
+  return `cs-chat-history-v2:${scopeKey(briefId, brandId)}`
 }
 
 export function csActiveChatKey(briefId?: string, brandId?: string) {
-  return `cs-chat-active-v1:${scopeKey(briefId, brandId)}`
+  return `cs-chat-active-v2:${scopeKey(briefId, brandId)}`
 }
 
 /** Legacy single-thread key from earlier Supercomputer build. */
 export function csLegacyThreadKey(briefId?: string, brandId?: string) {
-  return `cs-supercomputer-chat-v2:${scopeKey(briefId, brandId)}`
+  return `cs-supercomputer-chat-v3:${scopeKey(briefId, brandId)}`
 }
 
 function uid() {
@@ -123,58 +126,65 @@ export function titleFromMessages(messages: CsChatMessage[]): string {
   return t.length > 42 ? `${t.slice(0, 42)}…` : t
 }
 
+function parseStoredSessions(raw: string | null): CsChatSession[] {
+  if (!raw) return []
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) return []
+  return parsed
+    .filter((s) => s && typeof s.id === 'string')
+    .map((s) => ({
+      id: s.id,
+      title: String(s.title || 'New chat'),
+      createdAt: Number(s.createdAt || s.updatedAt || Date.now()),
+      updatedAt: Number(s.updatedAt || Date.now()),
+      messages: Array.isArray(s.messages) ? s.messages : [],
+      imagePrompt: String(s.imagePrompt || ''),
+      videoPrompt: String(s.videoPrompt || ''),
+      approvedImageUrl: String(s.approvedImageUrl || ''),
+      productReferenceUrl: String(s.productReferenceUrl || ''),
+      logoReferenceUrl: String(s.logoReferenceUrl || ''),
+      characterReferenceUrl: String(s.characterReferenceUrl || ''),
+      additionalReferenceUrls: Array.isArray(s.additionalReferenceUrls)
+        ? s.additionalReferenceUrls.map(String).filter(Boolean).slice(0, 7)
+        : [],
+      phase: String(s.phase || ''),
+    }))
+}
+
+function v1ScopeKey(briefId?: string, brandId?: string) {
+  return brandId || briefId || 'draft'
+}
+
 export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSession[] {
   try {
     const currentKey = csHistoryStoreKey(briefId, brandId)
-    const fallbackKeys = [
-      // Previous versions preferred briefId, and the first render can save
-      // before brand selection resolves. Read those keys once for migration.
-      briefId ? `cs-chat-history-v1:${briefId}` : '',
-      briefId || brandId ? 'cs-chat-history-v1:draft' : '',
-    ].filter((key) => key && key !== currentKey)
+    const oldScope = v1ScopeKey(briefId, brandId)
+    const legacyKey = `cs-chat-history-v1:${oldScope}`
+    const current = parseStoredSessions(localStorage.getItem(currentKey))
+    // Restore only this exact brand's old history. Never import the shared
+    // draft bucket into a selected brand, which caused the cross-brand leak.
+    const legacy = parseStoredSessions(localStorage.getItem(legacyKey))
     const merged = new Map<string, CsChatSession>()
-    const migratedKeys: string[] = []
-    for (const key of [currentKey, ...fallbackKeys]) {
-      const raw = localStorage.getItem(key)
-      if (!raw) continue
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        const sessions = parsed
-          .filter((s) => s && typeof s.id === 'string')
-          .map((s) => ({
-            id: s.id,
-            title: String(s.title || 'New chat'),
-            createdAt: Number(s.createdAt || s.updatedAt || Date.now()),
-            updatedAt: Number(s.updatedAt || Date.now()),
-            messages: Array.isArray(s.messages) ? s.messages : [],
-            imagePrompt: String(s.imagePrompt || ''),
-            videoPrompt: String(s.videoPrompt || ''),
-            approvedImageUrl: String(s.approvedImageUrl || ''),
-            productReferenceUrl: String(s.productReferenceUrl || ''),
-            logoReferenceUrl: String(s.logoReferenceUrl || ''),
-            characterReferenceUrl: String(s.characterReferenceUrl || ''),
-            additionalReferenceUrls: Array.isArray(s.additionalReferenceUrls)
-              ? s.additionalReferenceUrls.map(String).filter(Boolean).slice(0, 7)
-              : [],
-            phase: String(s.phase || ''),
-          }))
-        for (const session of sessions) {
-          const existing = merged.get(session.id)
-          if (!existing || session.updatedAt > existing.updatedAt) {
-            merged.set(session.id, session)
-          }
+    for (const session of [...current, ...legacy]) {
+      const existing = merged.get(session.id)
+      if (!existing || session.updatedAt > existing.updatedAt) merged.set(session.id, session)
+    }
+    const sessions = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+    if (legacy.length) {
+      saveCsChatSessions(briefId, brandId, sessions)
+      const savedIds = new Set(
+        parseStoredSessions(localStorage.getItem(currentKey)).map((session) => session.id),
+      )
+      if (sessions.every((session) => savedIds.has(session.id))) {
+        const legacyActive = localStorage.getItem(`cs-chat-active-v1:${oldScope}`)
+        if (legacyActive && savedIds.has(legacyActive)) {
+          localStorage.setItem(csActiveChatKey(briefId, brandId), legacyActive)
         }
-        if (key !== currentKey && sessions.length) migratedKeys.push(key)
+        localStorage.removeItem(legacyKey)
+        localStorage.removeItem(`cs-chat-active-v1:${oldScope}`)
       }
     }
-    const sessions = Array.from(merged.values())
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, 3)
-    if (sessions.length) {
-      saveCsChatSessions(briefId, brandId, sessions)
-      for (const key of migratedKeys) localStorage.removeItem(key)
-      return sessions
-    }
+    if (sessions.length) return sessions
   } catch {
     /* ignore */
   }
@@ -215,17 +225,13 @@ export function saveCsChatSessions(
   sessions: CsChatSession[],
 ) {
   try {
-    const trimmed = sessions
+    const complete = sessions
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      // Keep the three most recent complete chats, including generated media
-      // message URLs, without overflowing browser localStorage on long briefs.
-      .slice(0, 3)
-      .map((s) => ({
-        ...s,
-        messages: (s.messages || []).slice(-40),
-      }))
-    localStorage.setItem(csHistoryStoreKey(briefId, brandId), JSON.stringify(trimmed))
+    const key = csHistoryStoreKey(briefId, brandId)
+    // Preserve every session and every message. There is no application-level
+    // count cap and saving a new chat never deletes an older one.
+    localStorage.setItem(key, JSON.stringify(complete))
   } catch {
     /* quota */
   }

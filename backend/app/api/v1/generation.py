@@ -1402,6 +1402,8 @@ class CreativeStudioGenerateResponse(BaseModel):
     storyboard: list[dict] | None = None
     media_mode: str | None = None
     product_reference_url: str | None = None
+    continuation_available: bool = False
+    completed_segments: int | None = None
 
 
 class CreativeStudioPromptRequest(BaseModel):
@@ -1464,6 +1466,7 @@ class CreativeStudioChatRequest(BaseModel):
     additional_reference_urls: list[str] = Field(default_factory=list)
     reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
     storyboard_image_urls: list[str] = Field(default_factory=list)
+    prompt_only_video: bool = False
 
 
 class CreativeStudioChatResponse(BaseModel):
@@ -1592,13 +1595,21 @@ async def creative_studio_chat(
         image_model=data.image_model,
         revision_notes=data.revision_notes,
         phase=data.phase,
+        # Role-labelled Creative Studio uploads are authoritative. In earlier
+        # builds the first attachment fallback incorrectly promoted a logo to
+        # "product", producing contradictory Seedance reference instructions.
         product_reference_url=data.product_reference_url or (
-            (data.attachment_urls or [None])[0] if data.attachment_urls else ""
+            (data.attachment_urls or [None])[0]
+            if data.attachment_urls
+            and not data.reference_assets
+            and not data.logo_reference_url
+            else ""
         ) or "",
         logo_reference_url=data.logo_reference_url,
         additional_reference_urls=list(data.additional_reference_urls or []),
         reference_assets=[asset.model_dump() for asset in data.reference_assets],
         storyboard_image_urls=list(data.storyboard_image_urls or []),
+        prompt_only_video=bool(data.prompt_only_video),
     )
     return CreativeStudioChatResponse(**result)
 
@@ -1722,7 +1733,28 @@ async def creative_studio_job_status(
         storyboard=job.get("storyboard") if isinstance(job.get("storyboard"), list) else None,
         media_mode=job.get("media_mode"),
         product_reference_url=job.get("product_reference_url"),
+        continuation_available=bool(job.get("continuation_available")),
+        completed_segments=job.get("completed_segments"),
     )
+
+
+@router.post(
+    "/creative-studio/jobs/{job_id}/continue",
+    response_model=CreativeStudioGenerateResponse,
+)
+async def creative_studio_job_continue(
+    job_id: str,
+    current_user=Depends(get_current_user),
+):
+    """After review, generate the next Seedance chapter from the prior final frame."""
+    from app.services.creative_studio_job_service import create_continuation_job
+
+    job = await create_continuation_job(job_id, tenant_id=str(current_user.tenant_id))
+    if not job:
+        raise HTTPException(status_code=404, detail="Video part not found")
+    if job.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=str(job.get("error") or "No continuation"))
+    return CreativeStudioGenerateResponse(**job)
 
 
 @router.post("/creative-studio/jobs/{job_id}/cancel", response_model=CreativeStudioGenerateResponse)

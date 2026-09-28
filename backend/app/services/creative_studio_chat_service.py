@@ -103,6 +103,11 @@ def _explicit_duration_from_text(text: str) -> int | None:
     )
     if seconds:
         return max(5, min(120, int(seconds.group(1))))
+    # Production briefs commonly put a compact runtime in the title, such as
+    # "26s LIVE-ACTION AD". Read that before estimating from document length.
+    compact_seconds = re.search(r"(?i)\b(\d{1,3})\s*s\b", raw)
+    if compact_seconds:
+        return max(5, min(120, int(compact_seconds.group(1))))
     minutes = re.search(
         r"(?i)\b(\d{1,2})\s*[- ]?\s*(?:minutes?|mins?)\b",
         raw,
@@ -449,6 +454,7 @@ async def _start_job(
     source_brief: str = "",
     storyboard_scenes: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
+    prompt_only_video: bool = False,
 ) -> str:
     import asyncio
 
@@ -480,6 +486,10 @@ async def _start_job(
             "source_brief": source_brief,
             "storyboard_scenes": storyboard_scenes or [],
             "storyboard_image_urls": storyboard_image_urls or [],
+            "prompt_only_video": bool(prompt_only_video),
+            # Long Creative Studio films are reviewed one provider-sized chapter
+            # at a time. The next paid call starts only after user approval.
+            "interactive_staging": media_mode == "video" and duration_seconds > 15,
         },
     )
     asyncio.create_task(run_creative_studio_job(job_id))
@@ -597,10 +607,12 @@ async def run_creative_studio_chat_turn(
     additional_reference_urls: list[str] | None = None,
     reference_assets: list[dict[str, str]] | None = None,
     storyboard_image_urls: list[str] | None = None,
+    prompt_only_video: bool = False,
 ) -> dict[str, Any]:
     """
-    Supercomputer turn:
-    draft → GPT Image 2 still (optional product photo ref) → approve → Seedance video.
+    Creative Studio direct video turn. GPT image/storyboard generation is
+    temporarily disabled; authored prompts and uploaded references go directly
+    to Seedance.
     """
     from app.services.media.byteplus_seedance_client import ark_configured
     from app.services.media.higgsfield_models import higgsfield_configured
@@ -614,9 +626,24 @@ async def run_creative_studio_chat_turn(
     if action_norm not in ACTIONS:
         action_norm = "continue"
 
+    # Authoritative server-side guard for old browser bundles and Fast Refresh
+    # state. Creative Studio currently has one path: uploads + authored prompt
+    # directly to Seedance. Never spend an image-generation call here.
+    prompt_only_video = True
+    if action_norm in {
+        "continue",
+        "generate_image",
+        "regenerate_image",
+        "generate_storyboard",
+        "approve_next",
+    }:
+        action_norm = "generate_video"
+
     attachments = [u for u in (attachment_urls or []) if (u or "").strip()]
     product_ref = (product_reference_url or "").strip() or (attachments[0] if attachments and not reference_assets else "")
     logo_ref = (logo_reference_url or "").strip()
+    if product_ref and logo_ref and product_ref == logo_ref:
+        product_ref = ""
     extra_refs = [
         u.strip()
         for u in (additional_reference_urls or [])
@@ -870,7 +897,7 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
                 "error": None,
             }
-        if not seed:
+        if not seed and not prompt_only_video:
             return {
                 "assistant_message": (
                     "Approve a generated still first (or Generate image with your product photo attached). "
@@ -949,17 +976,22 @@ async def run_creative_studio_chat_turn(
         if len(brief_for_motion) < 80:
             brief_for_motion = f"{image_prompt}\n{video_prompt}\n{last_user}".strip()
 
-        motion = await _ensure_rich_motion_prompt(
-            model_slug=model_slug,
-            user_brief=brief_for_motion,
-            image_prompt=image_prompt,
-            video_prompt=motion,
-            duration_seconds=out_duration,
-            sound_on=sound_on,
-            brand_name=brand_name,
-            product_name=product_name,
-        )
-        motion = _with_product_fidelity(motion, product_ref or None)
+        if prompt_only_video:
+            # Direct mode preserves the user's authored timed prompt verbatim.
+            # It deliberately bypasses GPT image planning and LLM prompt rewrites.
+            motion = brief_for_motion or motion
+        else:
+            motion = await _ensure_rich_motion_prompt(
+                model_slug=model_slug,
+                user_brief=brief_for_motion,
+                image_prompt=image_prompt,
+                video_prompt=motion,
+                duration_seconds=out_duration,
+                sound_on=sound_on,
+                brand_name=brand_name,
+                product_name=product_name,
+            )
+            motion = _with_product_fidelity(motion, product_ref or None)
 
         multi_beat = bool(
             re.search(r"(?i)\bCLIP\s*2\b|\bHOOK\b|\bBODY\b|\bScene\s*2\b", motion)
@@ -973,7 +1005,7 @@ async def run_creative_studio_chat_turn(
             aspect=out_aspect,
             resolution=resolution,
             sound_on=sound_on,
-            seed_image_url=seed or None,
+            seed_image_url=None if prompt_only_video else seed or None,
             # The image the user approved is the exact opening composition for
             # every video, including multi-scene stories. Later storyboard
             # frames remain references; they must not demote the approved still.
@@ -985,9 +1017,10 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             source_brief=full_brief,
-            storyboard_image_urls=[
+            storyboard_image_urls=[] if prompt_only_video else [
                 u for u in (storyboard_image_urls or []) if (u or "").strip()
             ][:9],
+            prompt_only_video=prompt_only_video,
         )
         audio_note = "with native audio" if sound_on else "silent"
         return {
@@ -996,9 +1029,15 @@ async def run_creative_studio_chat_turn(
                 f"{out_aspect.replace('/', ':')} · {audio_note}. "
                 "Driving the FULL timed story from your brief"
                 + (
-                    " (approved still as opening frame, then progressing through each beat)."
+                    " as direct Seedance chapters using only your uploaded references; "
+                    "no GPT-generated storyboard images."
+                    if prompt_only_video
+                    else " (approved still as opening frame, then progressing through each beat)."
                 )
-                + (" Product photo fidelity kept in the motion brief." if product_ref else "")
+                + (
+                    " Product photo fidelity kept in the motion brief."
+                    if product_ref else ""
+                )
             ),
             "intent": "generate_video",
             "phase": "video_running",
@@ -1008,7 +1047,7 @@ async def run_creative_studio_chat_turn(
             "video_model": SEEDANCE_VIDEO_MODEL,
             "image_prompt": image_prompt or None,
             "video_prompt": motion,
-            "approved_image_url": seed or None,
+            "approved_image_url": None if prompt_only_video else seed or None,
             "product_reference_url": product_ref or None,
             "status": "queued",
             "job_id": job_id,

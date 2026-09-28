@@ -78,6 +78,7 @@ const ACTION_LABELS: Record<string, string> = {
   regenerate_image: 'Regenerate image',
   approve_next: 'Approve & Next → Seedance video',
   generate_video: 'Generate video',
+  continue_video: 'Generate next part',
 }
 
 function uid() {
@@ -138,7 +139,10 @@ export default function CreativeStudioTab({
   const [aspect, setAspect] = useState<AspectId>('9/16')
   const [resolution, setResolution] = useState<ResolutionId>('720p')
   const [soundOn, setSoundOn] = useState(true)
-  const [useStoryboardReferences, setUseStoryboardReferences] = useState(true)
+  const [useStoryboardReferences, setUseStoryboardReferences] = useState(false)
+  // GPT image/storyboard generation is intentionally disabled for Creative Studio.
+  // Keep this as a constant so React Fast Refresh cannot preserve an older false state.
+  const promptOnlyVideo = true
   const [busy, setBusy] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -205,7 +209,7 @@ export default function CreativeStudioTab({
         status: 'idle' as const,
         error: undefined,
         mediaMode: 'video' as const,
-        suggestedActions: ['approve_next' as const],
+        suggestedActions: ['generate_video' as const],
         phase: 'awaiting_video',
       }
     })
@@ -240,7 +244,7 @@ export default function CreativeStudioTab({
     skipNextHistorySaveRef.current = true
     setHydrated(false)
     const loaded = loadCsChatSessions(briefId, brandId)
-    let list = loaded.slice(0, 3)
+    let list = loaded
     let activeId = getCsActiveChatId(briefId, brandId)
     let current = list.find((s) => s.id === activeId)
     if (!current) {
@@ -288,7 +292,7 @@ export default function CreativeStudioTab({
         additionalReferenceUrls,
         phase,
       }
-      const next = [nextSession, ...prev.filter((s) => s.id !== activeChatId)].slice(0, 3)
+      const next = [nextSession, ...prev.filter((s) => s.id !== activeChatId)]
       saveCsChatSessions(briefId, brandId, next)
       setCsActiveChatId(briefId, brandId, activeChatId)
       return next
@@ -317,7 +321,7 @@ export default function CreativeStudioTab({
   const startNewChat = () => {
     const session = emptyCsSession()
     setSessions((prev) => {
-      const next = [session, ...prev].slice(0, 3)
+      const next = [session, ...prev]
       saveCsChatSessions(briefId, brandId, next)
       return next
     })
@@ -514,7 +518,7 @@ export default function CreativeStudioTab({
             status: 'cancelled',
             progress: 'Stopped',
             error: 'Cancelled by user',
-            suggestedActions: mediaMode === 'video' ? ['approve_next'] : ['generate_image'],
+            suggestedActions: mediaMode === 'video' ? ['generate_video'] : ['generate_image'],
           })
           return
         }
@@ -556,7 +560,7 @@ export default function CreativeStudioTab({
             durationSeconds: res.duration_seconds || undefined,
             ...(done && mediaMode === 'video' && res.note
               ? {
-                  content: `${res.audio_warning ? 'Video ready with audio issues.' : res.partial ? 'Partial video ready.' : 'Video ready.'} ${res.note}`,
+                  content: `${res.audio_warning ? 'Video ready with audio issues.' : res.continuation_available ? 'Video part ready for review.' : res.partial ? 'Partial video ready.' : 'Video ready.'} ${res.note}`,
                 }
               : {}),
             storyboard: board.length ? board : undefined,
@@ -565,18 +569,22 @@ export default function CreativeStudioTab({
                 ? 'storyboard'
                 : mediaMode,
             suggestedActions:
-              done &&
+              done && mediaMode === 'video' && res.continuation_available
+                ? ['continue_video']
+                : done &&
               (mediaMode === 'image' || mediaMode === 'storyboard') &&
               (res.url || board.some((b) => b.url))
                 ? ['regenerate_image', 'approve_next']
                 : failed || cancelled
                   ? mediaMode === 'video'
-                    ? ['approve_next']
+                    ? ['generate_video']
                     : ['generate_image']
                   : [],
             phase: done
               ? mediaMode === 'video'
-                ? 'done'
+                ? res.continuation_available
+                  ? 'awaiting_video_continuation'
+                  : 'done'
                 : 'awaiting_video'
               : failed || cancelled
                 ? cancelled
@@ -627,10 +635,16 @@ export default function CreativeStudioTab({
             return
           }
           if (done && res.url && mediaMode === 'video') {
-            setPhase('done')
+            setPhase(res.continuation_available ? 'awaiting_video_continuation' : 'done')
             const warn = res.duration_warning || res.note || ''
             if (res.audio_warning) {
               toast.error(res.audio_warning, { duration: 9000 })
+              return
+            }
+            if (res.continuation_available) {
+              toast.success('Video part ready — review it, then generate the next part', {
+                duration: 7000,
+              })
               return
             }
             if (res.partial) {
@@ -665,7 +679,7 @@ export default function CreativeStudioTab({
               progress: 'Generation interrupted',
               error:
                 'This generation stopped when the backend restarted. Start a new generation; no further segments are being submitted.',
-              suggestedActions: mediaMode === 'video' ? ['approve_next'] : ['generate_image'],
+              suggestedActions: mediaMode === 'video' ? ['generate_video'] : ['generate_image'],
             })
             setBusy(false)
             toast.error('Generation was interrupted by a backend restart')
@@ -681,7 +695,7 @@ export default function CreativeStudioTab({
       patchMessage({
         status: 'failed',
         error: 'Timed out waiting for generation.',
-        suggestedActions: mediaMode === 'video' ? ['approve_next'] : ['generate_image'],
+        suggestedActions: mediaMode === 'video' ? ['generate_video'] : ['generate_image'],
       })
     },
     [activeChatId, brandId, briefId, storeGeneratedImages, updateMessage],
@@ -930,13 +944,14 @@ export default function CreativeStudioTab({
   const runTurn = async (opts: {
     userText?: string
     userAttachments?: ChatAttachment[]
-    action?: PipelineAction
+    action?: Exclude<PipelineAction, 'continue_video'>
     revisionNotes?: string
     appendUser?: boolean
     imagePromptOverride?: string
     videoPromptOverride?: string
     approvedImageOverride?: string
     storyboardImageUrls?: string[]
+    useStoredReferences?: boolean
   }) => {
     if (busy) return
     const action = opts.action || 'continue'
@@ -952,20 +967,32 @@ export default function CreativeStudioTab({
     const attachedReferences = userAttachments
       .filter((a) => a.role === 'reference')
       .map((a) => a.url)
-    const turnProductRef = attachedProduct || productReferenceUrl || ''
-    const turnLogoRef = attachedLogo || logoReferenceUrl || selectedBrand?.logo_url || ''
+    const useStoredReferences = opts.useStoredReferences !== false
+    const turnLogoRef = attachedLogo || (
+      useStoredReferences ? logoReferenceUrl || selectedBrand?.logo_url || '' : ''
+    )
+    // A previous API fallback could persist the first attachment (including a
+    // logo) as the product. Never send one URL with two conflicting roles.
+    const turnProductRef = attachedProduct || (
+      useStoredReferences && productReferenceUrl && productReferenceUrl !== turnLogoRef
+        ? productReferenceUrl
+        : ''
+    )
     const turnAdditionalRefs = Array.from(
-      new Set([...additionalReferenceUrls, ...attachedReferences]),
+      new Set([...(useStoredReferences ? additionalReferenceUrls : []), ...attachedReferences]),
     ).filter((url) => url !== turnProductRef && url !== turnLogoRef).slice(0, 7)
     if (attachedProduct) setProductReferenceUrl(attachedProduct)
     if (attachedLogo) setLogoReferenceUrl(attachedLogo)
     if (attachedReferences.length) setAdditionalReferenceUrls(turnAdditionalRefs)
     // Stored message attachments retain roles after approval and browser reload.
     const referenceByUrl = new Map<string, ChatAttachment>()
-    for (const asset of [...messages.flatMap((message) => message.attachments || []), ...userAttachments]) {
+    const referenceSource = useStoredReferences
+      ? [...messages.flatMap((message) => message.attachments || []), ...userAttachments]
+      : userAttachments
+    for (const asset of referenceSource) {
       referenceByUrl.set(asset.url, asset)
     }
-    if (characterReferenceUrl) {
+    if (useStoredReferences && characterReferenceUrl) {
       referenceByUrl.set(characterReferenceUrl, {
         id: `character-${characterReferenceUrl}`,
         name: 'Character anchor',
@@ -999,7 +1026,11 @@ export default function CreativeStudioTab({
         id: uid(),
         role: 'user',
         content: (userText || `(${action.replace(/_/g, ' ')})`) +
-          (isVideoAction && !useStoryboardReferences ? '\nUse original uploads for video references; exclude generated storyboard images.' : ''),
+          (isVideoAction && promptOnlyVideo
+            ? '\nGenerate directly from this timed prompt using only my uploaded references. Exclude GPT-generated storyboard images.'
+            : isVideoAction && !useStoryboardReferences
+              ? '\nUse original uploads for video references; exclude generated storyboard images.'
+              : ''),
         attachments: userAttachments,
       }
       setMessages((prev) => [...prev, userMsg])
@@ -1046,12 +1077,13 @@ export default function CreativeStudioTab({
         action,
         image_prompt: imgP,
         video_prompt: vidP,
-        approved_image_url: isVideoAction && !useStoryboardReferences ? turnProductRef : approved,
+        approved_image_url: promptOnlyVideo ? '' : isVideoAction && !useStoryboardReferences ? turnProductRef : approved,
         product_reference_url: turnProductRef,
         logo_reference_url: turnLogoRef,
         additional_reference_urls: turnAdditionalRefs,
         reference_assets: referenceAssets,
-        storyboard_image_urls: useStoryboardReferences ? boardUrls : [],
+        storyboard_image_urls: !promptOnlyVideo && useStoryboardReferences ? boardUrls : [],
+        prompt_only_video: promptOnlyVideo,
         image_model: imageModel,
         revision_notes: opts.revisionNotes || '',
         phase,
@@ -1108,7 +1140,7 @@ export default function CreativeStudioTab({
         content: msg,
         status: 'failed',
         error: msg,
-        suggestedActions: isVideoAction ? ['approve_next'] : ['generate_image'],
+        suggestedActions: isVideoAction ? ['generate_video'] : ['generate_image'],
       })
       toast.error(msg)
     } finally {
@@ -1121,7 +1153,15 @@ export default function CreativeStudioTab({
     const atts = [...attachments]
     setComposer('')
     setAttachments([])
-    await runTurn({ userText: text, userAttachments: atts, action: 'continue', appendUser: true })
+    await runTurn({
+      userText: text,
+      userAttachments: atts,
+      action: promptOnlyVideo ? 'generate_video' : 'continue',
+      appendUser: true,
+      videoPromptOverride: promptOnlyVideo ? text : undefined,
+      approvedImageOverride: promptOnlyVideo ? '' : undefined,
+      useStoredReferences: false,
+    })
   }
 
   const selectSavedStill = (asset: Asset) => {
@@ -1148,8 +1188,54 @@ export default function CreativeStudioTab({
   }
 
   const handlePipelineAction = async (action: PipelineAction, fromMsg?: ChatMessage) => {
+    if (action === 'continue_video') {
+      if (!fromMsg?.jobId) {
+        toast.error('The reviewed video part is missing its continuation job')
+        return
+      }
+      const userMsg: ChatMessage = {
+        id: uid(),
+        role: 'user',
+        content: 'Generate next Seedance part from the reviewed final frame',
+      }
+      const pendingId = uid()
+      const assistantMsg: ChatMessage = {
+        id: pendingId,
+        role: 'assistant',
+        content: 'Starting the next Seedance part from the previous part’s final frame…',
+        mediaMode: 'video',
+        status: 'queued',
+        progress: 'Queued…',
+        videoPrompt: fromMsg.videoPrompt || videoPrompt,
+      }
+      setMessages((previous) => [...previous, userMsg, assistantMsg])
+      setBusy(true)
+      try {
+        const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId)
+        if (!next.job_id) throw new Error(next.error || 'Next video part was not queued')
+        updateMessage(pendingId, {
+          jobId: next.job_id,
+          status: 'queued',
+          progress: next.progress || 'Queued…',
+        })
+        void pollJobIntoMessage(next.job_id, pendingId, 'video')
+      } catch (err) {
+        const message = extractApiError(err, 'Could not start the next video part')
+        updateMessage(pendingId, {
+          status: 'failed',
+          error: message,
+          content: message,
+          suggestedActions: ['continue_video'],
+        })
+        toast.error(message)
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
     if (
       (action === 'approve_next' || action === 'generate_video') &&
+      !promptOnlyVideo &&
       useStoryboardReferences &&
       fromMsg?.storyboard?.length
     ) {
@@ -1674,9 +1760,11 @@ export default function CreativeStudioTab({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2 justify-center text-[11px] text-white/50">
-        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-          Still · GPT Image 2 storyboard
-        </span>
+        {!promptOnlyVideo ? (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+            Still · GPT Image 2 storyboard
+          </span>
+        ) : null}
         <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
           Video · Seedance 2.0
         </span>
@@ -1693,7 +1781,7 @@ export default function CreativeStudioTab({
         <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
           {phaseLabel}
         </span>
-        {productReferenceUrl && (
+        {productReferenceUrl && !promptOnlyVideo && (
           <label
             className="flex items-center gap-1.5"
             title="Turn off to send only your uploaded product/logo to Seedance. Use per-frame checkboxes to pick which storyboard stills are included."
@@ -1707,6 +1795,12 @@ export default function CreativeStudioTab({
             Use selected storyboard frames in video
           </label>
         )}
+        <span
+          className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
+          title="The timed prompt and uploaded references go directly to Seedance. GPT image generation is disabled."
+        >
+          Direct Seedance · GPT images disabled
+        </span>
         <select
           value={duration}
           onChange={(e) => setDuration(e.target.value as DurationId)}
@@ -1721,9 +1815,11 @@ export default function CreativeStudioTab({
         {duration !== 'auto' && Number(duration) > 15 ? (
           <span
             className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
-            title="Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."
+            title={promptOnlyVideo
+              ? 'Independent Seedance chapters use the same uploaded references and are stitched after every chapter completes.'
+              : "Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."}
           >
-            {Math.ceil(Number(duration) / 15)} continuity-linked chapters
+            {Math.ceil(Number(duration) / 15)} {promptOnlyVideo ? 'upload-guided chapters' : 'continuity-linked chapters'}
           </span>
         ) : null}
         <select
@@ -1782,7 +1878,10 @@ export default function CreativeStudioTab({
             >
               + New chat
             </button>
-            <p className="text-[10px] text-white/35 px-0.5">Saved in this browser</p>
+            <p className="text-[10px] text-white/35 px-0.5">
+              {effectiveBrandName ? `${effectiveBrandName} · ` : ''}
+              {sessions.length} {sessions.length === 1 ? 'chat' : 'chats'} · saved in this browser
+            </p>
           </div>
           <div className="flex-1 overflow-y-auto p-2 space-y-1">
             {sessions.map((s) => {
@@ -1903,8 +2002,8 @@ export default function CreativeStudioTab({
                 </h2>
               </div>
               <p className="text-sm text-white/45 max-w-lg mx-auto">
-                Plan your ad, review a GPT Image 2 still, then generate a Seedance 2.0 video.
-                Label uploaded images as product, scene, character or brand logo to guide continuity.
+                Send a timed prompt directly to Seedance 2.0. Product, scene and character
+                references are optional and used only when you attach them.
               </p>
             </div>
             {composerCard}
@@ -1917,7 +2016,7 @@ export default function CreativeStudioTab({
                 const preview = assetUrl(m.mediaUrl || null)
                 const actions =
                   m.status === 'failed' && m.mediaMode === 'video'
-                    ? (['approve_next'] as PipelineAction[])
+                    ? (['generate_video'] as PipelineAction[])
                     : m.suggestedActions && m.suggestedActions.length
                     ? m.suggestedActions
                     : m.mediaMode === 'image' && m.status === 'done' && m.mediaUrl
