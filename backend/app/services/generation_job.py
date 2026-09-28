@@ -322,22 +322,48 @@ def _effective_slot_aspect_ratio(
     return "1:1" if fmt == "carousel" else campaign
 
 
+def _variant_reference_images_from_slot(slot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(slot, dict):
+        return []
+    raw = slot.get("reference_images")
+    if isinstance(raw, list):
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("file_url") or "").strip()
+            if not url:
+                continue
+            ref: dict[str, Any] = {"file_url": url}
+            asset_id = str(item.get("asset_id") or "").strip()
+            if asset_id:
+                ref["asset_id"] = asset_id
+            out.append(ref)
+        if out:
+            return out[:5]
+    url = str(slot.get("reference_image_url") or "").strip()
+    if not url:
+        return []
+    ref = {"file_url": url}
+    asset_id = str(slot.get("reference_image_asset_id") or "").strip()
+    if asset_id:
+        ref["asset_id"] = asset_id
+    return [ref]
+
+
 def _reference_images_for_variant(
     kb_models: dict[str, Any],
     slot: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     refs = list(_reference_images_from_kb(kb_models))
-    if not isinstance(slot, dict):
+    variant_refs = _variant_reference_images_from_slot(slot if isinstance(slot, dict) else None)
+    if not variant_refs:
         return refs[:5]
-    url = str(slot.get("reference_image_url") or "").strip()
-    if not url:
-        return refs[:5]
-    variant_ref: dict[str, Any] = {"file_url": url}
-    asset_id = str(slot.get("reference_image_asset_id") or "").strip()
-    if asset_id:
-        variant_ref["asset_id"] = asset_id
-    merged = [variant_ref] + [
-        r for r in refs if str(r.get("file_url") or "").strip() != url
+    variant_urls = {str(r.get("file_url") or "").strip() for r in variant_refs}
+    merged = variant_refs + [
+        r
+        for r in refs
+        if str(r.get("file_url") or "").strip() not in variant_urls
     ]
     return merged[:5]
 
@@ -346,10 +372,9 @@ def _variant_reference_image_url(
     kb_models: dict[str, Any],
     slot: dict[str, Any] | None,
 ) -> str | None:
-    if isinstance(slot, dict):
-        url = str(slot.get("reference_image_url") or "").strip()
-        if url:
-            return url
+    variant_refs = _variant_reference_images_from_slot(slot if isinstance(slot, dict) else None)
+    if variant_refs:
+        return str(variant_refs[0].get("file_url") or "").strip() or None
     return _exact_product_reference_from_kb(kb_models)
 
 

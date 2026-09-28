@@ -276,6 +276,12 @@ async def _validate_social_page(
             "handle": handle_clean,
             "profile_url": profile_url,
         }
+    except ValueError as exc:
+        msg = str(exc).lower()
+        if "credit" in msg and ("exhaust" in msg or "insufficient" in msg):
+            raise
+        logger.debug("Could not validate social page %s @%s", plat, handle_clean, exc_info=True)
+        return None
     except Exception:
         logger.debug("Could not validate social page %s @%s", plat, handle_clean, exc_info=True)
         return None
@@ -477,6 +483,12 @@ async def discover_competitor_candidates(
             break
 
     if not validated:
+        if suggestions:
+            raise ValueError(
+                f"Found {len(suggestions)} competitor suggestions but could not verify their social pages "
+                f"for {service_area}. If SociaVault credits are exhausted, top up at sociavault.com — "
+                "otherwise try a broader nearby state or add a competitor manually."
+            )
         raise ValueError(
             f"No local competitor pages found for {service_area} — try a broader nearby state or add manually."
         )

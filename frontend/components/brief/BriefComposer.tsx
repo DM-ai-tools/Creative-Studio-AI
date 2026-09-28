@@ -26,6 +26,7 @@ import {
   effectiveVariantAspectRatio,
   normalizeVariantAspectFromStorage,
   referenceImagesPayloadForVariant,
+  variantReferenceImages,
   IMAGE_ASPECT_RATIO_OPTIONS,
   isCarouselSlot,
   isLastCarouselCard,
@@ -2282,8 +2283,14 @@ export default function BriefComposer(_props: BriefComposerProps) {
                   retail_promo: s.retail_promo || undefined,
                   aspect_ratio: s.aspect_ratio || undefined,
                   aspect_ratio_custom: s.aspect_ratio_custom?.trim() || undefined,
-                  reference_image_url: s.reference_image_url?.trim() || undefined,
-                  reference_image_asset_id: s.reference_image_asset_id || undefined,
+                  ...(variantReferenceImages(s).length
+                    ? {
+                        reference_images: variantReferenceImages(s).map((r) => ({
+                          file_url: r.file_url,
+                          asset_id: r.asset_id || undefined,
+                        })),
+                      }
+                    : {}),
                   product_focus: s.product_focus || undefined,
                   product_model: s.product_model?.trim() || undefined,
                   generated_at: s.generated_at ?? undefined,

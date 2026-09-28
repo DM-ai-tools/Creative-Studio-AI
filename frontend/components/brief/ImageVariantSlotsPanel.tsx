@@ -21,10 +21,13 @@ import {
   isCarouselSlot,
   isLastCarouselCard,
   labelForUseCase,
+  MAX_VARIANT_REFERENCE_IMAGES,
   normalizeProductFocus,
   productFocusSlotHint,
+  variantReferenceImages,
   type ImageVariantSlot,
   type ProductFocusId,
+  type VariantReferenceImage,
 } from '@/lib/imageUseCases'
 import { labelForAngle } from '@/lib/adAngles'
 import type { CatalogOption } from '@/types'
@@ -167,19 +170,42 @@ export default function ImageVariantSlotsPanel({
     })
   }
 
-  const handleReferenceUpload = async (index: number, file: File) => {
+  const handleReferenceUpload = async (index: number, files: FileList | File[]) => {
     if (!brandId) {
-      toast.error('Select a brand before uploading a reference image')
+      toast.error('Select a brand before uploading reference images')
       return
+    }
+    const slot = slots[index]
+    if (!slot) return
+    const existing = variantReferenceImages(slot)
+    const fileList = Array.from(files)
+    const remaining = MAX_VARIANT_REFERENCE_IMAGES - existing.length
+    if (remaining <= 0) {
+      toast.error(`Maximum ${MAX_VARIANT_REFERENCE_IMAGES} reference images per variant`)
+      return
+    }
+    const toUpload = fileList.slice(0, remaining)
+    if (fileList.length > remaining) {
+      toast(`Only ${remaining} more image${remaining === 1 ? '' : 's'} allowed — uploading first ${remaining}`, {
+        icon: 'ℹ️',
+      })
     }
     setUploadingRefIndex(index)
     try {
-      const asset = await assetsApi.upload(file, undefined, 'reference_image', brandId)
+      const uploaded: VariantReferenceImage[] = []
+      for (const file of toUpload) {
+        const asset = await assetsApi.upload(file, undefined, 'reference_image', brandId)
+        uploaded.push({ file_url: asset.file_url, asset_id: asset.id })
+      }
+      const nextRefs = [...existing, ...uploaded]
       updateSlot(index, {
-        reference_image_url: asset.file_url,
-        reference_image_asset_id: asset.id,
+        reference_images: nextRefs,
+        reference_image_url: undefined,
+        reference_image_asset_id: undefined,
       })
-      toast.success(`Reference image added to variant ${index + 1}`)
+      toast.success(
+        `${uploaded.length} reference image${uploaded.length === 1 ? '' : 's'} added to variant ${index + 1}`,
+      )
     } catch (err: unknown) {
       toast.error(extractApiError(err, 'Could not upload reference image'))
     } finally {
@@ -187,8 +213,20 @@ export default function ImageVariantSlotsPanel({
     }
   }
 
-  const clearReferenceImage = (index: number) => {
+  const removeReferenceImage = (index: number, refIndex: number) => {
+    const slot = slots[index]
+    if (!slot) return
+    const nextRefs = variantReferenceImages(slot).filter((_, i) => i !== refIndex)
     updateSlot(index, {
+      reference_images: nextRefs.length ? nextRefs : undefined,
+      reference_image_url: undefined,
+      reference_image_asset_id: undefined,
+    })
+  }
+
+  const clearReferenceImages = (index: number) => {
+    updateSlot(index, {
+      reference_images: undefined,
       reference_image_url: undefined,
       reference_image_asset_id: undefined,
     })
@@ -378,7 +416,7 @@ export default function ImageVariantSlotsPanel({
         const lastCarousel = isLastCarouselCard(slot, index, slots, formats)
         const isEditing = editingSlots.has(index)
         const effectiveRatio = effectiveVariantAspectRatio(slot, defaultAspectRatio)
-        const refPreview = assetUrl(slot.reference_image_url)
+        const slotReferenceImages = variantReferenceImages(slot)
         return (
           <div key={index} className="space-y-1">
           <div
@@ -489,14 +527,21 @@ export default function ImageVariantSlotsPanel({
                         ? ' (preset)'
                         : ' (campaign default)'}
                   </span>
-                  {refPreview ? (
+                  {slotReferenceImages.length > 0 ? (
                     <span className="inline-flex items-center gap-1.5">
-                      <img
-                        src={refPreview}
-                        alt=""
-                        className="h-8 w-8 rounded object-cover border border-border"
-                      />
-                      Reference image
+                      {slotReferenceImages.slice(0, 3).map((ref, ri) => {
+                        const preview = assetUrl(ref.file_url)
+                        return preview ? (
+                          <img
+                            key={`${ref.file_url}-${ri}`}
+                            src={preview}
+                            alt=""
+                            className="h-8 w-8 rounded object-cover border border-border"
+                          />
+                        ) : null
+                      })}
+                      {slotReferenceImages.length} reference image
+                      {slotReferenceImages.length !== 1 ? 's' : ''}
                     </span>
                   ) : null}
                 </div>
@@ -712,51 +757,74 @@ export default function ImageVariantSlotsPanel({
 
             <div>
               <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1.5">
-                Reference image (optional)
+                Reference images (optional)
               </label>
               <p className="text-[10px] text-mid mb-2">
-                Style or product reference for this variant only — merged with campaign references at
-                generation time.
+                Up to {MAX_VARIANT_REFERENCE_IMAGES} style or product references for this variant — merged
+                with campaign references at generation time.
               </p>
-              {refPreview ? (
-                <div className="flex items-start gap-3 mb-2">
-                  <img
-                    src={refPreview}
-                    alt="Variant reference"
-                    className="h-20 w-20 rounded-lg object-cover border border-border"
-                  />
-                  <div className="flex flex-col gap-1.5">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => fileInputRefs.current[index]?.click()}
-                      disabled={uploadingRefIndex === index}
-                      isLoading={uploadingRefIndex === index}
-                    >
-                      Replace
-                    </Button>
-                    <button
-                      type="button"
-                      onClick={() => clearReferenceImage(index)}
-                      className="text-[11px] text-mid underline hover:text-charcoal text-left"
-                    >
-                      Remove
-                    </button>
-                  </div>
+              {slotReferenceImages.length > 0 ? (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {slotReferenceImages.map((ref, refIndex) => {
+                    const preview = assetUrl(ref.file_url)
+                    return (
+                      <div key={`${ref.file_url}-${refIndex}`} className="relative group">
+                        {preview ? (
+                          <img
+                            src={preview}
+                            alt={`Reference ${refIndex + 1}`}
+                            className="h-20 w-20 rounded-lg object-cover border border-border"
+                          />
+                        ) : (
+                          <div className="h-20 w-20 rounded-lg border border-border bg-surface flex items-center justify-center text-[10px] text-mid px-1 text-center">
+                            Image {refIndex + 1}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeReferenceImage(index, refIndex)}
+                          className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-charcoal text-white text-xs leading-none opacity-90 hover:opacity-100"
+                          title="Remove"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
-              ) : (
+              ) : null}
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   onClick={() => fileInputRefs.current[index]?.click()}
-                  disabled={uploadingRefIndex === index || !brandId}
+                  disabled={
+                    uploadingRefIndex === index ||
+                    !brandId ||
+                    slotReferenceImages.length >= MAX_VARIANT_REFERENCE_IMAGES
+                  }
                   isLoading={uploadingRefIndex === index}
                 >
-                  Upload reference image
+                  {slotReferenceImages.length
+                    ? 'Add more reference images'
+                    : 'Upload reference images'}
                 </Button>
-              )}
+                {slotReferenceImages.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => clearReferenceImages(index)}
+                    className="text-[11px] text-mid underline hover:text-charcoal"
+                  >
+                    Remove all
+                  </button>
+                ) : null}
+              </div>
+              {slotReferenceImages.length > 0 ? (
+                <p className="mt-1 text-[10px] text-mid">
+                  {slotReferenceImages.length}/{MAX_VARIANT_REFERENCE_IMAGES} uploaded
+                </p>
+              ) : null}
               {!brandId ? (
                 <p className="mt-1 text-[10px] text-amber-700">
                   Select a brand in step 2 to enable uploads.
@@ -768,10 +836,11 @@ export default function ImageVariantSlotsPanel({
                 }}
                 type="file"
                 accept="image/*"
+                multiple
                 className="hidden"
                 onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) void handleReferenceUpload(index, file)
+                  const files = e.target.files
+                  if (files?.length) void handleReferenceUpload(index, files)
                   e.target.value = ''
                 }}
               />

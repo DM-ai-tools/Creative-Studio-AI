@@ -9,6 +9,7 @@ import {
   emptyImageVariantSlot,
   normalizeProductFocus,
   normalizeVariantAspectFromStorage,
+  normalizeVariantReferenceImagesFromStorage,
   resizeImageVariantSlots,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
@@ -51,8 +52,7 @@ export function slotsFromBrief(brief: Brief): ImageVariantSlot[] {
     product_focus: normalizeProductFocus(v.product_focus),
     product_model: String(v.product_model || ''),
     ...normalizeVariantAspectFromStorage(v),
-    reference_image_url: String(v.reference_image_url || '').trim() || undefined,
-    reference_image_asset_id: String(v.reference_image_asset_id || '').trim() || undefined,
+    ...normalizeVariantReferenceImagesFromStorage(v),
     generated_at: v.generated_at ? String(v.generated_at) : null,
   }))
   return resizeImageVariantSlots(mapped, count)
@@ -75,8 +75,12 @@ export function serializeImageVariants(slots: ImageVariantSlot[]) {
     carousel_total: s.carousel_total || undefined,
     aspect_ratio: s.aspect_ratio || undefined,
     aspect_ratio_custom: s.aspect_ratio_custom?.trim() || undefined,
-    reference_image_url: s.reference_image_url?.trim() || undefined,
-    reference_image_asset_id: s.reference_image_asset_id || undefined,
+    reference_images: s.reference_images?.length
+      ? s.reference_images.map((r) => ({
+          file_url: r.file_url.trim(),
+          asset_id: r.asset_id || undefined,
+        }))
+      : undefined,
     product_focus: s.product_focus || undefined,
     product_model: s.product_model?.trim() || undefined,
     generated_at: s.generated_at ?? undefined,

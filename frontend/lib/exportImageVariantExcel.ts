@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx'
 import {
   effectiveVariantAspectRatio,
   labelForUseCase,
+  variantReferenceImages,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
 
@@ -59,7 +60,12 @@ function buildVariantDetailRows(
             ? ' (preset)'
             : ' (campaign default)'),
     ],
-    ['Reference image', slot.reference_image_url?.trim() || '—'],
+    [
+      'Reference images',
+      variantReferenceImages(slot)
+        .map((r) => r.file_url)
+        .join('\n') || '—',
+    ],
     ['CTA on image', slot.cta || '—'],
     ['Offer (caption)', slot.offer || '—'],
     ['Image generation prompt', slot.prompt || '—'],

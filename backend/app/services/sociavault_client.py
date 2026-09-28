@@ -80,6 +80,11 @@ async def _get(path: str, *, params: dict[str, str] | None = None) -> dict[str, 
         if response.status_code >= 400:
             body = response.text[:600]
             logger.warning("SociaVault %s failed (%s): %s", path, response.status_code, body)
+            if response.status_code == 402 or "insufficient credits" in body.lower():
+                raise ValueError(
+                    "SociaVault API credits exhausted — top up at sociavault.com, "
+                    "update SOCIAVAULT_API_KEY in backend/.env, then restart the server."
+                )
             raise ValueError(f"SociaVault API error {response.status_code}: {body}")
         body = response.json()
         if not isinstance(body, dict):

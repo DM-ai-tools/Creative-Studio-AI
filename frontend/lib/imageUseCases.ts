@@ -90,19 +90,84 @@ export type VariantReferencePayload = {
   is_product_reference?: boolean
 }
 
-/** Campaign refs plus optional per-variant upload (variant ref listed first). */
+export type VariantReferenceImage = {
+  file_url: string
+  asset_id?: string
+}
+
+export const MAX_VARIANT_REFERENCE_IMAGES = 5
+
+/** Per-variant refs — supports legacy single-field storage. */
+export function variantReferenceImages(
+  slot: Pick<
+    ImageVariantSlot,
+    'reference_images' | 'reference_image_url' | 'reference_image_asset_id'
+  >,
+): VariantReferenceImage[] {
+  const fromArray = (slot.reference_images ?? [])
+    .map((r) => ({
+      file_url: (r.file_url || '').trim(),
+      asset_id: r.asset_id || undefined,
+    }))
+    .filter((r) => r.file_url)
+  if (fromArray.length) return fromArray.slice(0, MAX_VARIANT_REFERENCE_IMAGES)
+  const url = (slot.reference_image_url || '').trim()
+  if (!url) return []
+  return [
+    {
+      file_url: url,
+      asset_id: slot.reference_image_asset_id || undefined,
+    },
+  ]
+}
+
+export function normalizeVariantReferenceImagesFromStorage(raw: {
+  reference_images?: unknown
+  reference_image_url?: unknown
+  reference_image_asset_id?: unknown
+}): Pick<ImageVariantSlot, 'reference_images'> {
+  if (Array.isArray(raw.reference_images)) {
+    const refs = raw.reference_images
+      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .map((item) => ({
+        file_url: String(item.file_url || '').trim(),
+        asset_id: String(item.asset_id || '').trim() || undefined,
+      }))
+      .filter((r) => r.file_url)
+      .slice(0, MAX_VARIANT_REFERENCE_IMAGES)
+    if (refs.length) return { reference_images: refs }
+  }
+  const url = String(raw.reference_image_url || '').trim()
+  if (!url) return {}
+  return {
+    reference_images: [
+      {
+        file_url: url,
+        asset_id: String(raw.reference_image_asset_id || '').trim() || undefined,
+      },
+    ],
+  }
+}
+
+/** Campaign refs plus optional per-variant uploads (variant refs listed first). */
 export function referenceImagesPayloadForVariant(
-  slot: Pick<ImageVariantSlot, 'reference_image_url' | 'reference_image_asset_id'>,
+  slot: Pick<
+    ImageVariantSlot,
+    'reference_images' | 'reference_image_url' | 'reference_image_asset_id'
+  >,
   campaignRefs: VariantReferencePayload[],
 ): VariantReferencePayload[] {
-  const url = (slot.reference_image_url || '').trim()
-  if (!url) return campaignRefs
-  const variantRef: VariantReferencePayload = {
-    asset_id: slot.reference_image_asset_id || undefined,
-    file_url: url,
+  const variantRefs = variantReferenceImages(slot).map((r) => ({
+    asset_id: r.asset_id,
+    file_url: r.file_url,
     analysis: {},
-  }
-  return [variantRef, ...campaignRefs.filter((r) => r.file_url !== url)]
+  }))
+  if (!variantRefs.length) return campaignRefs
+  const variantUrls = new Set(variantRefs.map((r) => r.file_url))
+  return [...variantRefs, ...campaignRefs.filter((r) => !variantUrls.has(r.file_url))].slice(
+    0,
+    MAX_VARIANT_REFERENCE_IMAGES,
+  )
 }
 
 /** One creative direction for a single image variant. */
@@ -137,8 +202,11 @@ export type ImageVariantSlot = {
   aspect_ratio?: string
   /** Optional override — e.g. 3:4 or 1200x628 (takes priority over preset). */
   aspect_ratio_custom?: string
-  /** Optional reference image for this variant only. */
+  /** Optional reference images for this variant only (max 5). */
+  reference_images?: VariantReferenceImage[]
+  /** @deprecated Legacy single ref — use reference_images. */
   reference_image_url?: string
+  /** @deprecated Legacy single ref — use reference_images. */
   reference_image_asset_id?: string
   /** Retail / ecommerce: product-only catalog shot vs person with product. */
   product_focus?: 'product_only' | 'with_person' | 'product_with_person' | ''
