@@ -41,6 +41,70 @@ export function labelForUseCase(id: string): string {
   )
 }
 
+/** Preset image aspect ratios — campaign default + per-variant override. */
+export const IMAGE_ASPECT_RATIO_OPTIONS = [
+  { id: '1:1', label: '1:1', desc: 'Instagram · Facebook feed' },
+  { id: '4:3', label: '4:3', desc: 'Fashion retail · portrait feed' },
+  { id: '4:5', label: '4:5', desc: 'Instagram portrait feed' },
+  { id: '9:16', label: '9:16', desc: 'Reels · Stories · TikTok' },
+  { id: '16:9', label: '16:9', desc: 'Website · YouTube · Landscape' },
+  { id: '1.91:1', label: '1.91:1', desc: 'Facebook · Google ads' },
+  { id: '2:3', label: '2:3', desc: 'Pinterest · Print' },
+] as const
+
+export function effectiveVariantAspectRatio(
+  slot: Pick<ImageVariantSlot, 'aspect_ratio' | 'aspect_ratio_custom'>,
+  campaignDefault: string,
+): string {
+  const custom = (slot.aspect_ratio_custom || '').trim()
+  if (custom) return custom
+  const chosen = (slot.aspect_ratio || '').trim()
+  const fallback = (campaignDefault || '').trim()
+  return chosen || fallback || '1:1'
+}
+
+/** Restore preset vs custom ratio fields from saved brief data. */
+export function normalizeVariantAspectFromStorage(raw: {
+  aspect_ratio?: unknown
+  aspect_ratio_custom?: unknown
+}): Pick<ImageVariantSlot, 'aspect_ratio' | 'aspect_ratio_custom'> {
+  const customStored = String(raw.aspect_ratio_custom || '').trim()
+  if (customStored) {
+    const preset = String(raw.aspect_ratio || '').trim()
+    return {
+      aspect_ratio_custom: customStored,
+      aspect_ratio: preset || undefined,
+    }
+  }
+  const ar = String(raw.aspect_ratio || '').trim()
+  if (ar && !IMAGE_ASPECT_RATIO_OPTIONS.some((o) => o.id === ar)) {
+    return { aspect_ratio_custom: ar }
+  }
+  return { aspect_ratio: ar || undefined }
+}
+
+export type VariantReferencePayload = {
+  asset_id?: string
+  file_url: string
+  analysis?: Record<string, unknown>
+  is_product_reference?: boolean
+}
+
+/** Campaign refs plus optional per-variant upload (variant ref listed first). */
+export function referenceImagesPayloadForVariant(
+  slot: Pick<ImageVariantSlot, 'reference_image_url' | 'reference_image_asset_id'>,
+  campaignRefs: VariantReferencePayload[],
+): VariantReferencePayload[] {
+  const url = (slot.reference_image_url || '').trim()
+  if (!url) return campaignRefs
+  const variantRef: VariantReferencePayload = {
+    asset_id: slot.reference_image_asset_id || undefined,
+    file_url: url,
+    analysis: {},
+  }
+  return [variantRef, ...campaignRefs.filter((r) => r.file_url !== url)]
+}
+
 /** One creative direction for a single image variant. */
 export type ImageVariantSlot = {
   use_cases: string[]
@@ -71,6 +135,11 @@ export type ImageVariantSlot = {
   /** Client-style retail promo (headline + offer burned on image). */
   retail_promo?: boolean
   aspect_ratio?: string
+  /** Optional override — e.g. 3:4 or 1200x628 (takes priority over preset). */
+  aspect_ratio_custom?: string
+  /** Optional reference image for this variant only. */
+  reference_image_url?: string
+  reference_image_asset_id?: string
   /** Retail / ecommerce: product-only catalog shot vs person with product. */
   product_focus?: 'product_only' | 'with_person' | 'product_with_person' | ''
   /** Specific product/model from scraped catalog (e.g. NEO + 20 2026). */

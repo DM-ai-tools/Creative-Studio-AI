@@ -1,5 +1,9 @@
 import * as XLSX from 'xlsx'
-import { labelForUseCase, type ImageVariantSlot } from '@/lib/imageUseCases'
+import {
+  effectiveVariantAspectRatio,
+  labelForUseCase,
+  type ImageVariantSlot,
+} from '@/lib/imageUseCases'
 
 export interface ImageVariantExportContext {
   campaignName?: string
@@ -33,8 +37,10 @@ function buildMetaRows(context?: ImageVariantExportContext): Array<[string, stri
 
 function buildVariantDetailRows(
   slot: ImageVariantSlot,
-  variantIndex: number
+  variantIndex: number,
+  context?: ImageVariantExportContext,
 ): Array<[string, string]> {
+  const campaignRatio = context?.aspectRatio || '1:1'
   return [
     ['Field', 'Value'],
     ['Variant', String(variantIndex + 1)],
@@ -44,6 +50,16 @@ function buildVariantDetailRows(
     ['On-image hook', slot.image_hook || '—'],
     ['On-image headline', slot.image_headline || '—'],
     ['Use case(s)', useCaseLabels(slot)],
+    [
+      'Aspect ratio',
+      effectiveVariantAspectRatio(slot, campaignRatio)
+        + (slot.aspect_ratio_custom?.trim()
+          ? ' (custom)'
+          : slot.aspect_ratio?.trim()
+            ? ' (preset)'
+            : ' (campaign default)'),
+    ],
+    ['Reference image', slot.reference_image_url?.trim() || '—'],
     ['CTA on image', slot.cta || '—'],
     ['Offer (caption)', slot.offer || '—'],
     ['Image generation prompt', slot.prompt || '—'],
@@ -79,7 +95,7 @@ export function downloadImageVariantExcel(
   appendSheet(
     wb,
     `Variant ${variantIndex + 1}`,
-    buildVariantDetailRows(slot, variantIndex),
+    buildVariantDetailRows(slot, variantIndex, context),
     [{ wch: 28 }, { wch: 100 }]
   )
 
@@ -114,6 +130,7 @@ export function downloadAllImageVariantsExcel(
     [
       'Variant',
       'Use case(s)',
+      'Aspect ratio',
       'Hook on image',
       'Message / headline',
       'CTA on image',
@@ -125,6 +142,7 @@ export function downloadAllImageVariantsExcel(
     ...slots.map((slot, i) => [
       i + 1,
       useCaseLabels(slot),
+      effectiveVariantAspectRatio(slot, context?.aspectRatio || '1:1'),
       slot.hook || '—',
       slot.message || '—',
       slot.cta || '—',
@@ -137,6 +155,7 @@ export function downloadAllImageVariantsExcel(
   appendSheet(wb, 'All variants', overviewRows, [
     { wch: 8 },
     { wch: 28 },
+    { wch: 12 },
     { wch: 36 },
     { wch: 36 },
     { wch: 22 },
@@ -150,7 +169,7 @@ export function downloadAllImageVariantsExcel(
     appendSheet(
       wb,
       `Variant ${i + 1}`,
-      buildVariantDetailRows(slot, i),
+      buildVariantDetailRows(slot, i, context),
       [{ wch: 28 }, { wch: 100 }]
     )
   })

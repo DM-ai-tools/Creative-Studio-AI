@@ -1,18 +1,23 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import { assetsApi } from '@/lib/api'
+import { extractApiError } from '@/lib/apiErrors'
+import { assetUrl } from '@/lib/utils'
 import {
   downloadAllImageVariantsExcel,
   downloadImageVariantExcel,
   type ImageVariantExportContext,
 } from '@/lib/exportImageVariantExcel'
 import {
+  IMAGE_ASPECT_RATIO_OPTIONS,
   IMAGE_USE_CASES,
   IMAGE_USE_CASE_GROUPS,
   PRODUCT_FOCUS_OPTIONS,
+  effectiveVariantAspectRatio,
   isCarouselSlot,
   isLastCarouselCard,
   labelForUseCase,
@@ -52,6 +57,10 @@ type Props = {
   onPromptLlmModelChange?: (value: string) => void
   promptLlmOptions?: { value: string; label: string }[]
   promptLlmGroups?: { label: string; options: { value: string; label: string }[] }[]
+  /** Campaign-level image ratio — used when a variant has no override. */
+  defaultAspectRatio?: string
+  /** Brand id for optional per-variant reference image upload. */
+  brandId?: string
 }
 
 function formatGenerationTime(iso: string): string {
@@ -90,9 +99,28 @@ export default function ImageVariantSlotsPanel({
   onPromptLlmModelChange,
   promptLlmOptions = [],
   promptLlmGroups,
+  defaultAspectRatio = '1:1',
+  brandId,
 }: Props) {
   const [openPicker, setOpenPicker] = useState<number | null>(null)
+  const [editingSlots, setEditingSlots] = useState<Set<number>>(() => new Set(slots.map((_, i) => i)))
+  const [uploadingRefIndex, setUploadingRefIndex] = useState<number | null>(null)
+  const fileInputRefs = useRef<Record<number, HTMLInputElement | null>>({})
   const hasCarousel = slots.some((s) => isCarouselSlot(s, formats))
+
+  const prevSlotCount = useRef(slots.length)
+  useEffect(() => {
+    if (slots.length > prevSlotCount.current) {
+      setEditingSlots((prev) => {
+        const next = new Set(prev)
+        for (let i = prevSlotCount.current; i < slots.length; i++) next.add(i)
+        return next
+      })
+    } else if (slots.length < prevSlotCount.current) {
+      setEditingSlots((prev) => new Set([...prev].filter((i) => i < slots.length)))
+    }
+    prevSlotCount.current = slots.length
+  }, [slots.length])
 
   const hasVariantContent = (slot: ImageVariantSlot) =>
     Boolean(slot.hook.trim() || slot.message.trim() || slot.prompt.trim())
@@ -127,6 +155,42 @@ export default function ImageVariantSlotsPanel({
     const on = slot.use_cases.includes(id)
     updateSlot(index, {
       use_cases: on ? slot.use_cases.filter((x) => x !== id) : [...slot.use_cases, id],
+    })
+  }
+
+  const toggleEditing = (index: number) => {
+    setEditingSlots((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  const handleReferenceUpload = async (index: number, file: File) => {
+    if (!brandId) {
+      toast.error('Select a brand before uploading a reference image')
+      return
+    }
+    setUploadingRefIndex(index)
+    try {
+      const asset = await assetsApi.upload(file, undefined, 'reference_image', brandId)
+      updateSlot(index, {
+        reference_image_url: asset.file_url,
+        reference_image_asset_id: asset.id,
+      })
+      toast.success(`Reference image added to variant ${index + 1}`)
+    } catch (err: unknown) {
+      toast.error(extractApiError(err, 'Could not upload reference image'))
+    } finally {
+      setUploadingRefIndex(null)
+    }
+  }
+
+  const clearReferenceImage = (index: number) => {
+    updateSlot(index, {
+      reference_image_url: undefined,
+      reference_image_asset_id: undefined,
     })
   }
 
@@ -312,6 +376,9 @@ export default function ImageVariantSlotsPanel({
         const pickerOpen = openPicker === index
         const carouselCard = isCarouselSlot(slot, formats)
         const lastCarousel = isLastCarouselCard(slot, index, slots, formats)
+        const isEditing = editingSlots.has(index)
+        const effectiveRatio = effectiveVariantAspectRatio(slot, defaultAspectRatio)
+        const refPreview = assetUrl(slot.reference_image_url)
         return (
           <div key={index} className="space-y-1">
           <div
@@ -379,6 +446,14 @@ export default function ImageVariantSlotsPanel({
                 <Button
                   type="button"
                   size="sm"
+                  variant={isEditing ? 'outline' : 'primary'}
+                  onClick={() => toggleEditing(index)}
+                >
+                  {isEditing ? 'Done' : 'Edit'}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
                   variant="outline"
                   disabled={busy || !hasVariantContent(slot)}
                   onClick={() => handleDownloadVariant(index)}
@@ -398,6 +473,38 @@ export default function ImageVariantSlotsPanel({
               </div>
             </div>
 
+            {!isEditing ? (
+              <div className="rounded-xl border border-border/80 bg-white/70 px-3 py-2.5 space-y-2">
+                <p className="text-sm text-charcoal line-clamp-2">
+                  {slot.hook.trim() || slot.message.trim()
+                    ? `${slot.hook.trim() || '—'} · ${slot.message.trim() || '—'}`
+                    : 'No hook/headline yet — click Edit or Generate AI plan'}
+                </p>
+                <div className="flex flex-wrap items-center gap-2 text-[10px] text-mid">
+                  <span>
+                    Ratio: <strong className="text-charcoal">{effectiveRatio}</strong>
+                    {slot.aspect_ratio_custom?.trim()
+                      ? ' (custom)'
+                      : slot.aspect_ratio?.trim()
+                        ? ' (preset)'
+                        : ' (campaign default)'}
+                  </span>
+                  {refPreview ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <img
+                        src={refPreview}
+                        alt=""
+                        className="h-8 w-8 rounded object-cover border border-border"
+                      />
+                      Reference image
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {isEditing ? (
+            <>
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <p className="text-[10px] font-bold text-navy uppercase tracking-wide">
@@ -543,6 +650,133 @@ export default function ImageVariantSlotsPanel({
               })()}
             </div>
 
+            <div>
+              <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1">
+                Ratio (this variant)
+              </label>
+              <select
+                value={slot.aspect_ratio || ''}
+                onChange={(e) =>
+                  updateSlot(index, { aspect_ratio: e.target.value.trim() || undefined })
+                }
+                className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal"
+              >
+                <option value="">
+                  Use campaign default ({defaultAspectRatio})
+                </option>
+                {IMAGE_ASPECT_RATIO_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label} — {opt.desc}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-2 flex items-center gap-2">
+                <label className="text-[10px] font-semibold text-navy shrink-0">
+                  Custom ratio (optional):
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. 3:4 or 1200x628"
+                  value={slot.aspect_ratio_custom || ''}
+                  onChange={(e) =>
+                    updateSlot(index, {
+                      aspect_ratio_custom: e.target.value.trim() || undefined,
+                    })
+                  }
+                  className={`flex-1 rounded-lg border px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+                    slot.aspect_ratio_custom?.trim()
+                      ? 'border-accent bg-accent/5'
+                      : 'border-border bg-white'
+                  }`}
+                />
+                {slot.aspect_ratio_custom?.trim() ? (
+                  <button
+                    type="button"
+                    onClick={() => updateSlot(index, { aspect_ratio_custom: undefined })}
+                    className="text-[10px] text-mid underline hover:text-charcoal shrink-0"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              <p className="mt-1 text-[10px] text-mid">
+                Effective:{' '}
+                <strong className="text-charcoal">{effectiveRatio}</strong>
+                {slot.aspect_ratio_custom?.trim()
+                  ? ' (custom override)'
+                  : slot.aspect_ratio?.trim()
+                    ? ' (preset override)'
+                    : ' (campaign default)'}
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1.5">
+                Reference image (optional)
+              </label>
+              <p className="text-[10px] text-mid mb-2">
+                Style or product reference for this variant only — merged with campaign references at
+                generation time.
+              </p>
+              {refPreview ? (
+                <div className="flex items-start gap-3 mb-2">
+                  <img
+                    src={refPreview}
+                    alt="Variant reference"
+                    className="h-20 w-20 rounded-lg object-cover border border-border"
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => fileInputRefs.current[index]?.click()}
+                      disabled={uploadingRefIndex === index}
+                      isLoading={uploadingRefIndex === index}
+                    >
+                      Replace
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => clearReferenceImage(index)}
+                      className="text-[11px] text-mid underline hover:text-charcoal text-left"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => fileInputRefs.current[index]?.click()}
+                  disabled={uploadingRefIndex === index || !brandId}
+                  isLoading={uploadingRefIndex === index}
+                >
+                  Upload reference image
+                </Button>
+              )}
+              {!brandId ? (
+                <p className="mt-1 text-[10px] text-amber-700">
+                  Select a brand in step 2 to enable uploads.
+                </p>
+              ) : null}
+              <input
+                ref={(el) => {
+                  fileInputRefs.current[index] = el
+                }}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) void handleReferenceUpload(index, file)
+                  e.target.value = ''
+                }}
+              />
+            </div>
+
             {carouselCard ? (
               <>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -671,6 +905,8 @@ export default function ImageVariantSlotsPanel({
                 </p>
               ) : null}
             </div>
+            </>
+            ) : null}
           </div>
           {slot.generated_at ? (
             <p className="text-[10px] text-mid text-right px-1">

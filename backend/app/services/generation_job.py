@@ -299,13 +299,68 @@ def _exact_product_reference_from_kb(kb_models: dict[str, Any]) -> str | None:
     return None
 
 
+def _effective_slot_aspect_ratio(
+    slot: dict[str, Any] | None,
+    kb_models: dict[str, Any],
+    brief_dict: dict[str, Any],
+    *,
+    fmt: str = "static",
+) -> str:
+    campaign = (
+        str(brief_dict.get("image_aspect_ratio") or kb_models.get("image_aspect_ratio") or "")
+        .strip()
+        or "1:1"
+    )
+    if not isinstance(slot, dict):
+        return "1:1" if fmt == "carousel" else campaign
+    custom = str(slot.get("aspect_ratio_custom") or "").strip()
+    if custom:
+        return custom
+    chosen = str(slot.get("aspect_ratio") or "").strip()
+    if chosen:
+        return chosen
+    return "1:1" if fmt == "carousel" else campaign
+
+
+def _reference_images_for_variant(
+    kb_models: dict[str, Any],
+    slot: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    refs = list(_reference_images_from_kb(kb_models))
+    if not isinstance(slot, dict):
+        return refs[:5]
+    url = str(slot.get("reference_image_url") or "").strip()
+    if not url:
+        return refs[:5]
+    variant_ref: dict[str, Any] = {"file_url": url}
+    asset_id = str(slot.get("reference_image_asset_id") or "").strip()
+    if asset_id:
+        variant_ref["asset_id"] = asset_id
+    merged = [variant_ref] + [
+        r for r in refs if str(r.get("file_url") or "").strip() != url
+    ]
+    return merged[:5]
+
+
+def _variant_reference_image_url(
+    kb_models: dict[str, Any],
+    slot: dict[str, Any] | None,
+) -> str | None:
+    if isinstance(slot, dict):
+        url = str(slot.get("reference_image_url") or "").strip()
+        if url:
+            return url
+    return _exact_product_reference_from_kb(kb_models)
+
+
 def _append_reference_images_to_prompt(
     image_prompt: str,
     kb_models: dict[str, Any],
+    slot: dict[str, Any] | None = None,
 ) -> str:
     from app.services.reference_image_service import append_reference_guidance_to_prompt
 
-    refs = _reference_images_from_kb(kb_models)
+    refs = _reference_images_for_variant(kb_models, slot)
     return append_reference_guidance_to_prompt(image_prompt, refs)
 
 
@@ -795,22 +850,20 @@ async def run_brief_generation_job(
                                     or brief_dict.get("image_prompt_override")
                                     or kb_models.get("image_prompt_override")
                                     or "",
-                                    "image_aspect_ratio": (
-                                        "1:1"
-                                        if fmt == "carousel"
-                                        else (
-                                            brief_dict.get("image_aspect_ratio")
-                                            or kb_models.get("image_aspect_ratio")
-                                            or "1:1"
-                                        )
+                                    "image_aspect_ratio": _effective_slot_aspect_ratio(
+                                        slot if isinstance(slot, dict) else None,
+                                        kb_models,
+                                        brief_dict,
+                                        fmt=fmt,
                                     ),
                                 }
                                 if slot_photo_only and slot_prompt:
-                                    ratio = (
-                                        brief_dict.get("image_aspect_ratio")
-                                        or kb_models.get("image_aspect_ratio")
-                                        or "4:3"
-                                    )
+                                    ratio = _effective_slot_aspect_ratio(
+                                        slot if isinstance(slot, dict) else None,
+                                        kb_models,
+                                        brief_dict,
+                                        fmt=fmt,
+                                    ) or "4:3"
                                     image_prompt = enforce_fashion_retail_photo_in_prompt(
                                         slot_prompt, aspect_ratio=ratio
                                     )
@@ -822,11 +875,11 @@ async def run_brief_generation_job(
                                         (slot.get("reasoning") if slot else "") or "fashion_retail_photo"
                                     )
                                 elif slot_retail_promo and slot_prompt:
-                                    ratio = (
-                                        str(slot.get("aspect_ratio") or "").strip()
-                                        or brief_dict.get("image_aspect_ratio")
-                                        or kb_models.get("image_aspect_ratio")
-                                        or "1:1"
+                                    ratio = _effective_slot_aspect_ratio(
+                                        slot if isinstance(slot, dict) else None,
+                                        kb_models,
+                                        brief_dict,
+                                        fmt=fmt,
                                     )
                                     from app.services.icp_image_plan_service import (
                                         _fashion_retail_promo_on_image_lines,
@@ -1188,7 +1241,11 @@ async def run_brief_generation_job(
                             or "auto"
                         ).strip()
                         image_prompt = _append_social_style_to_prompt(image_prompt, snap)
-                        image_prompt = _append_reference_images_to_prompt(image_prompt, kb_models)
+                        image_prompt = _append_reference_images_to_prompt(
+                            image_prompt,
+                            kb_models,
+                            slot if isinstance(slot, dict) else None,
+                        )
                         image_prompt = _append_competitor_insights_to_prompt(
                             image_prompt, snap, brief_dict=brief_dict
                         )
@@ -1288,10 +1345,16 @@ async def run_brief_generation_job(
                             format_type=fmt,
                             logo_url=img_logo if burn_logo_on_still else None,
                             logo_on_light_url=img_logo_light if burn_logo_on_still else None,
-                            reference_image_url=_exact_product_reference_from_kb(kb_models),
+                            reference_image_url=_variant_reference_image_url(
+                                kb_models,
+                                slot if isinstance(slot, dict) else None,
+                            ),
                         )
                         img_step = pipeline["image"]
-                        refs_used = _reference_images_from_kb(kb_models)
+                        refs_used = _reference_images_for_variant(
+                            kb_models,
+                            slot if isinstance(slot, dict) else None,
+                        )
                         if isinstance(img_step, dict) and refs_used:
                             img_step["reference_images_used"] = [
                                 {
@@ -1643,7 +1706,12 @@ async def run_regenerate_variant_image(
 
             base_prompt = slot_prompt or prior_prompt
             if slot_photo_only and base_prompt:
-                ratio = brief_dict.get("image_aspect_ratio") or kb_models.get("image_aspect_ratio") or "4:3"
+                ratio = _effective_slot_aspect_ratio(
+                    slot if isinstance(slot, dict) else None,
+                    kb_models,
+                    brief_dict,
+                    fmt=fmt,
+                ) or "4:3"
                 image_prompt = enforce_fashion_retail_photo_in_prompt(
                     base_prompt, aspect_ratio=ratio
                 )
@@ -1804,7 +1872,11 @@ async def run_regenerate_variant_image(
                 or "auto"
             ).strip()
             image_prompt = _append_social_style_to_prompt(image_prompt, snap)
-            image_prompt = _append_reference_images_to_prompt(image_prompt, kb_models)
+            image_prompt = _append_reference_images_to_prompt(
+                image_prompt,
+                kb_models,
+                slot if isinstance(slot, dict) else None,
+            )
             image_prompt = _append_competitor_insights_to_prompt(
                 image_prompt, snap, brief_dict=brief_dict
             )
@@ -1870,7 +1942,10 @@ async def run_regenerate_variant_image(
                 format_type=fmt,
                 logo_url=img_logo if burn_logo else None,
                 logo_on_light_url=img_logo_light if burn_logo else None,
-                reference_image_url=_exact_product_reference_from_kb(kb_models),
+                reference_image_url=_variant_reference_image_url(
+                    kb_models,
+                    slot if isinstance(slot, dict) else None,
+                ),
             )
             if (
                 isinstance(image_result, dict)

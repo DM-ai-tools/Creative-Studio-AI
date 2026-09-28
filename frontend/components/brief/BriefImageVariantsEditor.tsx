@@ -8,6 +8,7 @@ import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import {
   emptyImageVariantSlot,
   normalizeProductFocus,
+  normalizeVariantAspectFromStorage,
   resizeImageVariantSlots,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
@@ -49,6 +50,9 @@ export function slotsFromBrief(brief: Brief): ImageVariantSlot[] {
     carousel_total: v.carousel_total ? Number(v.carousel_total) : undefined,
     product_focus: normalizeProductFocus(v.product_focus),
     product_model: String(v.product_model || ''),
+    ...normalizeVariantAspectFromStorage(v),
+    reference_image_url: String(v.reference_image_url || '').trim() || undefined,
+    reference_image_asset_id: String(v.reference_image_asset_id || '').trim() || undefined,
     generated_at: v.generated_at ? String(v.generated_at) : null,
   }))
   return resizeImageVariantSlots(mapped, count)
@@ -69,6 +73,10 @@ export function serializeImageVariants(slots: ImageVariantSlot[]) {
     format: s.format || undefined,
     carousel_index: s.carousel_index || undefined,
     carousel_total: s.carousel_total || undefined,
+    aspect_ratio: s.aspect_ratio || undefined,
+    aspect_ratio_custom: s.aspect_ratio_custom?.trim() || undefined,
+    reference_image_url: s.reference_image_url?.trim() || undefined,
+    reference_image_asset_id: s.reference_image_asset_id || undefined,
     product_focus: s.product_focus || undefined,
     product_model: s.product_model?.trim() || undefined,
     generated_at: s.generated_at ?? undefined,
@@ -136,6 +144,12 @@ export default function BriefImageVariantsEditor({
           }
           angleOptions={angleOptions}
           catalogProducts={catalogProductsFromBrief(brief)}
+          brandId={brief.brand_id || undefined}
+          defaultAspectRatio={
+            String(
+              (brief.key_benefits as Record<string, unknown> | undefined)?.image_aspect_ratio || '',
+            ).trim() || '1:1'
+          }
         />
         <div className="flex justify-end">
           <Button type="button" variant="primary" isLoading={saving} onClick={() => void handleSave()}>

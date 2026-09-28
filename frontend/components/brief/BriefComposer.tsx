@@ -23,6 +23,10 @@ import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
 import HeroAiImageTab from '@/components/brief/HeroAiImageTab'
 import {
   emptyImageVariantSlot,
+  effectiveVariantAspectRatio,
+  normalizeVariantAspectFromStorage,
+  referenceImagesPayloadForVariant,
+  IMAGE_ASPECT_RATIO_OPTIONS,
   isCarouselSlot,
   isLastCarouselCard,
   isIncompleteOnImageLine,
@@ -1359,7 +1363,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
           carousel_group: (v.carousel_group || '').trim() || undefined,
           photo_only: photoOnly || undefined,
           retail_promo: retailPromo || undefined,
-          aspect_ratio: (v.aspect_ratio || '').trim() || undefined,
+          ...normalizeVariantAspectFromStorage(v),
           use_cases: v.use_cases?.length ? v.use_cases : retailPromo ? ['lifestyle', 'product_person'] : [],
           cta: photoOnly
             ? ''
@@ -1674,7 +1678,12 @@ export default function BriefComposer(_props: BriefComposerProps) {
       carousel_group: slot.carousel_group || src?.carousel_group || undefined,
       photo_only: Boolean(slot.photo_only && !slot.retail_promo && !src?.retail_promo),
       retail_promo: Boolean(slot.retail_promo || src?.retail_promo),
-      aspect_ratio: slot.aspect_ratio || src?.aspect_ratio || undefined,
+      aspect_ratio:
+        effectiveVariantAspectRatio(slot, imageRatioCustom.trim() || imageRatio) ||
+        slot.aspect_ratio ||
+        src?.aspect_ratio ||
+        undefined,
+      aspect_ratio_custom: slot.aspect_ratio_custom || undefined,
       product_focus: slot.product_focus || imageProductFocus || undefined,
       cta: (slot.cta || src?.cta || '').trim(),
     }
@@ -1722,7 +1731,10 @@ export default function BriefComposer(_props: BriefComposerProps) {
         image_visual_style: imageVisualStyle || undefined,
         product_focus: (slot.product_focus || imageProductFocus) || undefined,
         ...resolvedBrandVisuals,
-        image_aspect_ratio: imageRatioCustom.trim() || imageRatio,
+        image_aspect_ratio: effectiveVariantAspectRatio(
+          slot,
+          imageRatioCustom.trim() || imageRatio,
+        ),
         hook_frameworks: (slot.product_focus || imageProductFocus) === 'product_only'
           ? []
           : slotAngle
@@ -1745,7 +1757,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
         ...(strategyParsed
           ? { strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '' }
           : {}),
-        ...(referenceImagesPayload.length ? { reference_images: referenceImagesPayload } : {}),
+        ...(referenceImagesPayloadForVariant(slot, referenceImagesPayload).length
+          ? { reference_images: referenceImagesPayloadForVariant(slot, referenceImagesPayload) }
+          : {}),
         exact_product_reference: exactProductReference,
         llm_model: genSettings.promptLlmModel || undefined,
       })
@@ -1905,7 +1919,14 @@ export default function BriefComposer(_props: BriefComposerProps) {
           ...(strategyParsed
             ? { strategy_notes: strategyParsed.notes || strategyParsed.reasoning || '' }
             : {}),
-          ...(referenceImagesPayload.length ? { reference_images: referenceImagesPayload } : {}),
+          ...(referenceImagesPayloadForVariant(chunkSlot, referenceImagesPayload).length
+            ? {
+                reference_images: referenceImagesPayloadForVariant(
+                  chunkSlot,
+                  referenceImagesPayload,
+                ),
+              }
+            : {}),
         exact_product_reference: exactProductReference,
           llm_model: genSettings.promptLlmModel || undefined,
         })
@@ -2260,6 +2281,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
                   photo_only: s.photo_only || undefined,
                   retail_promo: s.retail_promo || undefined,
                   aspect_ratio: s.aspect_ratio || undefined,
+                  aspect_ratio_custom: s.aspect_ratio_custom?.trim() || undefined,
+                  reference_image_url: s.reference_image_url?.trim() || undefined,
+                  reference_image_asset_id: s.reference_image_asset_id || undefined,
                   product_focus: s.product_focus || undefined,
                   product_model: s.product_model?.trim() || undefined,
                   generated_at: s.generated_at ?? undefined,
@@ -3218,15 +3242,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
               <div>
                 <p className="text-xs font-bold text-navy uppercase tracking-wide mb-3">Image ratio</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3">
-                  {[
-                    { id: '1:1',    label: '1:1',      desc: 'Instagram · Facebook feed' },
-                    { id: '4:3',    label: '4:3',      desc: 'Fashion retail · portrait feed' },
-                    { id: '4:5',    label: '4:5',      desc: 'Instagram portrait feed' },
-                    { id: '9:16',   label: '9:16',     desc: 'Reels · Stories · TikTok' },
-                    { id: '16:9',   label: '16:9',     desc: 'Website · YouTube · Landscape' },
-                    { id: '1.91:1', label: '1.91:1',   desc: 'Facebook · Google ads' },
-                    { id: '2:3',    label: '2:3',      desc: 'Pinterest · Print' },
-                  ].map((r) => (
+                  {IMAGE_ASPECT_RATIO_OPTIONS.map((r) => (
                     <button
                       key={r.id}
                       type="button"
@@ -3670,6 +3686,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 }
                 promptLlmOptions={promptLlmSelect.options}
                 promptLlmGroups={promptLlmSelect.groups}
+                defaultAspectRatio={imageRatioCustom.trim() || imageRatio}
+                brandId={(formValues.brand_id || selectedBrand?.id || '').trim() || undefined}
               />
             </BriefSection>
           )}
