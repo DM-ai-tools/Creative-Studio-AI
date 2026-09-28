@@ -117,7 +117,7 @@ export default function ImageVariantSlotsPanel({
         return next
       })
     } else if (slots.length < prevSlotCount.current) {
-      setEditingSlots((prev) => new Set([...prev].filter((i) => i < slots.length)))
+      setEditingSlots((prev) => new Set(Array.from(prev).filter((i) => i < slots.length)))
     }
     prevSlotCount.current = slots.length
   }, [slots.length])
