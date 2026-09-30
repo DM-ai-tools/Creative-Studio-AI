@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     ARK_API_KEY: str = ""
     ARK_BASE_URL: str = "https://ark.ap-southeast.bytepluses.com/api/v3"
     ARK_SEEDANCE_MODEL: str = "dreamina-seedance-2-0-260128"
+    ARK_SEEDANCE_25_MODEL: str = "dreamina-seedance-2-5-260628"
     ARK_POLL_MAX_WAIT_SECONDS: int = 1800
 
     # Firecrawl — scrape website → brand colors, logo, industry

@@ -417,6 +417,22 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_content[0]["role"], "first_frame")
         self.assertEqual(image_content[0]["image_url"]["url"], "https://example.com/approved.png")
 
+    async def test_seedance_25_first_frame_coerces_adaptive_ratio(self):
+        captured = {}
+        def respond(request):
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "test-task"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await create_video_task(
+                client,
+                prompt="Continue from the previous final frame.",
+                model="dreamina-seedance-2-5-260628",
+                ratio="3:4",
+                image_data_uri_or_url="https://example.com/handoff.png",
+                image_role="first_frame",
+            )
+        self.assertEqual(captured["ratio"], "adaptive")
+
 
 class MediaTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -915,6 +931,29 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["duration_seconds"], 15)
         for i in range(6):
             self.assertIn(f"Show action {i}", call.kwargs["prompt"])
+
+    async def test_creative_studio_job_persists_across_memory_reload(self):
+        from app.services import creative_studio_job_service as job_service
+
+        with patch.object(job_service.settings, "UPLOAD_DIR", str(self.work)):
+            job_id = await job_service.create_job(
+                tenant_id="test",
+                payload={"media_mode": "video", "model": "ark-seedance-2-0", "prompt": "Test"},
+            )
+            await job_service.update_job(
+                job_id,
+                status="done",
+                result={
+                    "status": "done",
+                    "continuation_available": True,
+                    "completed_segments": 1,
+                },
+            )
+            job_service._JOBS.clear()
+            reloaded = await job_service.get_job(job_id, tenant_id="test")
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded["status"], "done")
+        self.assertTrue(reloaded["continuation_available"])
 
     async def test_interactive_long_video_waits_for_review_then_stitches(self):
         from app.services.creative_studio_job_service import (

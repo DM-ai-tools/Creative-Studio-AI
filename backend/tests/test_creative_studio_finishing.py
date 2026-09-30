@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-from app.services.creative_studio_picture import compile_picture_prompt, media_dimensions, compose_campaign_graphics
+from app.services.creative_studio_picture import (
+    apply_uploaded_logo_end_hold,
+    compile_picture_prompt,
+    media_dimensions,
+    compose_campaign_graphics,
+)
 from app.services.creative_studio_video_finishing import (
     extract_overlay_events,
     extract_voiceover_events,
@@ -117,6 +122,126 @@ class FinishingTests(unittest.IsolatedAsyncioTestCase):
         request = provider.generate.call_args.kwargs
         self.assertTrue(request["brief"]["skip_voiceover"])
         self.assertIn("NO speech, dialogue or narration", request["prompt"])
+
+    def test_uploaded_logo_end_hold_composites_on_final_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            source = work / "source.mp4"
+            output = work / "logo-hold.mp4"
+            subprocess.run(
+                [
+                    require_ffmpeg(),
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=gray:s=1920x1080:r=24",
+                    "-t",
+                    "15",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    str(source),
+                ],
+                capture_output=True,
+                check=True,
+            )
+            logo = work / "logo.png"
+            from PIL import Image
+
+            Image.new("RGBA", (180, 50), "orange").save(logo)
+
+            def save(content, *args):
+                output.write_bytes(content)
+                return {"file_url": str(output)}
+
+            with (
+                patch(
+                    "app.services.creative_studio_picture._ensure_local_video",
+                    return_value=source,
+                ),
+                patch(
+                    "app.services.creative_studio_picture.file_url_to_local_path",
+                    return_value=logo,
+                ),
+                patch(
+                    "app.services.creative_studio_picture.file_service.save_bytes",
+                    side_effect=save,
+                ),
+            ):
+                url, done = apply_uploaded_logo_end_hold(
+                    "fixture",
+                    tenant_id="test",
+                    logo_url="logo",
+                    hold_seconds=5.0,
+                )
+            self.assertTrue(done)
+            self.assertAlmostEqual(probe_video_duration(output), 15, delta=0.1)
+            subprocess.run(
+                [
+                    require_ffmpeg(),
+                    "-v",
+                    "error",
+                    "-y",
+                    "-ss",
+                    "13",
+                    "-i",
+                    str(output),
+                    "-frames:v",
+                    "1",
+                    str(work / "logo-hold-end.png"),
+                ],
+                capture_output=True,
+                check=True,
+            )
+
+    async def test_logo_end_hold_runs_when_no_overlay_events(self):
+        from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
+
+        provider = Mock()
+        provider.generate = AsyncMock(
+            return_value={
+                "status": "done",
+                "url": "fixture.mp4",
+                "provider": "byteplus",
+                "model": "ark-seedance-2-0",
+                "duration_seconds": 15,
+            }
+        )
+        brief = (
+            "Scene 1 - OPEN | 0-15 seconds\n"
+            "Show a calm product hero shot with no timed captions."
+        )
+        job = await create_job(
+            tenant_id="test",
+            payload={
+                "media_mode": "video",
+                "model": "ark-seedance-2-0",
+                "prompt": brief,
+                "source_brief": brief,
+                "duration_seconds": 15,
+                "sound_on": False,
+                "logo_reference_url": "/files/test/logo.png",
+            },
+        )
+        with (
+            patch("app.services.file_service.file_service.assert_writable"),
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch(
+                "app.services.creative_studio_picture.apply_uploaded_logo_end_hold",
+                return_value=("fixture-logo.mp4", True),
+            ) as end_hold,
+            patch("app.services.video_subtitles._ensure_local_video", return_value=Path(__file__)),
+        ):
+            await run_creative_studio_job(job)
+        result = await get_job(job)
+        self.assertEqual(result["status"], "done", result.get("error"))
+        end_hold.assert_called_once()
+        self.assertTrue(result.get("logo_applied"))
+        self.assertEqual(result.get("logo_end_hold_seconds"), 5.0)
 
     def test_actual_landscape_dimensions_and_exact_graphics(self):
         with tempfile.TemporaryDirectory() as tmp:

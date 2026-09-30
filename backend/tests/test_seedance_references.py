@@ -74,7 +74,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         submit = AsyncMock(return_value="test-task")
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 15})),
             patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
@@ -100,7 +100,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         submit = AsyncMock(side_effect=[privacy_error, "anchor-task"])
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 15})),
             patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
@@ -127,7 +127,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         strict_brief = {**self.brief, "strict_character_reference": True}
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch("app.services.usage_tracker.record_usage"),
         ):
@@ -151,7 +151,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch("app.services.usage_tracker.record_usage"),
         ):
@@ -166,6 +166,40 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("approved storyboard opening frame", result["error"])
         self.assertNotIn("selected character reference", result["error"])
 
+    async def test_continuity_chapter_uses_adaptive_ratio_on_seedance_25(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        submit = AsyncMock(return_value="continuity-task")
+        continuity_brief = {
+            **self.brief,
+            "continuity_reference_url": "https://example.com/handoff.jpg",
+            "strict_continuity_reference": True,
+            "creative_studio_aspect": "4/5",
+        }
+        with (
+            patch(module + ".ark_configured", return_value=True),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
+            patch(module + ".create_video_task", submit),
+            patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 30})),
+            patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
+            patch(module + "._download_asset", AsyncMock(return_value={"url": "fixture.mp4"})),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="Continue from the previous final frame.",
+                brief=continuity_brief,
+                copy={},
+                format_type="reel",
+                model="ark-seedance-2-5",
+                tenant_id="test",
+                source_image_url=None,
+                duration_seconds=30,
+            )
+        self.assertEqual(result["status"], "done", result.get("error"))
+        request = submit.call_args.kwargs
+        self.assertEqual(request["ratio"], "adaptive")
+        self.assertEqual(request["image_role"], "first_frame")
+        self.assertEqual(request["image_data_uri_or_url"], "https://example.com/handoff.jpg")
+
     async def test_strict_continuity_never_drops_the_previous_chapter_frame(self):
         module = "app.services.media.byteplus_seedance_provider"
         privacy_error = RuntimeError("InputImageSensitiveContentDetected.PrivacyInformation")
@@ -177,7 +211,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch("app.services.usage_tracker.record_usage"),
         ):
@@ -260,7 +294,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         submit = AsyncMock(return_value="paid-task")
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch(module + ".poll_video_task", AsyncMock(return_value={
                 "status": "succeeded",
@@ -289,7 +323,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         submit = AsyncMock(side_effect=[privacy_error, privacy_error, "fallback-task"])
         with (
             patch(module + ".ark_configured", return_value=True),
-            patch(module + ".file_url_to_data_uri", side_effect=lambda url: url),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
             patch(module + ".create_video_task", submit),
             patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 15})),
             patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),

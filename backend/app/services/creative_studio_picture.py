@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from app.services.creative_studio_timeline import SHOT_HEADER
-from app.services.ffmpeg_util import require_ffmpeg
+from app.services.ffmpeg_util import probe_video_duration, require_ffmpeg
 from app.services.file_service import file_service
 from app.services.video_subtitles import _ensure_local_video
 from app.services.logo_overlay import file_url_to_local_path
@@ -195,6 +195,91 @@ def media_dimensions(path: Path) -> tuple[int, int]:
     if not match:
         raise ValueError("Cannot determine actual video dimensions; refusing guessed graphic placement")
     return int(match[1]), int(match[2])
+
+
+def apply_uploaded_logo_end_hold(
+    video_url: str,
+    *,
+    tenant_id: str,
+    logo_url: str,
+    hold_seconds: float = 5.0,
+) -> tuple[str, bool]:
+    """
+    Composite an uploaded logo on the final hold of a Creative Studio video.
+    Used when no timed caption/end-card events were parsed from the brief.
+    """
+    logo_path = file_url_to_local_path(logo_url)
+    if not logo_path:
+        raise ValueError("Supplied logo unavailable; reattach the logo")
+    source = _ensure_local_video(video_url, tenant_id=tenant_id)
+    if not source:
+        raise ValueError("Video unavailable for logo end hold")
+    duration = probe_video_duration(source) or 0.0
+    if duration <= 0:
+        raise ValueError("Could not read video duration for logo end hold")
+    hold = min(max(1.0, float(hold_seconds)), duration)
+    start = max(0.0, duration - hold)
+    width, height = media_dimensions(source)
+    logo = Image.open(logo_path).convert("RGBA")
+    target_w = round(width * (0.30 if width >= height else 0.22))
+    logo.thumbnail(
+        (target_w, round(height * 0.12)),
+        Image.Resampling.LANCZOS,
+    )
+    lw, lh = logo.size
+    if width >= height:
+        overlay_x = round(width * 0.08)
+        overlay_y = round(height * 0.62)
+    else:
+        overlay_x = max(0, (width - lw) // 2)
+        overlay_y = round(height * 0.78)
+    with tempfile.TemporaryDirectory(prefix="cs_logo_hold_") as tmp:
+        work = Path(tmp)
+        logo_png = work / "end-logo.png"
+        logo.save(logo_png)
+        output = work / "logo-hold.mp4"
+        enable = f"gte(t\\,{start:.3f})"
+        filter_complex = (
+            f"[1:v]format=rgba[logo];"
+            f"[0:v][logo]overlay={overlay_x}:{overlay_y}:enable='{enable}':shortest=1[out]"
+        )
+        cmd = [
+            require_ffmpeg(),
+            "-y",
+            "-i",
+            str(source),
+            "-loop",
+            "1",
+            "-i",
+            str(logo_png),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[out]",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "fast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if proc.returncode:
+            raise RuntimeError("Logo end hold failed: " + (proc.stderr or "")[-500:])
+        saved = file_service.save_bytes(
+            output.read_bytes(), tenant_id, "generated", ".mp4", "video/mp4"
+        )
+        return saved["file_url"], True
 
 
 def compose_campaign_graphics(video_url: str, events: list[tuple[float, float, str]],

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from uuid import UUID
@@ -1406,6 +1406,16 @@ class CreativeStudioGenerateResponse(BaseModel):
     completed_segments: int | None = None
 
 
+class CreativeStudioRecoverContinuationRequest(BaseModel):
+    part_video_url: str
+    completed_segments: int = Field(ge=1)
+    segment_count: int = Field(ge=2)
+    payload: dict
+    generated_duration_seconds: int | None = None
+    continuity_frame_count: int | None = None
+    cast_reference_url: str | None = None
+
+
 class CreativeStudioPromptRequest(BaseModel):
     niche: str
     media_mode: str = "video"
@@ -1467,6 +1477,7 @@ class CreativeStudioChatRequest(BaseModel):
     reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
     storyboard_image_urls: list[str] = Field(default_factory=list)
     prompt_only_video: bool = False
+    video_model: str = "ark-seedance-2-0"
 
 
 class CreativeStudioChatResponse(BaseModel):
@@ -1576,9 +1587,10 @@ async def creative_studio_chat(
         "generate_video",
     }:
         raise HTTPException(status_code=422, detail="messages required")
-    result = await run_creative_studio_chat_turn(
-        tenant_id=str(current_user.tenant_id),
-        messages=msgs,
+    try:
+        result = await run_creative_studio_chat_turn(
+            tenant_id=str(current_user.tenant_id),
+            messages=msgs,
         mode=data.mode,
         chat_model=data.chat_model,
         duration_seconds=data.duration_seconds,
@@ -1610,7 +1622,10 @@ async def creative_studio_chat(
         reference_assets=[asset.model_dump() for asset in data.reference_assets],
         storyboard_image_urls=list(data.storyboard_image_urls or []),
         prompt_only_video=bool(data.prompt_only_video),
-    )
+        video_model=data.video_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return CreativeStudioChatResponse(**result)
 
 
@@ -1651,6 +1666,8 @@ def _cs_format_from_aspect(aspect: str) -> str:
         return "video"
     if a in {"4/3"}:
         return "carousel"
+    if a in {"4/5"}:
+        return "reel"
     return "static"
 
 
@@ -1744,14 +1761,40 @@ async def creative_studio_job_status(
 )
 async def creative_studio_job_continue(
     job_id: str,
+    data: CreativeStudioRecoverContinuationRequest | None = Body(default=None),
     current_user=Depends(get_current_user),
 ):
     """After review, generate the next Seedance chapter from the prior final frame."""
-    from app.services.creative_studio_job_service import create_continuation_job
+    from app.services.creative_studio_job_service import (
+        create_continuation_job,
+        recover_continuation_job,
+    )
 
-    job = await create_continuation_job(job_id, tenant_id=str(current_user.tenant_id))
+    tenant_id = str(current_user.tenant_id)
+    job = await create_continuation_job(job_id, tenant_id=tenant_id)
+    if not job and data and data.part_video_url.strip():
+        try:
+            job = await recover_continuation_job(
+                tenant_id=tenant_id,
+                part_video_url=data.part_video_url.strip(),
+                completed_segments=data.completed_segments,
+                segment_count=data.segment_count,
+                payload=dict(data.payload or {}),
+                generated_duration_seconds=data.generated_duration_seconds,
+                continuity_frame_count=data.continuity_frame_count,
+                cast_reference_url=data.cast_reference_url,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not job:
-        raise HTTPException(status_code=404, detail="Video part not found")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Video part not found — the server restarted and this job was cleared from memory. "
+                "Use Generate next part again; if the reviewed clip is still visible above, "
+                "Creative Studio will rebuild the continuation from that file."
+            ),
+        )
     if job.get("status") == "failed":
         raise HTTPException(status_code=409, detail=str(job.get("error") or "No continuation"))
     return CreativeStudioGenerateResponse(**job)

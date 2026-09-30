@@ -25,7 +25,7 @@ import CsMessageContent from '@/components/brief/CsMessageContent'
 
 type ChatMode = 'auto' | 'ask' | 'generate'
 type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
-type AspectId = '9/16' | '1/1' | '16/9' | '4/3'
+type AspectId = '9/16' | '1/1' | '16/9' | '4/3' | '4/5'
 type ResolutionId = '480p' | '720p' | '1080p'
 type PipelineAction = CsPipelineAction
 type MediaLibrarySection = 'uploads' | 'generations' | 'liked'
@@ -59,6 +59,7 @@ const ASPECTS: { id: AspectId; label: string }[] = [
   { id: '1/1', label: '1:1' },
   { id: '16/9', label: '16:9' },
   { id: '4/3', label: '4:3' },
+  { id: '4/5', label: '4:5' },
 ]
 
 const RESOLUTIONS: { id: ResolutionId; label: string }[] = [
@@ -83,6 +84,62 @@ const ACTION_LABELS: Record<string, string> = {
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function seedanceClipCap(modelId: string) {
+  return /2-5|2\.5/i.test(modelId) ? 30 : 15
+}
+
+function seedanceModelLabel(modelId: string) {
+  return seedanceClipCap(modelId) >= 30 ? 'Seedance 2.5' : 'Seedance 2.0'
+}
+
+function buildContinuationRecoveryPayload(args: {
+  videoModel: string
+  videoPrompt: string
+  duration: DurationId
+  aspect: AspectId
+  resolution: ResolutionId
+  soundOn: boolean
+  promptOnlyVideo: boolean
+  productName: string
+  brandName: string
+  productReferenceUrl: string
+  logoReferenceUrl: string
+  additionalReferenceUrls: string[]
+  referenceAssets: ChatAttachment[]
+  requestedDurationSeconds?: number
+}) {
+  const clipCap = seedanceClipCap(args.videoModel)
+  const durationSeconds =
+    args.requestedDurationSeconds ??
+    (args.duration === 'auto' ? 90 : Number(args.duration))
+  return {
+    media_mode: 'video',
+    model: args.videoModel,
+    prompt: args.videoPrompt,
+    duration_seconds: durationSeconds,
+    aspect: args.aspect,
+    resolution: args.resolution,
+    sound_on: args.soundOn,
+    product_name: args.productName || '',
+    brand_name: args.brandName || '',
+    negative_prompt: 'watermark, random unreadable text, UI chrome',
+    seed_image_url: null,
+    seed_image_role: 'first_frame',
+    product_reference_url: args.productReferenceUrl || null,
+    logo_reference_url: args.logoReferenceUrl || null,
+    additional_reference_urls: args.additionalReferenceUrls,
+    reference_assets: args.referenceAssets.map((asset) => ({
+      url: asset.url,
+      role: asset.role || 'reference',
+    })),
+    source_brief: args.videoPrompt,
+    storyboard_scenes: [],
+    storyboard_image_urls: [],
+    prompt_only_video: args.promptOnlyVideo,
+    interactive_staging: durationSeconds > clipCap,
+  }
 }
 
 function formatChatTime(ts: number) {
@@ -114,7 +171,7 @@ export default function CreativeStudioTab({
   } = useApi(
     () => generationApi.creativeStudioModels(),
     [],
-    { cacheKey: 'generation/cs-models-v3-pipeline', ttlMs: 60_000 },
+    { cacheKey: 'generation/cs-models-v4-seedance25', ttlMs: 60_000 },
   )
   const { data: brands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands/list-cs',
@@ -138,6 +195,7 @@ export default function CreativeStudioTab({
   const [duration, setDuration] = useState<DurationId>('auto')
   const [aspect, setAspect] = useState<AspectId>('9/16')
   const [resolution, setResolution] = useState<ResolutionId>('720p')
+  const [videoModel, setVideoModel] = useState('ark-seedance-2-0')
   const [soundOn, setSoundOn] = useState(true)
   const [useStoryboardReferences, setUseStoryboardReferences] = useState(false)
   // GPT image/storyboard generation is intentionally disabled for Creative Studio.
@@ -183,6 +241,12 @@ export default function CreativeStudioTab({
     [csModels],
   )
   const defaultChatModel = csModels?.default_chat_model || 'anthropic/claude-sonnet-4.6'
+  const videoModels = useMemo(
+    () => (csModels?.video_models || []) as GenerationModelOption[],
+    [csModels],
+  )
+  const clipCap = seedanceClipCap(videoModel)
+  const videoModelLabel = seedanceModelLabel(videoModel)
   const selectedChatLabel = useMemo(() => {
     if (chatModel === 'auto') return 'Auto'
     return chatModels.find((m) => m.id === chatModel)?.label || chatModel
@@ -228,6 +292,7 @@ export default function CreativeStudioTab({
         ? 'awaiting_video'
         : session.phase || '',
     )
+    if (session.videoModel) setVideoModel(session.videoModel)
     setAttachments([])
     setComposer('')
   }, [])
@@ -239,6 +304,10 @@ export default function CreativeStudioTab({
   useEffect(() => {
     if (csModels?.image_model_default) setImageModel(csModels.image_model_default)
   }, [csModels?.image_model_default])
+
+  useEffect(() => {
+    if (csModels?.video_model_default) setVideoModel(csModels.video_model_default)
+  }, [csModels?.video_model_default])
 
   useEffect(() => {
     skipNextHistorySaveRef.current = true
@@ -291,6 +360,7 @@ export default function CreativeStudioTab({
         characterReferenceUrl,
         additionalReferenceUrls,
         phase,
+        videoModel,
       }
       const next = [nextSession, ...prev.filter((s) => s.id !== activeChatId)]
       saveCsChatSessions(briefId, brandId, next)
@@ -307,6 +377,7 @@ export default function CreativeStudioTab({
     characterReferenceUrl,
     additionalReferenceUrls,
     phase,
+    videoModel,
     activeChatId,
     briefId,
     brandId,
@@ -595,6 +666,17 @@ export default function CreativeStudioTab({
                   : mediaMode === 'image'
                     ? 'image_running'
                     : 'video_running',
+            ...(done && res.continuation_available && res.completed_segments && res.segment_count
+              ? {
+                  continuationMeta: {
+                    completed_segments: res.completed_segments,
+                    segment_count: res.segment_count,
+                    generated_duration_seconds: res.duration_seconds || undefined,
+                    requested_duration_seconds: res.requested_duration_seconds || undefined,
+                    continuity_frame_count: res.continuity_frame_count || undefined,
+                  },
+                }
+              : {}),
           })
           if (cancelled) {
             toast('Generation stopped', { id: 'cs-stop' })
@@ -925,7 +1007,7 @@ export default function CreativeStudioTab({
         media_url: msg.mediaUrl,
         media_mode: msg.mediaMode || 'video',
         aspect,
-        model: msg.model || (msg.mediaMode === 'image' ? imageModel : 'ark-seedance-2-0'),
+        model: msg.model || (msg.mediaMode === 'image' ? imageModel : videoModel),
         prompt: msg.videoPrompt || msg.imagePrompt || msg.content,
         duration_seconds: msg.durationSeconds,
         seed_image_url: msg.seedImageUrl || approvedImageUrl || null,
@@ -1054,7 +1136,7 @@ export default function CreativeStudioTab({
           action === 'generate_image' || action === 'regenerate_image'
             ? 'Generating GPT Image 2 still…'
             : action === 'approve_next' || action === 'generate_video'
-              ? 'Starting Seedance 2.0…'
+              ? `Starting ${videoModelLabel}…`
               : 'Thinking…',
         status: 'running',
       },
@@ -1085,6 +1167,7 @@ export default function CreativeStudioTab({
         storyboard_image_urls: !promptOnlyVideo && useStoryboardReferences ? boardUrls : [],
         prompt_only_video: promptOnlyVideo,
         image_model: imageModel,
+        video_model: videoModel,
         revision_notes: opts.revisionNotes || '',
         phase,
       })
@@ -1095,6 +1178,7 @@ export default function CreativeStudioTab({
       if (res.product_reference_url) setProductReferenceUrl(res.product_reference_url)
       if (res.phase) setPhase(res.phase)
       if (res.image_model) setImageModel(res.image_model)
+      if (res.video_model) setVideoModel(res.video_model)
 
       const mediaMode =
         res.media_mode === 'image' ||
@@ -1211,7 +1295,37 @@ export default function CreativeStudioTab({
       setMessages((previous) => [...previous, userMsg, assistantMsg])
       setBusy(true)
       try {
-        const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId)
+        const requestedTotal =
+          fromMsg.continuationMeta?.requested_duration_seconds ??
+          (duration === 'auto' ? 90 : Number(duration))
+        const recovery = fromMsg.mediaUrl
+          ? {
+              part_video_url: fromMsg.mediaUrl,
+              completed_segments: fromMsg.continuationMeta?.completed_segments ?? 1,
+              segment_count:
+                fromMsg.continuationMeta?.segment_count ??
+                Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(videoModel))),
+              generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
+              continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
+              payload: buildContinuationRecoveryPayload({
+                videoModel,
+                videoPrompt: fromMsg.videoPrompt || videoPrompt,
+                duration,
+                aspect,
+                resolution,
+                soundOn,
+                promptOnlyVideo,
+                productName: productName || '',
+                brandName: effectiveBrandName,
+                productReferenceUrl,
+                logoReferenceUrl,
+                additionalReferenceUrls,
+                referenceAssets: attachments,
+                requestedDurationSeconds: requestedTotal,
+              }),
+            }
+          : undefined
+        const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId, recovery)
         if (!next.job_id) throw new Error(next.error || 'Next video part was not queued')
         updateMessage(pendingId, {
           jobId: next.job_id,
@@ -1765,9 +1879,22 @@ export default function CreativeStudioTab({
             Still · GPT Image 2 storyboard
           </span>
         ) : null}
-        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-          Video · Seedance 2.0
-        </span>
+        <select
+          value={videoModel}
+          onChange={(e) => setVideoModel(e.target.value)}
+          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[220px]"
+          title="Seedance video model"
+          aria-label="Seedance video model"
+        >
+          {(videoModels.length ? videoModels : [
+            { id: 'ark-seedance-2-0', label: 'Seedance 2.0 · 15s clips' },
+            { id: 'ark-seedance-2-5', label: 'Seedance 2.5 · 30s clips' },
+          ]).map((model) => (
+            <option key={model.id} value={model.id} className="bg-[#121316]">
+              Video · {model.label}
+            </option>
+          ))}
+        </select>
         {productReferenceUrl ? (
           <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
             Product photo locked
@@ -1812,24 +1939,46 @@ export default function CreativeStudioTab({
             </option>
           ))}
         </select>
-        {duration !== 'auto' && Number(duration) > 15 ? (
+        {duration !== 'auto' && Number(duration) > clipCap ? (
           <span
             className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
             title={promptOnlyVideo
               ? 'Independent Seedance chapters use the same uploaded references and are stitched after every chapter completes.'
               : "Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."}
           >
-            {Math.ceil(Number(duration) / 15)} {promptOnlyVideo ? 'upload-guided chapters' : 'continuity-linked chapters'}
+            {Math.ceil(Number(duration) / clipCap)} {promptOnlyVideo ? 'upload-guided chapters' : 'continuity-linked chapters'}
+          </span>
+        ) : null}
+        {clipCap >= 30 ? (
+          <span
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/60"
+            title="Seedance 2.5 supports up to 1080p per clip"
+          >
+            2.5 · 1080p max
+          </span>
+        ) : null}
+        {clipCap >= 30 && aspect === '4/5' ? (
+          <span
+            className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-200/90"
+            title="BytePlus Seedance 2.5 does not accept 4:5; we generate at 3:4 and you can crop to 4:5 in post"
+          >
+            4:5 → 3:4 on 2.5
           </span>
         ) : null}
         <select
           value={aspect}
           onChange={(e) => setAspect(e.target.value as AspectId)}
           className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80"
+          title={
+            clipCap >= 30 && aspect === '4/5'
+              ? 'BytePlus 2.5 maps 4:5 to 3:4 (1080×1440). Crop to 1080×1350 in post for Meta feed.'
+              : undefined
+          }
         >
           {ASPECTS.map((a) => (
             <option key={a.id} value={a.id} className="bg-[#121316]">
               {a.label}
+              {clipCap >= 30 && a.id === '4/5' ? ' · 2.5 uses 3:4' : ''}
             </option>
           ))}
         </select>

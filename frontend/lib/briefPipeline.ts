@@ -1,9 +1,49 @@
+import { isMotionVariantFormat } from '@/lib/variantMedia'
 import type { BriefStatus, GenerationCatalog, Variant } from '@/types'
 
 type NodeState = 'done' | 'run' | 'pend' | 'fail'
 
+type PipelineStep = { status?: string }
+
 function pipelineStatus(status?: string): boolean {
   return status === 'done' || status === 'mock'
+}
+
+function pipelineStep(
+  variant: Variant,
+  key: 'image' | 'video' | 'copy',
+): PipelineStep | undefined {
+  const pipeline = variant.generation_params?.pipeline as
+    | { image?: PipelineStep; video?: PipelineStep; copy?: PipelineStep }
+    | undefined
+  return pipeline?.[key]
+}
+
+function imageStepSettled(status?: string): boolean {
+  return pipelineStatus(status) || status === 'skipped'
+}
+
+function countSettledImageSteps(variants: Variant[]): number {
+  return variants.filter((variant) =>
+    imageStepSettled(pipelineStep(variant, 'image')?.status),
+  ).length
+}
+
+function countSkippedVideoSteps(variants: Variant[]): number {
+  return variants.filter(
+    (variant) => pipelineStep(variant, 'video')?.status === 'skipped',
+  ).length
+}
+
+function videoStepActive(variants: Variant[]): boolean {
+  return variants.some((variant) => {
+    const status = pipelineStep(variant, 'video')?.status
+    return status === 'generating' || status === 'running'
+  })
+}
+
+function briefNeedsMotionVideo(variants: Variant[]): boolean {
+  return variants.some((variant) => isMotionVariantFormat(variant.format))
 }
 
 export function getPipelineNodeStates(
@@ -66,12 +106,25 @@ export function getPipelineNodeStates(
     if (key.includes('copy')) return copyDone >= target ? 'done' : copyDone > 0 ? 'run' : 'pend'
     if (key.includes('image')) {
       if (imageDone >= target) return 'done'
+      if (
+        variants.some((variant) => pipelineStep(variant, 'image')?.status === 'generating')
+      ) {
+        return 'run'
+      }
       if (imageDone > 0 || effectiveRunning) return 'run'
       return 'pend'
     }
     if (key.includes('video')) {
       if (videoDone >= target) return 'done'
-      if (videoDone > 0 || effectiveRunning) return 'run'
+      if (countSkippedVideoSteps(variants) >= target && target) return 'done'
+      if (videoDone > 0 || videoStepActive(variants)) return 'run'
+      if (
+        effectiveRunning &&
+        briefNeedsMotionVideo(variants) &&
+        countSettledImageSteps(variants) >= target
+      ) {
+        return 'run'
+      }
       return 'pend'
     }
     if (key.includes('caption') || key.includes('compose')) {

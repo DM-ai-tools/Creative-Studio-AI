@@ -1694,6 +1694,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
     const d = formValues
     const slot = imageVariantSlots[index]
     if (!slot) return
+    const priorPrompt = slot.prompt.trim()
     const campaignName = campaignLabel(d.title ?? '', d.niche)
     if (campaignName.length < 2) {
       toast.error('Enter an industry before generating image plans.')
@@ -1811,7 +1812,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                       : ''
                     : s.cta || variant.cta || '',
                 offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
-                prompt: variant.prompt || s.prompt,
+                prompt: priorPrompt || variant.prompt || s.prompt,
                 reasoning: variant.reasoning || '',
                 ad_angle: slot.ad_angle || variant.ad_angle || slotAngle || '',
                 product_model: s.product_model || '',
@@ -1943,6 +1944,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
             const variant = plan.variants[vi]
             if (!variant) return
             const s = next[slotIdx]
+            const priorPrompt = s.prompt.trim()
             const hook = variant.hook || s.hook
             const message = variant.message || s.message
             const derived = relatedOnImageLines(hook, message)
@@ -1975,7 +1977,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                     : ''
                   : s.cta || variant.cta || '',
               offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
-              prompt: variant.prompt || s.prompt,
+              prompt: priorPrompt || variant.prompt || s.prompt,
               reasoning: variant.reasoning || '',
               ad_angle: s.ad_angle || variant.ad_angle || variantAngleAssignments[slotIdx] || '',
               generated_at: generatedAt,

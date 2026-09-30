@@ -27,6 +27,8 @@ from app.services.icp_image_plan_service import (
     enforce_image_visual_style_in_prompt,
     enforce_product_focus_in_prompt,
     consolidate_image_prompt_for_generation,
+    prepare_self_contained_slot_prompt,
+    slot_prompt_is_authoritative,
     _prompt_describes_lifestyle_scene,
     strip_burned_in_copy_from_prompt,
 )
@@ -62,6 +64,19 @@ def _is_last_carousel_card(slot: dict[str, Any] | None, image_variants: list[dic
         return carousel_slots.index(slot) >= len(carousel_slots) - 1
     except ValueError:
         return True
+
+
+def _verbatim_slot_prompt(
+    slot_prompt: str,
+    *,
+    industry: str = "",
+    niche: str = "",
+) -> str:
+    """Variant prompt textarea → image model exactly as written (AI, edited, or pasted)."""
+    image_prompt = prepare_self_contained_slot_prompt(slot_prompt)
+    return enforce_no_spurious_circled_paper_prop(
+        image_prompt, industry=industry, niche=niche
+    )
 
 
 def _slot_has_saved_plan(slot: dict[str, Any] | None) -> bool:
@@ -944,81 +959,19 @@ async def run_brief_generation_job(
                                         (slot.get("reasoning") if slot else "") or "fashion_retail_promo"
                                     )
                                 elif slot_prompt:
-                                    # User (or AI-preview) already wrote the final prompt for this variant.
-                                    if fmt == "carousel" and not carousel_last:
-                                        image_prompt = enforce_on_image_copy_in_prompt(
-                                            strip_burned_in_copy_from_prompt(
-                                                slot_prompt, allow_cta=True
-                                            ),
-                                            image_hook=on_image_hook,
-                                            image_headline=on_image_message,
-                                            cta="",
-                                            full_hook=slot_hook
-                                            or str(copy.get("hook") or ""),
-                                            full_headline=slot_message
-                                            or str(copy.get("headline") or ""),
-                                            industry=_ind,
-                                            niche=_niche,
-                                            primary_color=_brand_primary,
-                                        )
-                                        copy["cta"] = ""
-                                    elif fmt == "carousel" and carousel_last:
-                                        closer_cta = (
-                                            slot_cta
-                                            or str(copy.get("cta") or "").strip()
-                                            or resolve_campaign_cta(brief_dict)
-                                        )
-                                        image_prompt = enforce_on_image_copy_in_prompt(
-                                            strip_burned_in_copy_from_prompt(
-                                                slot_prompt, allow_cta=True
-                                            ),
-                                            image_hook=on_image_hook,
-                                            image_headline=on_image_message,
-                                            cta=closer_cta,
-                                            full_hook=slot_hook or str(copy.get("hook") or ""),
-                                            full_headline=slot_message
-                                            or str(copy.get("headline") or ""),
-                                            industry=_ind,
-                                            niche=_niche,
-                                            primary_color=_brand_primary,
-                                        )
-                                        copy["cta"] = closer_cta
-                                    else:
-                                        effective_cta = _resolve_burn_in_cta(
-                                            fmt=fmt,
-                                            carousel_last=carousel_last,
-                                            slot=slot if isinstance(slot, dict) else None,
-                                            copy=copy,
-                                            brief_dict=brief_dict,
-                                            brief_cta=str(brief.cta or ""),
-                                        )
-                                        copy["cta"] = effective_cta
-                                        image_prompt = enforce_on_image_copy_in_prompt(
-                                            strip_burned_in_copy_from_prompt(
-                                                slot_prompt, allow_cta=True
-                                            ),
-                                            image_hook=on_image_hook,
-                                            image_headline=on_image_message,
-                                            cta=effective_cta,
-                                            full_hook=slot_hook or str(copy.get("hook") or ""),
-                                            full_headline=slot_message
-                                            or str(copy.get("headline") or ""),
-                                            industry=_ind,
-                                            niche=_niche,
-                                            primary_color=_brand_primary,
-                                        )
-                                    image_prompt = enforce_no_spurious_circled_paper_prop(
-                                        image_prompt, industry=_ind, niche=_niche
+                                    # Prompt textarea is the single source of truth — no strip/rebuild.
+                                    image_prompt = _verbatim_slot_prompt(
+                                        slot_prompt, industry=_ind, niche=_niche
                                     )
                                     brief_dict["_image_plan_use_cases"] = slot_use_cases
                                     brief_dict["_image_plan_reasoning"] = (
-                                        (slot.get("reasoning") if slot else "") or "per_variant_prompt"
+                                        (slot.get("reasoning") if slot else "")
+                                        or "slot_prompt_verbatim"
                                     )
                                     logger.info(
-                                        "Image slot prompt enforced: index=%s hook=%r headline=%r prompt_len=%d",
+                                        "Brief %s: slot prompt verbatim index=%s len=%d",
+                                        brief_id,
                                         variant_index,
-                                        on_image_hook,
-                                        on_image_message,
                                         len(image_prompt),
                                     )
                                 else:
@@ -1235,7 +1188,14 @@ async def run_brief_generation_job(
                             if isinstance(slot, dict)
                             else ""
                         )
-                        if slot_product_focus:
+                        verbatim_slot = slot_prompt_is_authoritative(slot_prompt)
+                        explicit_slot_focus = (
+                            isinstance(slot, dict)
+                            and str(slot.get("product_focus") or "").strip()
+                        )
+                        if slot_product_focus and (
+                            not verbatim_slot or explicit_slot_focus
+                        ):
                             image_prompt = enforce_product_focus_in_prompt(
                                 image_prompt,
                                 product_focus=slot_product_focus,
@@ -1248,7 +1208,7 @@ async def run_brief_generation_job(
                             or brief_dict.get("on_image_style")
                             or "auto"
                         ).strip()
-                        if campaign_on_image_style:
+                        if campaign_on_image_style and not verbatim_slot:
                             image_prompt = enforce_on_image_style_in_prompt(
                                 image_prompt,
                                 on_image_style=campaign_on_image_style,
@@ -1265,19 +1225,25 @@ async def run_brief_generation_job(
                             or brief_dict.get("image_visual_style")
                             or "auto"
                         ).strip()
-                        image_prompt = _append_social_style_to_prompt(image_prompt, snap)
-                        image_prompt = _append_reference_images_to_prompt(
-                            image_prompt,
-                            kb_models,
-                            slot if isinstance(slot, dict) else None,
-                        )
-                        image_prompt = _append_competitor_insights_to_prompt(
-                            image_prompt, snap, brief_dict=brief_dict
-                        )
-                        image_prompt = _lock_brand_name_on_prompt(
-                            image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
-                        )
-                        if fmt in {"static", "carousel"} and not slot_photo_only:
+                        if not verbatim_slot:
+                            image_prompt = _append_social_style_to_prompt(image_prompt, snap)
+                        if not verbatim_slot:
+                            image_prompt = _append_reference_images_to_prompt(
+                                image_prompt,
+                                kb_models,
+                                slot if isinstance(slot, dict) else None,
+                            )
+                            image_prompt = _append_competitor_insights_to_prompt(
+                                image_prompt, snap, brief_dict=brief_dict
+                            )
+                            image_prompt = _lock_brand_name_on_prompt(
+                                image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
+                            )
+                        if (
+                            fmt in {"static", "carousel"}
+                            and not slot_photo_only
+                            and not verbatim_slot
+                        ):
                             image_prompt = _finalize_burn_in_prompt(
                                 image_prompt,
                                 fmt=fmt,
@@ -1313,7 +1279,7 @@ async def run_brief_generation_job(
                                 ),
                                 len(image_prompt),
                             )
-                        if fmt in {"static", "carousel"} and not slot_photo_only:
+                        if fmt in {"static", "carousel"} and not slot_photo_only and not verbatim_slot:
                             image_prompt = consolidate_image_prompt_for_generation(
                                 image_prompt,
                                 scene_prompt=slot_prompt,
@@ -1336,19 +1302,23 @@ async def run_brief_generation_job(
                                 industry=_ind,
                             )
                         # AFTER consolidate — otherwise flat_cartoon lock is stripped and photos win
-                        if campaign_image_visual_style and campaign_image_visual_style != "auto":
+                        if (
+                            campaign_image_visual_style
+                            and campaign_image_visual_style != "auto"
+                            and not verbatim_slot
+                        ):
                             image_prompt = enforce_image_visual_style_in_prompt(
                                 image_prompt,
                                 image_visual_style=campaign_image_visual_style,
                             )
-                        if burn_logo_on_still and img_logo:
+                        if burn_logo_on_still and img_logo and not verbatim_slot:
                             image_prompt = (
                                 f"{image_prompt.rstrip()} "
                                 "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "
                                 "white strip in post. Do NOT leave empty white margin at the top and do NOT draw "
                                 "any brand name, wordmark, or fake logo."
                             )
-                        if burn_logo_on_still and not img_logo:
+                        if burn_logo_on_still and not img_logo and not verbatim_slot:
                             logger.warning(
                                 "Brief %s variant=%s: no brand logo resolved — upload PNG/JPG on Brand Kit",
                                 brief_id,
@@ -1730,7 +1700,12 @@ async def run_regenerate_variant_image(
                 effective_cta = ""
 
             base_prompt = slot_prompt or prior_prompt
-            if slot_photo_only and base_prompt:
+            verbatim_slot = bool(slot_prompt.strip())
+            if verbatim_slot:
+                image_prompt = _verbatim_slot_prompt(
+                    slot_prompt, industry=industry, niche=niche
+                )
+            elif slot_photo_only and base_prompt:
                 ratio = _effective_slot_aspect_ratio(
                     slot if isinstance(slot, dict) else None,
                     kb_models,
@@ -1862,7 +1837,10 @@ async def run_regenerate_variant_image(
                 if isinstance(slot, dict)
                 else ""
             )
-            if slot_product_focus:
+            explicit_slot_focus = (
+                isinstance(slot, dict) and str(slot.get("product_focus") or "").strip()
+            )
+            if slot_product_focus and (not verbatim_slot or explicit_slot_focus):
                 from app.services.icp_image_plan_service import enforce_product_focus_in_prompt
 
                 image_prompt = enforce_product_focus_in_prompt(
@@ -1877,7 +1855,7 @@ async def run_regenerate_variant_image(
                 or brief_dict.get("on_image_style")
                 or "auto"
             ).strip()
-            if campaign_on_image_style:
+            if campaign_on_image_style and not verbatim_slot:
                 from app.services.icp_image_plan_service import enforce_on_image_style_in_prompt
 
                 image_prompt = enforce_on_image_style_in_prompt(
@@ -1896,19 +1874,24 @@ async def run_regenerate_variant_image(
                 or brief_dict.get("image_visual_style")
                 or "auto"
             ).strip()
-            image_prompt = _append_social_style_to_prompt(image_prompt, snap)
-            image_prompt = _append_reference_images_to_prompt(
-                image_prompt,
-                kb_models,
-                slot if isinstance(slot, dict) else None,
-            )
-            image_prompt = _append_competitor_insights_to_prompt(
-                image_prompt, snap, brief_dict=brief_dict
-            )
-            image_prompt = _lock_brand_name_on_prompt(
-                image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
-            )
-            if fmt in {"static", "carousel"} and not slot_photo_only:
+            if not verbatim_slot:
+                image_prompt = _append_social_style_to_prompt(image_prompt, snap)
+                image_prompt = _append_reference_images_to_prompt(
+                    image_prompt,
+                    kb_models,
+                    slot if isinstance(slot, dict) else None,
+                )
+                image_prompt = _append_competitor_insights_to_prompt(
+                    image_prompt, snap, brief_dict=brief_dict
+                )
+                image_prompt = _lock_brand_name_on_prompt(
+                    image_prompt, snap=snap, brief_dict=brief_dict, brand=brand
+                )
+            if (
+                fmt in {"static", "carousel"}
+                and not slot_photo_only
+                and not verbatim_slot
+            ):
                 image_prompt = _finalize_burn_in_prompt(
                     image_prompt,
                     fmt=fmt,
@@ -1948,12 +1931,16 @@ async def run_regenerate_variant_image(
                     industry=industry,
                 )
             # AFTER consolidate — keep flat_cartoon / clay / sketch on every retry
-            if campaign_image_visual_style and campaign_image_visual_style != "auto":
+            if (
+                campaign_image_visual_style
+                and campaign_image_visual_style != "auto"
+                and not verbatim_slot
+            ):
                 image_prompt = enforce_image_visual_style_in_prompt(
                     image_prompt,
                     image_visual_style=campaign_image_visual_style,
                 )
-            if burn_logo and img_logo:
+            if burn_logo and img_logo and not verbatim_slot:
                 image_prompt = (
                     f"{image_prompt.rstrip()} "
                     "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "

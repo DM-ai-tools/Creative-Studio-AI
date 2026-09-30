@@ -11,18 +11,19 @@ from app.core.config import settings
 from app.services.media.base import VideoGenerationProvider
 from app.services.media.byteplus_seedance_client import (
     ark_configured,
-    ark_seedance_model,
     clamp_seedance_duration,
     create_video_task,
     extract_video_url,
     is_seedance_person_privacy_block,
     is_seedance_transport_error,
-    map_aspect_to_ratio,
+    resolve_seedance_api_ratio,
     map_resolution,
     poll_video_task,
+    resolve_seedance_api_model,
     seedance_async_client,
+    seedance_clip_cap_seconds,
+    seedance_reference_data_uri,
 )
-from app.services.media.runway_client import file_url_to_data_uri
 from app.services.media.runway_providers import _download_asset
 from app.services.media.seedance_references import (
     filter_manifest_for_privacy_retry,
@@ -37,10 +38,14 @@ logger = logging.getLogger(__name__)
 BYTEPLUS_SEEDANCE_MODEL_IDS = frozenset(
     {
         "ark-seedance-2-0",
+        "ark-seedance-2-5",
         "ark-seedance-2",
         "byteplus-seedance-2-0",
+        "byteplus-seedance-2-5",
         "seedance-2-0-byteplus",
+        "seedance-2-5-byteplus",
         "dreamina-seedance-2-0",
+        "dreamina-seedance-2-5",
     }
 )
 
@@ -62,10 +67,7 @@ def is_byteplus_seedance_model(model: str | None) -> bool:
 
 def resolve_byteplus_api_model(model: str | None) -> str:
     """Map catalog id → BytePlus model string."""
-    mid = (model or "").strip()
-    if mid.startswith("dreamina-seedance"):
-        return mid
-    return ark_seedance_model()
+    return resolve_seedance_api_model(model)
 
 
 _PRIVACY_ANCHORS_WARNING = (
@@ -263,7 +265,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             }
 
         requested = requested_video_duration_seconds(brief, override=duration_seconds)
-        max_sec = 30 if "2-5" in api_model or "2.5" in api_model else 15
+        max_sec = seedance_clip_cap_seconds(model or api_model)
         duration = clamp_seedance_duration(requested, max_seconds=max_sec)
 
         aspect = str(
@@ -271,28 +273,38 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             or brief.get("aspect")
             or ""
         )
-        ratio = map_aspect_to_ratio(aspect, format_type)
+        image_role = str(brief.get("seed_image_role") or "first_frame").strip().lower()
+        if image_role not in {"first_frame", "last_frame", "reference_image"}:
+            image_role = "first_frame"
+        continuity_url = str(brief.get("continuity_reference_url") or "").strip()
+        # Chapter handoffs submit the previous final frame as first_frame even when
+        # source_image_url is empty — Seedance 2.5 then requires ratio=adaptive.
+        uses_first_frame_task = bool(
+            continuity_url
+            or (
+                source_image_url
+                and image_role in {"first_frame", "last_frame"}
+            )
+        )
+        ratio, aspect_warning = resolve_seedance_api_ratio(
+            aspect,
+            format_type,
+            model=model or api_model,
+            frame_locked=uses_first_frame_task,
+        )
         resolution = map_resolution(
-            str(brief.get("creative_studio_resolution") or brief.get("resolution") or "720p")
+            str(brief.get("creative_studio_resolution") or brief.get("resolution") or "720p"),
+            model=model or api_model,
         )
         generate_audio = not bool(brief.get("skip_voiceover"))
         if brief.get("creative_studio_mode"):
             generate_audio = bool(
                 brief.get("creative_studio_generate_audio", generate_audio)
             )
-
-        image_role = str(brief.get("seed_image_role") or "first_frame").strip().lower()
-        if image_role not in {"first_frame", "last_frame", "reference_image"}:
-            image_role = "first_frame"
         def _resolve_img(u: str | None) -> str | None:
             if not u:
                 return None
-            resolved = file_url_to_data_uri(u)
-            if resolved:
-                return resolved
-            if u.startswith("http://") or u.startswith("https://") or u.startswith("data:"):
-                return u
-            return None
+            return seedance_reference_data_uri(u)
 
         manifest = reference_manifest(brief, source_image_url)
         primary_opening_supplied = bool(source_image_url) and image_role in {
@@ -463,6 +475,8 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                         if out.get("status") != "done":
                             return out
                         out["requested_duration_seconds"] = requested
+                        if aspect_warning:
+                            out["aspect_warning"] = aspect_warning
                         if warning:
                             out["duration_warning"] = warning
                             out["privacy_fallback"] = tier

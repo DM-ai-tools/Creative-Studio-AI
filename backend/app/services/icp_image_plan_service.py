@@ -984,6 +984,48 @@ def _extract_scene_body(*prompts: str) -> str:
     return ""
 
 
+def slot_prompt_is_authoritative(prompt: str) -> bool:
+    """
+    True when the variant prompt textarea has content. That text is sent verbatim to
+    the image model (AI-filled, manually edited, or pasted).
+    """
+    return bool((prompt or "").strip())
+
+
+def slot_prompt_is_self_contained(prompt: str) -> bool:
+    """
+    True when the prompt already embeds complete on-image copy + typography/colour rules
+    (typical of ChatGPT / external pastes). These must reach the image model verbatim —
+    do NOT strip TEXT ON IMAGE blocks or replace colours with Brand Kit TEXT-ANCHOR.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return False
+    if _ANCHOR_SENTINEL in text:
+        return False
+    lower = text.lower()
+    external_markers = (
+        "typography — important",
+        "typography - important",
+        "typography—important",
+        "use butler font",
+        "font hierarchy:",
+        "typography colours:",
+        "typography colors:",
+        "headline and cta accent",
+    )
+    if any(marker in lower for marker in external_markers):
+        return True
+    if "text on image only" in lower and "brand identity:" in lower:
+        return True
+    return False
+
+
+def prepare_self_contained_slot_prompt(prompt: str) -> str:
+    """Pass external/complete prompts through with only content-policy sanitisation."""
+    return _sanitize_runway_prompt((prompt or "").strip())
+
+
 def consolidate_image_prompt_for_generation(
     prompt: str,
     *,
@@ -1004,6 +1046,10 @@ def consolidate_image_prompt_for_generation(
     """
     raw = (prompt or "").strip()
     if not raw:
+        return raw
+
+    # Per-variant prompt already encodes style/colour/theme — do not rebuild from defaults.
+    if slot_prompt_is_authoritative(scene_prompt):
         return raw
 
     scene_source = " ".join(p for p in (scene_prompt, raw) if p).strip()

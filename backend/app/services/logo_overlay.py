@@ -23,6 +23,11 @@ HEADER_MAX_HEIGHT_MIN = 36
 VERTICAL_HEADER_RATIO = 0.10
 # Runway image_to_video requires width/height >= 0.5 on promptImage.
 RUNWAY_MIN_WH_RATIO = 0.501
+# BytePlus Seedance reference images: width/height must stay within 0.39–2.50.
+SEEDANCE_MIN_WH_RATIO = 0.40
+SEEDANCE_MAX_WH_RATIO = 2.45
+SEEDANCE_MIN_PX = 300
+SEEDANCE_MAX_PX = 6000
 HEADER_LOGO_WIDTH_RATIO = 0.15
 HEADER_LOGO_MAX_HEIGHT_RATIO = 0.042
 
@@ -238,6 +243,55 @@ def pad_image_bytes_for_runway_video(image_bytes: bytes) -> bytes:
     out = io.BytesIO()
     flat = Image.new("RGB", portrait.size, (255, 255, 255))
     flat.paste(portrait, mask=portrait.split()[3])
+    flat.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def pad_image_bytes_for_seedance_reference(image_bytes: bytes) -> bytes:
+    """Letterbox/pad reference uploads to BytePlus Seedance aspect and size limits."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        return image_bytes
+
+    ratio = w / h
+    if ratio > SEEDANCE_MAX_WH_RATIO:
+        new_h = max(h, int(round(w / SEEDANCE_MAX_WH_RATIO)))
+        canvas = Image.new("RGBA", (w, new_h), (245, 245, 245, 255))
+        canvas.paste(img, (0, (new_h - h) // 2), img)
+        img = canvas
+        logger.info(
+            "Padded wide Seedance reference from %.2f to %.2f aspect (+%spx height)",
+            ratio,
+            w / new_h,
+            new_h - h,
+        )
+    elif ratio < SEEDANCE_MIN_WH_RATIO:
+        new_w = max(w, int(round(h * SEEDANCE_MIN_WH_RATIO)))
+        canvas = Image.new("RGBA", (new_w, h), (245, 245, 245, 255))
+        canvas.paste(img, ((new_w - w) // 2, 0), img)
+        img = canvas
+        logger.info(
+            "Padded tall Seedance reference from %.2f to %.2f aspect (+%spx width)",
+            ratio,
+            new_w / h,
+            new_w - w,
+        )
+
+    w, h = img.size
+    scale = 1.0
+    if min(w, h) < SEEDANCE_MIN_PX:
+        scale = max(scale, SEEDANCE_MIN_PX / min(w, h))
+    if max(w, h) > SEEDANCE_MAX_PX:
+        scale = min(scale, SEEDANCE_MAX_PX / max(w, h))
+    if abs(scale - 1.0) > 0.001:
+        new_w = max(SEEDANCE_MIN_PX, min(SEEDANCE_MAX_PX, int(round(w * scale))))
+        new_h = max(SEEDANCE_MIN_PX, min(SEEDANCE_MAX_PX, int(round(h * scale))))
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    out = io.BytesIO()
+    flat = Image.new("RGB", img.size, (245, 245, 245))
+    flat.paste(img, mask=img.split()[3])
     flat.save(out, format="PNG", optimize=True)
     return out.getvalue()
 

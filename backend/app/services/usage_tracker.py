@@ -125,6 +125,160 @@ def estimate_media_cost(*, provider: str, model: str, duration_seconds: float = 
     return 0.0, 0.0
 
 
+# BytePlus Seedance — USD per 1M completion tokens (public list pricing).
+_BYTEPLUS_SEEDANCE_720_NO_VIDEO = 10.70
+_BYTEPLUS_SEEDANCE_720_WITH_VIDEO = 6.40
+_BYTEPLUS_SEEDANCE_1080_NO_VIDEO = 11.70
+_BYTEPLUS_SEEDANCE_1080_WITH_VIDEO = 7.00
+_SEEDANCE_PRICING_NOTE = (
+    "BytePlus does not return USD on task responses; estimates use public Seedance "
+    "token rates ($6.40–$10.70 per 1M completion tokens at 720p)."
+)
+
+
+def is_byteplus_seedance_row(row: Any) -> bool:
+    prov = (getattr(row, "provider", "") or "").lower()
+    op = (getattr(row, "operation", "") or "").lower()
+    model = (getattr(row, "model", "") or "").lower()
+    return prov == "byteplus" and op == "video_generation" and ("seedance" in model or "dreamina" in model)
+
+
+def _row_completion_tokens(row: Any) -> int:
+    return int(getattr(row, "completion_tokens", 0) or getattr(row, "total_tokens", 0) or 0)
+
+
+def estimate_byteplus_seedance_cost_usd(
+    tokens: int,
+    *,
+    with_video_input: bool | None = None,
+    resolution_1080: bool = False,
+) -> dict[str, float]:
+    """Return low/high/mid USD estimates from measured completion tokens."""
+    count = max(0, int(tokens or 0))
+    if count == 0:
+        return {"low": 0.0, "high": 0.0, "mid": 0.0}
+    if resolution_1080:
+        lo_rate = _BYTEPLUS_SEEDANCE_1080_WITH_VIDEO
+        hi_rate = _BYTEPLUS_SEEDANCE_1080_NO_VIDEO
+    else:
+        lo_rate = _BYTEPLUS_SEEDANCE_720_WITH_VIDEO
+        hi_rate = _BYTEPLUS_SEEDANCE_720_NO_VIDEO
+    if with_video_input is True:
+        low_rate, high_rate = lo_rate, lo_rate
+    elif with_video_input is False:
+        low_rate, high_rate = hi_rate, hi_rate
+    else:
+        low_rate, high_rate = lo_rate, hi_rate
+    low_usd = round(count / 1_000_000 * low_rate, 4)
+    high_usd = round(count / 1_000_000 * high_rate, 4)
+    return {"low": low_usd, "high": high_usd, "mid": round((low_usd + high_usd) / 2, 4)}
+
+
+def seedance_cost_detail(row: Any) -> dict[str, float] | None:
+    if not is_byteplus_seedance_row(row):
+        return None
+    extra = getattr(row, "extra", None) or {}
+    resolution = str(extra.get("resolution") or "").lower()
+    resolution_1080 = "1080" in resolution
+    with_video = extra.get("with_video_input")
+    if with_video is not None:
+        with_video_input = bool(with_video)
+    else:
+        with_video_input = None
+    return estimate_byteplus_seedance_cost_usd(
+        _row_completion_tokens(row),
+        with_video_input=with_video_input,
+        resolution_1080=resolution_1080,
+    )
+
+
+def effective_cost_usd(row: Any) -> float:
+    stored = float(getattr(row, "cost_usd", 0) or 0)
+    if stored > 0:
+        return stored
+    if is_byteplus_seedance_row(row) and getattr(row, "success", False):
+        detail = seedance_cost_detail(row)
+        return float(detail["mid"]) if detail else 0.0
+    return 0.0
+
+
+def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -> dict[str, Any]:
+    seedance_rows = [r for r in rows if is_byteplus_seedance_row(r)]
+    successful = [r for r in seedance_rows if r.success]
+    failed = [r for r in seedance_rows if not r.success]
+
+    cost_low = 0.0
+    cost_high = 0.0
+    total_tokens = 0
+    for row in successful:
+        total_tokens += _row_completion_tokens(row)
+        detail = seedance_cost_detail(row) or {"low": 0.0, "high": 0.0}
+        cost_low += detail["low"]
+        cost_high += detail["high"]
+
+    by_model: dict[str, dict[str, Any]] = {}
+    for row in seedance_rows:
+        model = row.model or "unknown"
+        slot = by_model.setdefault(
+            model,
+            {
+                "model": model,
+                "clips": 0,
+                "failed": 0,
+                "tokens": 0,
+                "cost_usd_low": 0.0,
+                "cost_usd_high": 0.0,
+            },
+        )
+        if row.success:
+            slot["clips"] += 1
+            slot["tokens"] += _row_completion_tokens(row)
+            detail = seedance_cost_detail(row) or {"low": 0.0, "high": 0.0}
+            slot["cost_usd_low"] += detail["low"]
+            slot["cost_usd_high"] += detail["high"]
+        else:
+            slot["failed"] += 1
+
+    model_rows = list(by_model.values())
+    for slot in model_rows:
+        slot["cost_usd_low"] = round(slot["cost_usd_low"], 4)
+        slot["cost_usd_high"] = round(slot["cost_usd_high"], 4)
+        slot["cost_usd"] = round((slot["cost_usd_low"] + slot["cost_usd_high"]) / 2, 4)
+    model_rows.sort(key=lambda x: x["tokens"], reverse=True)
+
+    recent_clips: list[dict[str, Any]] = []
+    for row in successful[:40]:
+        extra = row.extra or {}
+        detail = seedance_cost_detail(row) or {"low": 0.0, "high": 0.0, "mid": 0.0}
+        recent_clips.append(
+            {
+                "id": str(row.id),
+                "task_id": extra.get("task_id"),
+                "model": row.model,
+                "tokens": _row_completion_tokens(row),
+                "cost_usd_low": detail["low"],
+                "cost_usd_high": detail["high"],
+                "cost_usd": detail["mid"],
+                "cost_estimated": float(row.cost_usd or 0) <= 0,
+                "recovered": bool(extra.get("recovered")),
+                "client": tenant_names.get(row.tenant_id) if row.tenant_id else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
+
+    return {
+        "successful_clips": len(successful),
+        "failed_calls": len(failed),
+        "total_tokens": total_tokens,
+        "cost_usd_low": round(cost_low, 4),
+        "cost_usd_high": round(cost_high, 4),
+        "cost_usd": round((cost_low + cost_high) / 2, 4),
+        "pricing_note": _SEEDANCE_PRICING_NOTE,
+        "by_model": model_rows,
+        "recent_clips": recent_clips,
+    }
+
+
 def record_usage(
     *,
     provider: str,
@@ -355,6 +509,9 @@ _MODEL_LABELS: dict[str, str] = {
     "gemini_image3.1_flash": "Gemini 3.1 Image",
     "gemini_image3_pro": "Gemini 3 Pro Image",
     "veo3.1": "Veo 3.1",
+    "seedance-2-5": "Seedance 2.5",
+    "seedance-2-0": "Seedance 2.0",
+    "seedance-1-5": "Seedance 1.5",
     "scrape": "Firecrawl",
     "graph_api": "Meta Graph",
 }
@@ -372,6 +529,8 @@ def _display_model(model: str, provider: str = "") -> str:
             return "HeyGen"
         if prov == "meta":
             return "Meta"
+        if prov == "byteplus":
+            return "Seedance"
         return prov.title() or "Other"
     short = raw.split("/")[-1] if "/" in raw else raw
     key = short.lower().replace("_", "-")
@@ -482,7 +641,7 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
         "completion_tokens": sum(int(r.completion_tokens or 0) for r in rows),
         "total_tokens": sum(int(r.total_tokens or 0) for r in rows),
         "credits": round(sum(float(r.credits or 0) for r in rows), 2),
-        "cost_usd": round(sum(float(r.cost_usd or 0) for r in rows), 4),
+        "cost_usd": round(sum(effective_cost_usd(r) for r in rows), 4),
     }
 
     def _bucket(key_fn):
@@ -496,7 +655,7 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
             slot["calls"] += 1
             slot["tokens"] += int(r.total_tokens or 0)
             slot["credits"] += float(r.credits or 0)
-            slot["cost_usd"] += float(r.cost_usd or 0)
+            slot["cost_usd"] += effective_cost_usd(r)
             if not r.success:
                 slot["failed"] += 1
         out = []
@@ -509,6 +668,7 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
 
     recent = []
     for r in rows[:120]:
+        row_cost = effective_cost_usd(r)
         recent.append(
             {
                 "id": str(r.id),
@@ -519,7 +679,8 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
                 "completion_tokens": r.completion_tokens,
                 "total_tokens": r.total_tokens,
                 "credits": float(r.credits or 0),
-                "cost_usd": float(r.cost_usd or 0),
+                "cost_usd": row_cost,
+                "cost_estimated": row_cost > 0 and float(r.cost_usd or 0) <= 0 and is_byteplus_seedance_row(r),
                 "success": r.success,
                 "error": r.error,
                 "client": names.get(r.tenant_id) if r.tenant_id else None,
@@ -527,7 +688,7 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
             }
         )
 
-    daily_cost, chart_models = _build_daily_series(rows, value_fn=lambda r: float(r.cost_usd or 0))
+    daily_cost, chart_models = _build_daily_series(rows, value_fn=effective_cost_usd)
     daily_requests_raw, _ = _build_daily_series(rows, value_fn=lambda r: 1.0)
     daily_requests = _align_series_to_legend(daily_requests_raw, chart_models)
 
@@ -535,6 +696,7 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
         "totals": totals,
         "by_provider": _bucket(lambda r: r.provider),
         "by_model": _bucket(lambda r: r.model or r.provider),
+        "seedance": _build_seedance_summary(rows, tenant_names=names),
         "recent": recent,
         "daily_cost": daily_cost,
         "daily_requests": daily_requests,

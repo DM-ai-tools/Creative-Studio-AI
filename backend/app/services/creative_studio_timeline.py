@@ -67,6 +67,17 @@ def explicit_shot_windows(prompt: str, *, total: float | None = None) -> list[tu
         windows.append((_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2))))
     if len(windows) < 2:
         return []
+    repaired: list[tuple[float, float]] = []
+    for index, (a, b) in enumerate(windows):
+        is_last = index == len(windows) - 1
+        if b <= a and is_last:
+            # Common brief typo on the final CTA line, e.g. "1:31–1:30".
+            if total is not None and total > a:
+                b = float(total)
+            else:
+                b = a + 2.0
+        repaired.append((a, b))
+    windows = repaired
     previous = 0.0
     for a, b in windows:
         if abs(a - previous) > 0.05 or b <= a or (total is not None and b > total + 0.05):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -11,10 +12,62 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 _JOBS: dict[str, dict[str, Any]] = {}
 _LOCK = asyncio.Lock()
+
+
+def _job_record_path(tenant_id: str, job_id: str) -> Path:
+    root = Path(settings.UPLOAD_DIR).resolve() / tenant_id / "creative-studio-jobs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{job_id}.json"
+
+
+def _persist_job_unlocked(job: dict[str, Any]) -> None:
+    tenant_id = str(job.get("tenant_id") or "").strip()
+    job_id = str(job.get("job_id") or "").strip()
+    if not tenant_id or not job_id:
+        return
+    path = _job_record_path(tenant_id, job_id)
+    path.write_text(json.dumps(job, ensure_ascii=False, default=str), encoding="utf-8")
+
+
+def _load_job_from_disk(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+    if tenant_id:
+        path = _job_record_path(tenant_id, job_id)
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return None
+    root = Path(settings.UPLOAD_DIR).resolve()
+    if not root.is_dir():
+        return None
+    for tenant_dir in sorted(root.iterdir()):
+        if not tenant_dir.is_dir():
+            continue
+        path = tenant_dir / "creative-studio-jobs" / f"{job_id}.json"
+        if not path.is_file():
+            continue
+        job = json.loads(path.read_text(encoding="utf-8"))
+        if tenant_id and job.get("tenant_id") != tenant_id:
+            continue
+        return job
+    return None
+
+
+def _get_job_record_unlocked(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
+    job = _JOBS.get(job_id)
+    if job:
+        if tenant_id and job.get("tenant_id") != tenant_id:
+            return None
+        return job
+    loaded = _load_job_from_disk(job_id, tenant_id=tenant_id)
+    if loaded:
+        _JOBS[job_id] = loaded
+        return loaded
+    return None
 
 
 def _now() -> str:
@@ -33,7 +86,7 @@ def _seedance_segment_durations(total_seconds: int, clip_cap: int = 15) -> list[
 async def create_job(*, tenant_id: str, payload: dict[str, Any]) -> str:
     job_id = str(uuid.uuid4())
     async with _LOCK:
-        _JOBS[job_id] = {
+        job = {
             "job_id": job_id,
             "tenant_id": tenant_id,
             "status": "queued",
@@ -46,22 +99,25 @@ async def create_job(*, tenant_id: str, payload: dict[str, Any]) -> str:
             "cancel_requested": False,
             "provider_task_id": None,
         }
+        _JOBS[job_id] = job
+        _persist_job_unlocked(job)
     return job_id
 
 
 async def update_job(job_id: str, **fields: Any) -> None:
     async with _LOCK:
-        job = _JOBS.get(job_id)
+        job = _get_job_record_unlocked(job_id)
         if not job:
             return
         job.update(fields)
         job["updated_at"] = _now()
+        _persist_job_unlocked(job)
 
 
 def is_job_cancel_requested(job_id: str | None) -> bool:
     if not job_id:
         return False
-    job = _JOBS.get(job_id)
+    job = _get_job_record_unlocked(job_id)
     return bool(job and job.get("cancel_requested"))
 
 
@@ -69,8 +125,8 @@ async def cancel_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
     """User kill-switch — mark cancelled and try to delete BytePlus task if known."""
     provider_task_id: str | None = None
     async with _LOCK:
-        job = _JOBS.get(job_id)
-        if not job or job.get("tenant_id") != tenant_id:
+        job = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
+        if not job:
             return None
         if job.get("status") in {"done", "failed", "cancelled", "mock"}:
             return {
@@ -84,6 +140,7 @@ async def cancel_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
         job["progress"] = "Stopped by user"
         job["error"] = "Cancelled by user"
         job["updated_at"] = _now()
+        _persist_job_unlocked(job)
         provider_task_id = job.get("provider_task_id")
         if isinstance(job.get("result"), dict):
             provider_task_id = provider_task_id or job["result"].get("provider_task_id")
@@ -107,10 +164,8 @@ async def cancel_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
 
 async def get_job(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any] | None:
     async with _LOCK:
-        job = _JOBS.get(job_id)
+        job = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
         if not job:
-            return None
-        if tenant_id and job.get("tenant_id") != tenant_id:
             return None
         # Don't expose internal payload on poll
         return {
@@ -124,11 +179,70 @@ async def get_job(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any
         }
 
 
+async def recover_continuation_job(
+    *,
+    tenant_id: str,
+    part_video_url: str,
+    completed_segments: int,
+    segment_count: int,
+    payload: dict[str, Any],
+    generated_duration_seconds: int | None = None,
+    continuity_frame_count: int | None = None,
+    cast_reference_url: str | None = None,
+) -> dict[str, Any]:
+    """Rebuild a staged continuation after the in-memory job store was lost."""
+    from app.services.logo_overlay import file_url_to_local_path
+    from app.services.media.seedance_multiscene import save_continuity_frame
+
+    video_path = file_url_to_local_path(part_video_url)
+    if not video_path or not video_path.is_file():
+        raise ValueError(
+            "Could not locate the reviewed video part on the server. "
+            "Re-open this chat and try again, or regenerate from your brief."
+        )
+    continuity_url = save_continuity_frame(video_path, tenant_id=tenant_id)
+    next_id = str(uuid.uuid4())
+    cont_payload = dict(payload or {})
+    cont_payload.update(
+        {
+            "stage_index": int(completed_segments or 0),
+            "staged_segment_paths": [str(video_path)],
+            "continuity_reference_url": continuity_url,
+            "cast_reference_url": cast_reference_url or continuity_url,
+            "continuity_frame_count": int(continuity_frame_count or 0),
+            "continuity_privacy_fallback_count": 0,
+            "generated_duration_seconds": int(generated_duration_seconds or 0),
+            "interactive_staging": int(segment_count or 0) > 1,
+        }
+    )
+    async with _LOCK:
+        _JOBS[next_id] = {
+            "job_id": next_id,
+            "tenant_id": tenant_id,
+            "status": "queued",
+            "progress": "Queued — resuming next Seedance part…",
+            "created_at": _now(),
+            "updated_at": _now(),
+            "payload": cont_payload,
+            "result": None,
+            "error": None,
+            "cancel_requested": False,
+            "provider_task_id": None,
+        }
+        _persist_job_unlocked(_JOBS[next_id])
+    asyncio.create_task(run_creative_studio_job(next_id))
+    return {
+        "job_id": next_id,
+        "status": "queued",
+        "progress": "Queued — resuming next Seedance part…",
+    }
+
+
 async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
     """Queue the next reviewed Seedance chapter for a staged long video."""
     async with _LOCK:
-        parent = _JOBS.get(job_id)
-        if not parent or parent.get("tenant_id") != tenant_id:
+        parent = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
+        if not parent:
             return None
         result = parent.get("result") if isinstance(parent.get("result"), dict) else {}
         if not result.get("continuation_available"):
@@ -159,7 +273,7 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
             ),
             "generated_duration_seconds": int(result.get("generated_duration_seconds") or 0),
         })
-        _JOBS[next_id] = {
+        next_job = {
             "job_id": next_id,
             "tenant_id": tenant_id,
             "status": "queued",
@@ -172,10 +286,13 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
             "cancel_requested": False,
             "provider_task_id": None,
         }
+        _JOBS[next_id] = next_job
+        _persist_job_unlocked(next_job)
         result["continuation_available"] = False
         result["next_job_id"] = next_id
         parent["result"] = result
         parent["updated_at"] = _now()
+        _persist_job_unlocked(parent)
 
     asyncio.create_task(run_creative_studio_job(next_id))
     return {
@@ -192,6 +309,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         sanitize_visual_prompt,
         seed_frame_prompt,
     )
+    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
     from app.services.media.byteplus_seedance_provider import is_byteplus_seedance_model
     from app.services.media.higgsfield_models import (
         higgsfield_configured,
@@ -202,7 +320,8 @@ async def run_creative_studio_job(job_id: str) -> None:
     from app.services.media.registry import get_image_provider, get_video_provider
     from app.services.usage_tracker import estimate_media_cost
 
-    job = _JOBS.get(job_id)
+    async with _LOCK:
+        job = _get_job_record_unlocked(job_id)
     if not job:
         return
     data = job["payload"]
@@ -216,6 +335,8 @@ async def run_creative_studio_job(job_id: str) -> None:
             return "video"
         if a in {"4/3"}:
             return "carousel"
+        if a in {"4/5"}:
+            return "reel"
         return "static"
 
     try:
@@ -544,6 +665,8 @@ async def run_creative_studio_job(job_id: str) -> None:
 
         seed_url: str | None = None
         use_byteplus = is_byteplus_seedance_model(model)
+        clip_cap = seedance_clip_cap_seconds(model) if use_byteplus else 15
+        seedance_label = "Seedance 2.5" if clip_cap >= 30 else "Seedance 2.0"
         prompt_only_video = prompt_only_requested and use_byteplus
         video_spec = resolve_video_spec(model) if is_higgsfield_video_model(model) else None
         # Chat / uploads can supply a reference frame for Seedance.
@@ -571,7 +694,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         )
 
         finishing_brief = str(data.get("source_brief") or visual_prompt or "")
-        if use_byteplus and requested_duration > 15:
+        if use_byteplus and requested_duration > clip_cap:
             # The user's timed brief is authoritative. A later planning rewrite
             # can round its final timestamp (for example 26s to 25s/30s); choose
             # the candidate that actually covers the requested duration.
@@ -648,13 +771,14 @@ async def run_creative_studio_job(job_id: str) -> None:
             from app.services.creative_studio_picture import compile_picture_prompt
             visual_prompt = compile_picture_prompt(visual_prompt, duration=requested_duration)
         if use_byteplus:
-            # Seedance limits one task to 15s. Long Creative Studio videos are
-            # generated as valid segments and stitched below.
+            # Seedance limits one task to clip_cap seconds. Long Creative Studio
+            # videos are generated as valid segments and stitched below.
             api_duration = requested_duration
             duration_warning = (
                 f"{requested_duration}s will be generated as "
-                f"{len(_seedance_segment_durations(requested_duration))} Seedance segments."
-                if requested_duration > 15
+                f"{len(_seedance_segment_durations(requested_duration, clip_cap))} "
+                f"{seedance_label} segments."
+                if requested_duration > clip_cap
                 else None
             )
         else:
@@ -850,7 +974,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             return
         shot_windows = explicit_shot_windows(motion_prompt, total=generate_duration) if use_byteplus else []
         # Keep short multi-shot ads in one model context for product/cast continuity.
-        if use_byteplus and generate_duration > 15:
+        if use_byteplus and generate_duration > clip_cap:
             from app.services.file_service import file_service
             from app.services.ffmpeg_util import probe_video_duration
             from app.services.logo_overlay import file_url_to_local_path
@@ -883,10 +1007,10 @@ async def run_creative_studio_job(job_id: str) -> None:
             chapter_windows = (
                 list(shot_windows)
                 if exact_storyboard_mode
-                else coalesce_shot_windows(shot_windows, 15) if shot_windows else []
+                else coalesce_shot_windows(shot_windows, clip_cap) if shot_windows else []
             )
             segment_durations = [b - a for a, b in chapter_windows] or _seedance_segment_durations(
-                generate_duration
+                generate_duration, clip_cap
             )
             interactive_staging = bool(data.get("interactive_staging")) and len(segment_durations) > 1
             stage_index = max(0, min(
@@ -998,7 +1122,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         return
 
                     part_start = segment_start + chapter_elapsed
-                    provider_duration = max(4, min(15, math.ceil(chapter_remaining)))
+                    provider_duration = max(4, min(clip_cap, math.ceil(chapter_remaining)))
                     continuation_instruction = ""
                     if continuation_index:
                         continuation_instruction = (
@@ -1613,15 +1737,41 @@ async def run_creative_studio_job(job_id: str) -> None:
                     "reason": "No exact voiceover timing lines found in the source brief",
                 }
 
+            logo_url = str(data.get("logo_reference_url") or "").strip() or None
+            logo_applied = False
             if overlay_events:
                 from app.services.creative_studio_picture import compose_campaign_graphics
                 current_url, overlays_applied = compose_campaign_graphics(
                     current_url, overlay_events, tenant_id=tenant_id,
-                    logo_url=str(data.get("logo_reference_url") or "").strip() or None,
+                    logo_url=logo_url,
                 )
                 result["text_overlays_applied"] = overlays_applied
                 result["text_overlay_count"] = len(overlay_events)
-                result["logo_applied"] = bool(data.get("logo_reference_url") and overlays_applied)
+                logo_applied = bool(logo_url and overlays_applied)
+            elif logo_url:
+                from app.services.creative_studio_picture import apply_uploaded_logo_end_hold
+
+                try:
+                    current_url, end_logo_applied = apply_uploaded_logo_end_hold(
+                        current_url,
+                        tenant_id=tenant_id,
+                        logo_url=logo_url,
+                        hold_seconds=5.0,
+                    )
+                    if end_logo_applied:
+                        logo_applied = True
+                        result["logo_end_hold_seconds"] = min(
+                            5.0,
+                            float((result or {}).get("duration_seconds") or generate_duration or 5),
+                        )
+                except Exception as exc:
+                    logger.exception("Creative Studio logo end hold failed")
+                    result["logo_warning"] = (
+                        "Uploaded logo could not be composited on the end hold: "
+                        + str(exc)[:240]
+                    )
+            if logo_applied:
+                result["logo_applied"] = True
             if timed_tts and (result.get("voiceover") or {}).get("status") != "done":
                 mix_error = result.get("audio_warning") or "Required narration finishing failed"
                 result["audio_warning"] = mix_error
@@ -1673,13 +1823,16 @@ async def run_creative_studio_job(job_id: str) -> None:
             ),
         )
         out_warn = (result or {}).get("duration_warning") or duration_warning
+        aspect_warn = (result or {}).get("aspect_warning")
+        if aspect_warn:
+            out_warn = f"{aspect_warn} {out_warn or ''}".strip()
         if (
             requested_duration > generate_duration
             and not out_warn
         ):
             out_warn = (
                 f"Asked for {requested_duration}s — this model delivers ~{generate_duration}s. "
-                "Use Seedance 2.0 (BytePlus) for up to 15s."
+                f"Use BytePlus {seedance_label} for up to {clip_cap}s per clip."
             )
         scene_count = (result or {}).get("scene_count")
         stitch_note = (
@@ -1690,7 +1843,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         if use_byteplus:
             if (result or {}).get("segment_count"):
                 stitch_note = (
-                    f"BytePlus Dreamina Seedance 2.0 — stitched "
+                    f"BytePlus Dreamina {seedance_label} — stitched "
                     f"{int((result or {}).get('segment_count'))} cinematic segments."
                 )
                 if (result or {}).get("continuity_chained"):
@@ -1709,7 +1862,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         f"seconds, edited to the {requested_duration}s timeline."
                     )
             else:
-                stitch_note = "BytePlus Dreamina Seedance 2.0 — one continuous clip."
+                stitch_note = f"BytePlus Dreamina {seedance_label} — one continuous clip."
         if out_warn:
             stitch_note += f" Warning: {out_warn}"
         if sound_on:
@@ -1776,6 +1929,8 @@ async def run_creative_studio_job(job_id: str) -> None:
                 ),
                 "text_overlay_count": (result or {}).get("text_overlay_count"),
                 "logo_applied": bool((result or {}).get("logo_applied")),
+                "logo_end_hold_seconds": (result or {}).get("logo_end_hold_seconds"),
+                "logo_warning": (result or {}).get("logo_warning"),
             },
         )
     except Exception as exc:

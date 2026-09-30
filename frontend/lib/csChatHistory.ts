@@ -57,6 +57,14 @@ export interface CsChatMessage {
   suggestedActions?: CsPipelineAction[]
   phase?: string
   storyboard?: CsStoryboardFrame[]
+  /** Saved when a staged Seedance part finishes — used to resume after server reload. */
+  continuationMeta?: {
+    completed_segments: number
+    segment_count: number
+    generated_duration_seconds?: number
+    requested_duration_seconds?: number
+    continuity_frame_count?: number
+  }
 }
 
 export interface CsChatSession {
@@ -73,6 +81,7 @@ export interface CsChatSession {
   characterReferenceUrl: string
   additionalReferenceUrls: string[]
   phase: string
+  videoModel?: string
 }
 
 function scopeKey(briefId?: string, brandId?: string) {

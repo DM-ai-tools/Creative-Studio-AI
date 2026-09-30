@@ -60,6 +60,7 @@ export interface UsageEventRow {
   total_tokens: number
   credits: number
   cost_usd: number
+  cost_estimated?: boolean
   success: boolean
   error?: string | null
   client?: string | null
@@ -70,6 +71,42 @@ export interface UsageDailyPoint {
   date: string
   total: number
   [model: string]: number | string
+}
+
+export interface SeedanceUsageClip {
+  id: string
+  task_id?: string | null
+  model: string
+  tokens: number
+  cost_usd: number
+  cost_usd_low: number
+  cost_usd_high: number
+  cost_estimated: boolean
+  recovered?: boolean
+  client?: string | null
+  created_at?: string | null
+}
+
+export interface SeedanceUsageModelRow {
+  model: string
+  clips: number
+  failed: number
+  tokens: number
+  cost_usd: number
+  cost_usd_low: number
+  cost_usd_high: number
+}
+
+export interface SeedanceUsageSummary {
+  successful_clips: number
+  failed_calls: number
+  total_tokens: number
+  cost_usd: number
+  cost_usd_low: number
+  cost_usd_high: number
+  pricing_note: string
+  by_model: SeedanceUsageModelRow[]
+  recent_clips: SeedanceUsageClip[]
 }
 
 export interface AdminUsage {
@@ -84,6 +121,7 @@ export interface AdminUsage {
   }
   by_provider: UsageBucket[]
   by_model: UsageBucket[]
+  seedance?: SeedanceUsageSummary
   recent: UsageEventRow[]
   daily_cost?: UsageDailyPoint[]
   daily_requests?: UsageDailyPoint[]

@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 SEEDANCE_VIDEO_MODEL = "ark-seedance-2-0"
 DEFAULT_IMAGE_MODEL = "openai-gpt-image-2"
 
+
+def _resolve_video_model(video_model: str | None) -> str:
+    from app.services.media.byteplus_seedance_provider import is_byteplus_seedance_model
+
+    candidate = (video_model or SEEDANCE_VIDEO_MODEL).strip()
+    if is_byteplus_seedance_model(candidate):
+        return candidate
+    return SEEDANCE_VIDEO_MODEL
+
+
+def _seedance_model_label(model: str) -> str:
+    from app.services.media.byteplus_seedance_client import is_seedance_25_model
+
+    return "Seedance 2.5" if is_seedance_25_model(model) else "Seedance 2.0"
+
 # Explicit UI / client actions (approve-before-video, like Higgsfield Supercomputer)
 ACTIONS = frozenset(
     {
@@ -49,7 +64,7 @@ Respond with ONLY valid JSON (no markdown fences):
     {"title": "Hook", "image_prompt": "visual still for this scene only — NO on-image text", "overlays": ["optional overlay copy"]}
   ],
   "duration_seconds": integer 5-120 (or null when Auto/script-derived),
-  "aspect": "9/16" | "1/1" | "16/9" | "4/3",
+  "aspect": "9/16" | "1/1" | "16/9" | "4/3" | "4/5",
   "suggested_actions": ["generate_image"]
 }
 
@@ -90,7 +105,7 @@ def _extract_json(raw: str) -> dict[str, Any]:
 
 def _normalize_aspect(value: str | None, fallback: str) -> str:
     raw = (value or fallback or "9/16").replace(":", "/").strip()
-    allowed = {"9/16", "1/1", "16/9", "4/3", "1/4"}
+    allowed = {"9/16", "1/1", "16/9", "4/3", "4/5", "1/4"}
     return raw if raw in allowed else "9/16"
 
 
@@ -462,6 +477,9 @@ async def _start_job(
         create_job,
         run_creative_studio_job,
     )
+    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
+
+    clip_cap = seedance_clip_cap_seconds(model)
 
     job_id = await create_job(
         tenant_id=tenant_id,
@@ -489,7 +507,7 @@ async def _start_job(
             "prompt_only_video": bool(prompt_only_video),
             # Long Creative Studio films are reviewed one provider-sized chapter
             # at a time. The next paid call starts only after user approval.
-            "interactive_staging": media_mode == "video" and duration_seconds > 15,
+            "interactive_staging": media_mode == "video" and duration_seconds > clip_cap,
         },
     )
     asyncio.create_task(run_creative_studio_job(job_id))
@@ -608,6 +626,7 @@ async def run_creative_studio_chat_turn(
     reference_assets: list[dict[str, str]] | None = None,
     storyboard_image_urls: list[str] | None = None,
     prompt_only_video: bool = False,
+    video_model: str | None = None,
 ) -> dict[str, Any]:
     """
     Creative Studio direct video turn. GPT image/storyboard generation is
@@ -625,6 +644,9 @@ async def run_creative_studio_chat_turn(
     action_norm = (action or "continue").strip().lower()
     if action_norm not in ACTIONS:
         action_norm = "continue"
+
+    active_video_model = _resolve_video_model(video_model)
+    video_model_label = _seedance_model_label(active_video_model)
 
     # Authoritative server-side guard for old browser bundles and Fast Refresh
     # state. Creative Studio currently has one path: uploads + authored prompt
@@ -715,7 +737,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": [],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": image_prompt or None,
                 "video_prompt": video_prompt or None,
                 "approved_image_url": approved_image_url or None,
@@ -740,7 +762,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": [],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": prompt,
                 "video_prompt": video_prompt or None,
                 "approved_image_url": approved_image_url or None,
@@ -806,7 +828,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": [],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": img0,
                 "video_prompt": vid,
                 "approved_image_url": None,
@@ -851,7 +873,7 @@ async def run_creative_studio_chat_turn(
             "suggested_actions": [],
             "chat_model": model_slug,
             "image_model": img_model,
-            "video_model": SEEDANCE_VIDEO_MODEL,
+            "video_model": active_video_model,
             "image_prompt": prompt,
             "video_prompt": video_prompt
             or _heuristic_timed_motion(
@@ -884,7 +906,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": ["generate_image"] if not seed else ["approve_next"],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": image_prompt or None,
                 "video_prompt": video_prompt or None,
                 "approved_image_url": seed or None,
@@ -908,7 +930,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": ["generate_image"],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": image_prompt or None,
                 "video_prompt": motion,
                 "approved_image_url": None,
@@ -929,7 +951,7 @@ async def run_creative_studio_chat_turn(
                 "suggested_actions": ["approve_next"],
                 "chat_model": model_slug,
                 "image_model": img_model,
-                "video_model": SEEDANCE_VIDEO_MODEL,
+                "video_model": active_video_model,
                 "image_prompt": image_prompt or None,
                 "video_prompt": motion,
                 "approved_image_url": seed or None,
@@ -958,20 +980,53 @@ async def run_creative_studio_chat_turn(
                 # The complete authored brief is authoritative, including product/cast
                 # constraints before the first timestamp and the closing narration.
                 from app.services.creative_studio_timeline import explicit_shot_windows
-                authored_windows = explicit_shot_windows(brief_for_motion)
-                if authored_windows:
-                    # Duration presets are coarse (for example 30s), while an authored
-                    # brief can end at an exact time such as 26s. Generate the authored
-                    # timeline instead of rejecting the harmless preset mismatch.
-                    out_duration = max(5, min(120, int(round(authored_windows[-1][1]))))
-                motion = (
-                    brief_for_motion
-                    if explicit_shot_windows(brief_for_motion, total=out_duration)
-                    else build_storyboard_video_prompt(
-                        board, duration_seconds=out_duration,
-                        sound_on=sound_on, product_name=product_name or "",
+
+                try:
+                    authored_windows = explicit_shot_windows(brief_for_motion)
+                    if authored_windows:
+                        # Duration presets are coarse (for example 30s), while an authored
+                        # brief can end at an exact time such as 26s. Generate the authored
+                        # timeline instead of rejecting the harmless preset mismatch.
+                        out_duration = max(
+                            5, min(120, int(round(authored_windows[-1][1])))
+                        )
+                    motion = (
+                        brief_for_motion
+                        if explicit_shot_windows(brief_for_motion, total=out_duration)
+                        else build_storyboard_video_prompt(
+                            board, duration_seconds=out_duration,
+                            sound_on=sound_on, product_name=product_name or "",
+                        )
                     )
-                )
+                except ValueError as exc:
+                    if prompt_only_video:
+                        motion = brief_for_motion
+                    else:
+                        return {
+                            "assistant_message": (
+                                "Your scene timings could not be parsed. Check that each "
+                                "SCENE line uses continuous times in order (for example "
+                                "0:00–0:10, 0:10–0:15, … ending at your target length). "
+                                f"Details: {str(exc)[:220]}"
+                            ),
+                            "intent": "reply",
+                            "phase": "awaiting_video",
+                            "suggested_actions": ["generate_video"],
+                            "chat_model": model_slug,
+                            "image_model": img_model,
+                            "video_model": active_video_model,
+                            "image_prompt": image_prompt or None,
+                            "video_prompt": brief_for_motion or motion or None,
+                            "approved_image_url": seed or None,
+                            "product_reference_url": product_ref or None,
+                            "status": "failed",
+                            "error": str(exc)[:300],
+                            "job_id": None,
+                            "media_mode": None,
+                            "model": None,
+                            "duration_seconds": out_duration,
+                            "aspect": out_aspect,
+                        }
 
         if len(brief_for_motion) < 80:
             brief_for_motion = f"{image_prompt}\n{video_prompt}\n{last_user}".strip()
@@ -999,7 +1054,7 @@ async def run_creative_studio_chat_turn(
         job_id = await _start_job(
             tenant_id=tenant_id,
             media_mode="video",
-            model=SEEDANCE_VIDEO_MODEL,
+            model=active_video_model,
             prompt=motion,
             duration_seconds=out_duration,
             aspect=out_aspect,
@@ -1025,7 +1080,7 @@ async def run_creative_studio_chat_turn(
         audio_note = "with native audio" if sound_on else "silent"
         return {
             "assistant_message": (
-                f"Approved. Queuing Seedance 2.0 · {out_duration}s · "
+                f"Approved. Queuing {video_model_label} · {out_duration}s · "
                 f"{out_aspect.replace('/', ':')} · {audio_note}. "
                 "Driving the FULL timed story from your brief"
                 + (
@@ -1044,7 +1099,7 @@ async def run_creative_studio_chat_turn(
             "suggested_actions": [],
             "chat_model": model_slug,
             "image_model": img_model,
-            "video_model": SEEDANCE_VIDEO_MODEL,
+            "video_model": active_video_model,
             "image_prompt": image_prompt or None,
             "video_prompt": motion,
             "approved_image_url": None if prompt_only_video else seed or None,
@@ -1052,7 +1107,7 @@ async def run_creative_studio_chat_turn(
             "status": "queued",
             "job_id": job_id,
             "media_mode": "video",
-            "model": SEEDANCE_VIDEO_MODEL,
+            "model": active_video_model,
             "duration_seconds": out_duration,
             "aspect": out_aspect,
             "error": None,
@@ -1083,7 +1138,7 @@ async def run_creative_studio_chat_turn(
             "suggested_actions": [],
             "chat_model": model_slug,
             "image_model": img_model,
-            "video_model": SEEDANCE_VIDEO_MODEL,
+            "video_model": active_video_model,
             "image_prompt": str(parsed.get("image_prompt") or image_prompt or "") or None,
             "video_prompt": str(parsed.get("video_prompt") or video_prompt or "") or None,
             "approved_image_url": approved_image_url or None,
@@ -1172,6 +1227,7 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             storyboard_image_urls=storyboard_image_urls,
+            video_model=active_video_model,
         )
 
     if intent == "generate_video" and approved_image_url:
@@ -1199,6 +1255,7 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             storyboard_image_urls=storyboard_image_urls,
+            video_model=active_video_model,
         )
 
     if intent in {"draft_plan", "generate_video"} or (intent == "reply" and mode_norm == "generate"):
@@ -1217,7 +1274,7 @@ async def run_creative_studio_chat_turn(
         if not assistant_message:
             assistant_message = (
                 "Here’s the production plan from your full brief: GPT Image 2 opening still, then "
-                "Seedance 2.0 playing the timed story beats."
+                f"{video_model_label} playing the timed story beats."
             )
         if "generate_image" not in suggested:
             suggested = ["generate_image"]
@@ -1248,6 +1305,7 @@ async def run_creative_studio_chat_turn(
                 additional_reference_urls=extra_refs,
                 reference_assets=reference_assets,
                 storyboard_image_urls=storyboard_image_urls,
+                video_model=active_video_model,
             )
             plan_lead = (assistant_message or "").strip()
             gen_msg = str(chained.get("assistant_message") or "").strip()
@@ -1269,7 +1327,7 @@ async def run_creative_studio_chat_turn(
             "suggested_actions": suggested,
             "chat_model": model_slug,
             "image_model": img_model,
-            "video_model": SEEDANCE_VIDEO_MODEL,
+            "video_model": active_video_model,
             "image_prompt": img_p or None,
             "video_prompt": vid_p or None,
             "approved_image_url": approved_image_url or None,
@@ -1291,7 +1349,7 @@ async def run_creative_studio_chat_turn(
         "suggested_actions": suggested,
         "chat_model": model_slug,
         "image_model": img_model,
-        "video_model": SEEDANCE_VIDEO_MODEL,
+        "video_model": active_video_model,
         "image_prompt": img_p or None,
         "video_prompt": vid_p or None,
         "approved_image_url": approved_image_url or None,

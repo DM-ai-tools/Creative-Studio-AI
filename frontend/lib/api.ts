@@ -745,16 +745,31 @@ export const generationApi = {
       })
       .then((r) => r.data),
 
-  creativeStudioContinueJob: (jobId: string) =>
+  creativeStudioContinueJob: (
+    jobId: string,
+    recovery?: {
+      part_video_url: string
+      completed_segments: number
+      segment_count: number
+      payload: Record<string, unknown>
+      generated_duration_seconds?: number
+      continuity_frame_count?: number
+      cast_reference_url?: string
+    },
+  ) =>
     api
       .post<{
         status: string
         job_id?: string | null
         progress?: string | null
         error?: string | null
-      }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}/continue`, {}, {
-        timeout: 30_000,
-      })
+      }>(
+        `/generation/creative-studio/jobs/${encodeURIComponent(jobId)}/continue`,
+        recovery || {},
+        {
+          timeout: 30_000,
+        },
+      )
       .then((r) => r.data),
 
   creativeStudioCancelJob: (jobId: string) =>
@@ -820,6 +835,7 @@ export const generationApi = {
     image_model?: string
     revision_notes?: string
     phase?: string
+    video_model?: string
   }) =>
     api
       .post<{

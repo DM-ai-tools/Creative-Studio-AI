@@ -15,6 +15,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ARK_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
 DEFAULT_SEEDANCE_MODEL = "dreamina-seedance-2-0-260128"
+DEFAULT_SEEDANCE_25_MODEL = "dreamina-seedance-2-5-260628"
+SEEDANCE_25_CATALOG_IDS = frozenset(
+    {
+        "ark-seedance-2-5",
+        "byteplus-seedance-2-5",
+        "seedance-2-5-byteplus",
+        "dreamina-seedance-2-5",
+    }
+)
+# BytePlus Seedance 2.5 accepts these explicit ratios (4:5 is not supported in r2v).
+SEEDANCE_25_SUPPORTED_RATIOS = frozenset(
+    {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"}
+)
+SEEDANCE_25_RATIO_FALLBACKS = {
+    "4:5": "3:4",
+    "5:4": "4:3",
+}
 
 
 def ark_configured() -> bool:
@@ -27,6 +44,34 @@ def ark_base_url() -> str:
 
 def ark_seedance_model() -> str:
     return (settings.ARK_SEEDANCE_MODEL or DEFAULT_SEEDANCE_MODEL).strip()
+
+
+def ark_seedance_25_model() -> str:
+    return (settings.ARK_SEEDANCE_25_MODEL or DEFAULT_SEEDANCE_25_MODEL).strip()
+
+
+def is_seedance_25_model(model: str | None) -> bool:
+    mid = (model or "").strip().lower().replace("_", "-")
+    if not mid:
+        return False
+    if mid in SEEDANCE_25_CATALOG_IDS:
+        return True
+    if "dreamina-seedance-2-5" in mid or "seedance-2-5" in mid:
+        return True
+    return "2-5" in mid or "2.5" in mid
+
+
+def seedance_clip_cap_seconds(model: str | None) -> int:
+    return 30 if is_seedance_25_model(model) else 15
+
+
+def resolve_seedance_api_model(model: str | None) -> str:
+    mid = (model or "").strip()
+    if mid.startswith("dreamina-seedance"):
+        return mid
+    if is_seedance_25_model(mid):
+        return ark_seedance_25_model()
+    return ark_seedance_model()
 
 
 def ark_headers() -> dict[str, str]:
@@ -74,6 +119,8 @@ def map_aspect_to_ratio(aspect: str | None, format_type: str | None = None) -> s
         "16/9": "16:9",
         "1/1": "1:1",
         "4/3": "4:3",
+        "4/5": "4:5",
+        "5/4": "5:4",
         "3/4": "3:4",
     }
     if raw in mapping:
@@ -86,6 +133,89 @@ def map_aspect_to_ratio(aspect: str | None, format_type: str | None = None) -> s
     return "9:16"
 
 
+def seedance_reference_data_uri(file_url: str | None) -> str | None:
+    """Load a reference image and pad it to BytePlus Seedance upload limits."""
+    import base64
+
+    from app.services.logo_overlay import (
+        file_url_to_local_path,
+        pad_image_bytes_for_seedance_reference,
+    )
+
+    if not file_url:
+        return None
+    url = str(file_url).strip()
+    if not url:
+        return None
+
+    def _encode(image_bytes: bytes) -> str:
+        padded = pad_image_bytes_for_seedance_reference(image_bytes)
+        encoded = base64.b64encode(padded).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+
+    if url.startswith("data:"):
+        try:
+            header, payload = url.split(",", 1)
+            mime = header.split(";")[0].removeprefix("data:")
+            if mime not in {"image/png", "image/jpeg", "image/webp"}:
+                mime = "image/png"
+            import base64 as b64
+
+            return _encode(b64.b64decode(payload))
+        except Exception:
+            return url
+
+    path = file_url_to_local_path(url)
+    if path and path.is_file():
+        return _encode(path.read_bytes())
+
+    if url.startswith("http://") or url.startswith("https://"):
+        try:
+            response = httpx.get(url, timeout=45.0, follow_redirects=True)
+            response.raise_for_status()
+            return _encode(response.content)
+        except Exception as exc:
+            logger.warning("Could not pad remote Seedance reference %s: %s", url[:80], exc)
+            return url
+
+    from app.services.media.runway_client import file_url_to_data_uri
+
+    return file_url_to_data_uri(url)
+
+
+def resolve_seedance_api_ratio(
+    aspect: str | None,
+    format_type: str | None = None,
+    *,
+    model: str | None = None,
+    frame_locked: bool = False,
+) -> tuple[str, str | None]:
+    """Map UI aspect to a BytePlus Seedance ratio, with 2.5-specific fallbacks."""
+    requested = map_aspect_to_ratio(aspect, format_type)
+    if not is_seedance_25_model(model):
+        return requested, None
+    if frame_locked:
+        if requested != "adaptive":
+            return (
+                "adaptive",
+                (
+                    f"Seedance 2.5 first-frame generation requires adaptive ratio "
+                    f"(requested {requested})."
+                ),
+            )
+        return "adaptive", None
+    if requested in SEEDANCE_25_SUPPORTED_RATIOS:
+        return requested, None
+    fallback = SEEDANCE_25_RATIO_FALLBACKS.get(requested, "9:16")
+    return (
+        fallback,
+        (
+            f"Seedance 2.5 does not support {requested} (Meta feed 4:5 is not on BytePlus); "
+            f"using {fallback} instead — crop to {requested} in post if needed."
+        ),
+    )
+
+
 def clamp_seedance_duration(seconds: int | None, *, max_seconds: int = 15) -> int:
     try:
         n = int(seconds or 5)
@@ -94,11 +224,15 @@ def clamp_seedance_duration(seconds: int | None, *, max_seconds: int = 15) -> in
     return max(4, min(max_seconds, n))
 
 
-def map_resolution(resolution: str | None) -> str:
+def map_resolution(resolution: str | None, *, model: str | None = None) -> str:
     r = (resolution or "720p").strip().lower()
+    if is_seedance_25_model(model):
+        if r in {"480p", "720p", "1080p"}:
+            return r
+        return "1080p"
     if r in {"480p", "720p", "1080p"}:
         return r
-    if r in {"4k", "2160p"}:
+    if r in {"4k", "2160p", "2k", "1440p"}:
         return "1080p"
     return "720p"
 
@@ -153,12 +287,24 @@ async def create_video_task(
             }
         )
 
+    api_model = (model or ark_seedance_model()).strip()
+    task_ratio = ratio
+    if (
+        image_data_uri_or_url
+        and image_role in {"first_frame", "last_frame"}
+        and is_seedance_25_model(api_model)
+        and task_ratio != "adaptive"
+    ):
+        task_ratio = "adaptive"
     payload: dict[str, Any] = {
-        "model": (model or ark_seedance_model()).strip(),
+        "model": api_model,
         "content": content,
-        "duration": clamp_seedance_duration(duration),
-        "ratio": ratio,
-        "resolution": map_resolution(resolution),
+        "duration": clamp_seedance_duration(
+            duration,
+            max_seconds=seedance_clip_cap_seconds(api_model),
+        ),
+        "ratio": task_ratio,
+        "resolution": map_resolution(resolution, model=api_model),
         "generate_audio": bool(generate_audio),
         "watermark": False,
     }
