@@ -58,10 +58,10 @@ class SeedanceModelTests(unittest.TestCase):
         self.assertEqual(ratio, "adaptive")
         self.assertIn("adaptive", note or "")
 
-    def test_seedance_20_keeps_four_by_five(self):
+    def test_seedance_20_maps_four_by_five_to_three_by_four(self):
         ratio, note = resolve_seedance_api_ratio("4/5", model="ark-seedance-2-0")
-        self.assertEqual(ratio, "4:5")
-        self.assertIsNone(note)
+        self.assertEqual(ratio, "3:4")
+        self.assertIn("4:5", note or "")
 
     def test_pad_wide_reference_for_seedance(self):
         img = Image.new("RGB", (310, 100), color=(20, 120, 200))

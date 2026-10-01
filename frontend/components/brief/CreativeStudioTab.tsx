@@ -1957,12 +1957,12 @@ export default function CreativeStudioTab({
             2.5 · 1080p max
           </span>
         ) : null}
-        {clipCap >= 30 && aspect === '4/5' ? (
+        {aspect === '4/5' ? (
           <span
             className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-200/90"
-            title="BytePlus Seedance 2.5 does not accept 4:5; we generate at 3:4 and you can crop to 4:5 in post"
+            title="BytePlus Seedance does not accept 4:5; we generate at 3:4 and you can crop to 4:5 in post"
           >
-            4:5 → 3:4 on 2.5
+            4:5 → 3:4 on Seedance
           </span>
         ) : null}
         <select
@@ -1970,15 +1970,15 @@ export default function CreativeStudioTab({
           onChange={(e) => setAspect(e.target.value as AspectId)}
           className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80"
           title={
-            clipCap >= 30 && aspect === '4/5'
-              ? 'BytePlus 2.5 maps 4:5 to 3:4 (1080×1440). Crop to 1080×1350 in post for Meta feed.'
+            aspect === '4/5'
+              ? 'BytePlus maps 4:5 to 3:4 (1080×1440). Crop to 1080×1350 in post for Meta feed.'
               : undefined
           }
         >
           {ASPECTS.map((a) => (
             <option key={a.id} value={a.id} className="bg-[#121316]">
               {a.label}
-              {clipCap >= 30 && a.id === '4/5' ? ' · 2.5 uses 3:4' : ''}
+              {a.id === '4/5' ? ' · uses 3:4' : ''}
             </option>
           ))}
         </select>

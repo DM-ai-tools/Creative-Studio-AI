@@ -24,14 +24,17 @@ SEEDANCE_25_CATALOG_IDS = frozenset(
         "dreamina-seedance-2-5",
     }
 )
-# BytePlus Seedance 2.5 accepts these explicit ratios (4:5 is not supported in r2v).
-SEEDANCE_25_SUPPORTED_RATIOS = frozenset(
+# BytePlus Seedance r2v accepts these ratios (4:5 Meta feed is not supported).
+SEEDANCE_SUPPORTED_RATIOS = frozenset(
     {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"}
 )
-SEEDANCE_25_RATIO_FALLBACKS = {
+SEEDANCE_RATIO_FALLBACKS = {
     "4:5": "3:4",
     "5:4": "4:3",
 }
+# Back-compat aliases
+SEEDANCE_25_SUPPORTED_RATIOS = SEEDANCE_SUPPORTED_RATIOS
+SEEDANCE_25_RATIO_FALLBACKS = SEEDANCE_RATIO_FALLBACKS
 
 
 def ark_configured() -> bool:
@@ -190,11 +193,9 @@ def resolve_seedance_api_ratio(
     model: str | None = None,
     frame_locked: bool = False,
 ) -> tuple[str, str | None]:
-    """Map UI aspect to a BytePlus Seedance ratio, with 2.5-specific fallbacks."""
+    """Map UI aspect to a BytePlus Seedance ratio (2.0 and 2.5 share r2v limits)."""
     requested = map_aspect_to_ratio(aspect, format_type)
-    if not is_seedance_25_model(model):
-        return requested, None
-    if frame_locked:
+    if is_seedance_25_model(model) and frame_locked:
         if requested != "adaptive":
             return (
                 "adaptive",
@@ -204,13 +205,14 @@ def resolve_seedance_api_ratio(
                 ),
             )
         return "adaptive", None
-    if requested in SEEDANCE_25_SUPPORTED_RATIOS:
+    if requested in SEEDANCE_SUPPORTED_RATIOS:
         return requested, None
-    fallback = SEEDANCE_25_RATIO_FALLBACKS.get(requested, "9:16")
+    fallback = SEEDANCE_RATIO_FALLBACKS.get(requested, "9:16")
+    label = "Seedance 2.5" if is_seedance_25_model(model) else "Seedance"
     return (
         fallback,
         (
-            f"Seedance 2.5 does not support {requested} (Meta feed 4:5 is not on BytePlus); "
+            f"{label} does not support {requested} in r2v (Meta feed 4:5 is not on BytePlus); "
             f"using {fallback} instead — crop to {requested} in post if needed."
         ),
     )
