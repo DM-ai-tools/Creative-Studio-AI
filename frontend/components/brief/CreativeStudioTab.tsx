@@ -95,6 +95,7 @@ function seedanceModelLabel(modelId: string) {
 }
 
 function buildContinuationRecoveryPayload(args: {
+  sessionId: string
   videoModel: string
   videoPrompt: string
   duration: DurationId
@@ -115,6 +116,7 @@ function buildContinuationRecoveryPayload(args: {
     args.requestedDurationSeconds ??
     (args.duration === 'auto' ? 90 : Number(args.duration))
   return {
+    creative_studio_session_id: args.sessionId,
     media_mode: 'video',
     model: args.videoModel,
     prompt: args.videoPrompt,
@@ -640,8 +642,10 @@ export default function CreativeStudioTab({
                 ? 'storyboard'
                 : mediaMode,
             suggestedActions:
-              done && mediaMode === 'video' && res.continuation_available
-                ? ['continue_video']
+              done && mediaMode === 'video' && res.retry_chapter_available
+                ? ['generate_video']
+                : done && mediaMode === 'video' && res.continuation_available
+                  ? ['continue_video']
                 : done &&
               (mediaMode === 'image' || mediaMode === 'storyboard') &&
               (res.url || board.some((b) => b.url))
@@ -674,6 +678,7 @@ export default function CreativeStudioTab({
                     generated_duration_seconds: res.duration_seconds || undefined,
                     requested_duration_seconds: res.requested_duration_seconds || undefined,
                     continuity_frame_count: res.continuity_frame_count || undefined,
+                    production_id: res.production_id || undefined,
                   },
                 }
               : {}),
@@ -717,6 +722,13 @@ export default function CreativeStudioTab({
             return
           }
           if (done && res.url && mediaMode === 'video') {
+            if (res.retry_chapter_available) {
+              setPhase('awaiting_video_retry')
+              toast.error('This chapter failed continuity QA. Regenerate retries only this chapter.', {
+                duration: 9000,
+              })
+              return
+            }
             setPhase(res.continuation_available ? 'awaiting_video_continuation' : 'done')
             const warn = res.duration_warning || res.note || ''
             if (res.audio_warning) {
@@ -1109,7 +1121,7 @@ export default function CreativeStudioTab({
         role: 'user',
         content: (userText || `(${action.replace(/_/g, ' ')})`) +
           (isVideoAction && promptOnlyVideo
-            ? '\nGenerate directly from this timed prompt using only my uploaded references. Exclude GPT-generated storyboard images.'
+            ? '\nGenerate directly from this timed prompt using uploaded references as general visual guidance while generating a fictional character. Exclude GPT-generated storyboard images.'
             : isVideoAction && !useStoryboardReferences
               ? '\nUse original uploads for video references; exclude generated storyboard images.'
               : ''),
@@ -1144,6 +1156,7 @@ export default function CreativeStudioTab({
 
     try {
       const res = await generationApi.creativeStudioChat({
+        session_id: activeChatId,
         messages: historyForApi,
         mode,
         chat_model: chatModel,
@@ -1295,6 +1308,25 @@ export default function CreativeStudioTab({
       setMessages((previous) => [...previous, userMsg, assistantMsg])
       setBusy(true)
       try {
+        const lockedReferenceAssets = Array.from(
+          new Map(
+            messages
+              .flatMap((message) => message.attachments || [])
+              .filter((asset) => asset.url)
+              .map((asset) => [asset.url, asset]),
+          ).values(),
+        )
+        if (
+          characterReferenceUrl &&
+          !lockedReferenceAssets.some((asset) => asset.url === characterReferenceUrl)
+        ) {
+          lockedReferenceAssets.push({
+            id: `character-${characterReferenceUrl}`,
+            name: 'Character anchor',
+            url: characterReferenceUrl,
+            role: 'character',
+          })
+        }
         const requestedTotal =
           fromMsg.continuationMeta?.requested_duration_seconds ??
           (duration === 'auto' ? 90 : Number(duration))
@@ -1307,7 +1339,9 @@ export default function CreativeStudioTab({
                 Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(videoModel))),
               generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
               continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
+              production_id: fromMsg.continuationMeta?.production_id,
               payload: buildContinuationRecoveryPayload({
+                sessionId: activeChatId,
                 videoModel,
                 videoPrompt: fromMsg.videoPrompt || videoPrompt,
                 duration,
@@ -1320,7 +1354,7 @@ export default function CreativeStudioTab({
                 productReferenceUrl,
                 logoReferenceUrl,
                 additionalReferenceUrls,
-                referenceAssets: attachments,
+                referenceAssets: lockedReferenceAssets,
                 requestedDurationSeconds: requestedTotal,
               }),
             }
@@ -1902,7 +1936,7 @@ export default function CreativeStudioTab({
         ) : null}
         {characterReferenceUrl ? (
           <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
-            Character locked
+            Character reference
           </span>
         ) : null}
         <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
@@ -1943,7 +1977,7 @@ export default function CreativeStudioTab({
           <span
             className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
             title={promptOnlyVideo
-              ? 'Independent Seedance chapters use the same uploaded references and are stitched after every chapter completes.'
+              ? 'Independent Seedance chapters use uploaded references as general visual guidance and are stitched after every chapter completes.'
               : "Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."}
           >
             {Math.ceil(Number(duration) / clipCap)} {promptOnlyVideo ? 'upload-guided chapters' : 'continuity-linked chapters'}
@@ -2452,7 +2486,7 @@ export default function CreativeStudioTab({
                                 }`}
                               >
                                 {characterReferenceUrl === m.mediaUrl
-                                  ? 'Character locked ✓'
+                                  ? 'Character reference ✓'
                                   : 'Use as character'}
                               </button>
                             ) : null}

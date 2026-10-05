@@ -64,6 +64,7 @@ export interface CsChatMessage {
     generated_duration_seconds?: number
     requested_duration_seconds?: number
     continuity_frame_count?: number
+    production_id?: string
   }
 }
 

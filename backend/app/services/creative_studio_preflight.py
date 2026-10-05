@@ -47,6 +47,21 @@ def validate_video_preflight(
     spoken = sum(max(0.0, min(float(b), duration) - max(0.0, float(a)))
                  for a, b, text in voices if str(text).strip())
     words = sum(len(str(text).split()) for _, _, text in voices)
+    voice_rates = []
+    for start, end, text in voices:
+        line_words = len(str(text).split())
+        window = max(0.01, float(end) - float(start))
+        wpm = line_words * 60.0 / window
+        voice_rates.append({
+            "start": float(start), "end": float(end), "words": line_words,
+            "required_wpm": round(wpm, 1),
+        })
+        if wpm > 185:
+            errors.append(
+                f"Narration at {float(start):g}-{float(end):g}s requires {wpm:.0f} WPM. "
+                "That cannot sound natural or remain reliably synchronised; shorten the line "
+                "or give it more time before any paid video call."
+            )
     if sound_on and not voices:
         warnings.append("Sound is enabled but the brief contains no extractable narration lines.")
     elif voices and spoken / duration < 0.25:
@@ -70,6 +85,9 @@ def validate_video_preflight(
             "sound_on": bool(sound_on), "narration_lines": len(voices),
             "narration_words": words, "spoken_window_seconds": round(spoken, 3),
             "single_voice_bed": bool(voices),
+            "voice_rates": voice_rates,
+            "provider_speech": "disabled when exact narration is present",
+            "visible_speaker_mode": "off-camera narration; visible people do not lip-sync",
         },
         "warnings": warnings,
     }

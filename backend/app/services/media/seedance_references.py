@@ -65,8 +65,18 @@ def reference_instructions(assets: list[dict[str, str]]) -> str:
     roles = {
         "scene": "SCENE: use only for location, palette, lighting and world continuity. Do not copy product or character identity from this image.",
         "product": "PRODUCT: authoritative product identity. Preserve its silhouette, construction, proportions, materials and colours in every shot. Do not substitute furniture or objects from other references. Follow the brief's quantity.",
-        "character": "CHARACTER: preserve this person's face, build, identity and wardrobe across shots unless the brief requests a change. Do not take product design or location from this portrait.",
-        "cast": "CAST ANCHOR: persistent identity from the first completed chapter. Preserve the visible people's faces, age, build, hair and wardrobe across the whole film; use the CONTINUITY FRAME for their current pose and scene position.",
+        "character": (
+            "CHARACTER REFERENCE: use only as a general visual guide for clothing, age range, "
+            "hairstyle, body type and overall presentation. Do not reproduce or preserve the "
+            "person's exact facial identity. Generate a fictional presenter with similar general "
+            "characteristics. Do not take product design or location from this portrait."
+        ),
+        "cast": (
+            "CAST ANCHOR: general visual guide from the first completed chapter for clothing, age "
+            "range, hairstyle, body type and wardrobe. Do not reproduce exact facial identity; "
+            "generate a fictional presenter with similar characteristics. Use the CONTINUITY FRAME "
+            "for current pose and scene position."
+        ),
         "continuity": "CONTINUITY FRAME: exact final frame of the previous chapter. Begin from its pose, camera axis, lighting, wardrobe, props and scene state, then continue forward without replaying the prior action. Character and product anchors remain authoritative for identity.",
         "logo": "BRAND: authoritative logo shape, colours and typography only. Follow the finishing instructions about whether branding is composited later; do not copy its background into the scene.",
         "reference": "SUPPORTING REFERENCE: use only as directed in the brief. Never override the labelled product, character or scene anchors.",

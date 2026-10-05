@@ -700,6 +700,10 @@ export const generationApi = {
         credits_estimate?: number | null
         duration_warning?: string | null
         note?: string | null
+        production_id?: string | null
+        production_report?: Record<string, unknown> | null
+        quality_gate?: Record<string, unknown> | null
+        retry_chapter_available?: boolean
       }>('/generation/creative-studio', data, { timeout: 60_000 })
       .then((r) => r.data),
 
@@ -729,6 +733,10 @@ export const generationApi = {
         credits_estimate?: number | null
         duration_warning?: string | null
         note?: string | null
+        production_id?: string | null
+        production_report?: Record<string, unknown> | null
+        quality_gate?: Record<string, unknown> | null
+        retry_chapter_available?: boolean
         storyboard?: {
           id?: string
           index?: number
@@ -755,6 +763,7 @@ export const generationApi = {
       generated_duration_seconds?: number
       continuity_frame_count?: number
       cast_reference_url?: string
+      production_id?: string
     },
   ) =>
     api
@@ -836,6 +845,7 @@ export const generationApi = {
     revision_notes?: string
     phase?: string
     video_model?: string
+    session_id?: string
   }) =>
     api
       .post<{

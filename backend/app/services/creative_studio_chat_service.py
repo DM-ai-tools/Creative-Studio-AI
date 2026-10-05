@@ -74,6 +74,9 @@ CRITICAL:
 - NO burned-in text in image prompts (overlays go in scenes[].overlays and video_prompt).
 - video_prompt must include every scene as timed CLIP beats + overlay lines.
 - Product photo attachments = PRODUCT LOCK for product scenes only.
+- Character/presenter photo attachments = CHARACTER REFERENCE only (general visual guide for
+  clothing, age range, hairstyle, body type, presentation). Never write CHARACTER LOCK or ask
+  to preserve exact facial identity — generate a fictional presenter with similar characteristics.
 - Auto/Generate: draft_plan then system will auto-start storyboard generation.
 - Ask: intent=reply only.
 """
@@ -470,6 +473,7 @@ async def _start_job(
     storyboard_scenes: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
     prompt_only_video: bool = False,
+    session_id: str = "",
 ) -> str:
     import asyncio
 
@@ -508,6 +512,8 @@ async def _start_job(
             # Long Creative Studio films are reviewed one provider-sized chapter
             # at a time. The next paid call starts only after user approval.
             "interactive_staging": media_mode == "video" and duration_seconds > clip_cap,
+            # Stable key for the immutable production bible and chapter ledger.
+            "creative_studio_session_id": session_id,
         },
     )
     asyncio.create_task(run_creative_studio_job(job_id))
@@ -604,6 +610,7 @@ async def run_creative_studio_chat_turn(
     *,
     tenant_id: str,
     messages: list[dict[str, Any]],
+    session_id: str = "",
     mode: str = "auto",
     chat_model: str | None = None,
     duration_seconds: int | None = None,
@@ -1076,6 +1083,7 @@ async def run_creative_studio_chat_turn(
                 u for u in (storyboard_image_urls or []) if (u or "").strip()
             ][:9],
             prompt_only_video=prompt_only_video,
+            session_id=session_id,
         )
         audio_note = "with native audio" if sound_on else "silent"
         return {
@@ -1084,8 +1092,8 @@ async def run_creative_studio_chat_turn(
                 f"{out_aspect.replace('/', ':')} · {audio_note}. "
                 "Driving the FULL timed story from your brief"
                 + (
-                    " as direct Seedance chapters using only your uploaded references; "
-                    "no GPT-generated storyboard images."
+                    " as direct Seedance chapters using uploaded references as general visual "
+                    "guidance while generating a fictional character; no GPT-generated storyboard images."
                     if prompt_only_video
                     else " (approved still as opening frame, then progressing through each beat)."
                 )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -60,17 +61,71 @@ def _fit_audio_to_window(source: Path, target: Path, *, duration: float, window:
         raise RuntimeError("Cannot fit prepared narration to the requested timing")
 
 
+def _normalise_voice_line(path: Path) -> None:
+    """Give every cached line the same perceived loudness and microphone profile."""
+    target = path.with_suffix(".normalised.wav")
+    proc = subprocess.run(
+        [
+            require_ffmpeg(), "-v", "error", "-y", "-i", str(path),
+            "-af", "highpass=f=70,lowpass=f=14000,loudnorm=I=-16:TP=-1.5:LRA=7",
+            "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(target),
+        ],
+        capture_output=True,
+    )
+    if proc.returncode or not target.is_file():
+        target.unlink(missing_ok=True)
+        raise RuntimeError("Cannot normalise prepared narration")
+    target.replace(path)
+
+
+def slice_prepared_narration(
+    prepared: dict | None, *, start: float, end: float
+) -> tuple[list[tuple[float, float, str]], dict | None]:
+    """Rebase one immutable master-voice plan for a chapter preview."""
+    if not prepared:
+        return [], None
+    events: list[tuple[float, float, str]] = []
+    lines: list[dict] = []
+    for item in prepared.get("lines") or []:
+        a, b = float(item["start"]), float(item["end"])
+        if a < start - 0.01 or b > end + 0.01:
+            if a < end and b > start:
+                raise ValueError(
+                    "A narration line crosses a Seedance chapter boundary. Adjust its timing "
+                    "before generation so the same full line is never split between calls."
+                )
+            continue
+        if a >= start and b <= end:
+            local = (a - start, b - start, str(item["text"]))
+            events.append(local)
+            lines.append({**item, "start": local[0], "end": local[1]})
+    sliced = {**prepared, "lines": lines, "chapter_start": start, "chapter_end": end}
+    return events, sliced
+
+
 async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id: str,
                             brief: str = '') -> dict:
     if not settings.OPENAI_API_KEY:
         raise ValueError('OpenAI speech is not configured. Add OPENAI_API_KEY before generating a narrated video.')
     from app.services.usage_tracker import record_usage
     # Do not send camera directions or captions to the speech model.
-    style = ('An adult female commercial narrator with a warm, confident, quick conversational delivery. '
+    lower_brief = brief.lower()
+    female_requested = bool(re.search(r"\b(?:female voice|female presenter|woman presenter)\b", lower_brief))
+    male_requested = bool(re.search(r"\b(?:male voice|male presenter|man presenter)\b", lower_brief))
+    gender = "male" if male_requested and not female_requested else "female"
+    style = (f'One adult {gender} commercial narrator with a warm, confident, natural conversational delivery. '
+             'Keep the same pitch, pace, tone, energy, microphone distance and accent for the entire film. '
              'Speak only the supplied words. No introductions, additional words, music or effects. ')
     if 'australian' in brief.lower():
         style += 'Use a natural Australian English accent, consistently for every line. '
-    model, voice = 'gpt-4o-mini-tts', 'marin'
+    pace_match = re.search(r"(\d{2,3})\s*(?:[–—-]\s*(\d{2,3})\s*)?(?:wpm|words per minute)", lower_brief)
+    target_wpm = (
+        (int(pace_match.group(1)) + int(pace_match.group(2) or pace_match.group(1))) / 2
+        if pace_match else 155.0
+    )
+    target_wpm = max(115.0, min(180.0, target_wpm))
+    style += f'Use a steady natural pace near {target_wpm:.0f} words per minute. '
+    model, voice = 'gpt-4o-mini-tts', ('cedar' if gender == 'male' else 'marin')
     root = (Path(file_service.upload_dir) / tenant_id / 'narration').resolve()
     root.mkdir(parents=True, exist_ok=True)
     lines = []
@@ -84,6 +139,7 @@ async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id
             # deeply nested Windows/OneDrive workspaces.
             target = (root / (hashlib.sha256(identity.encode()).hexdigest()[:20] + '.wav')).resolve()
             cached = probe_video_duration(target)
+            prepared_now = False
             if cached is None or cached > window + 0.02:
                 if target.exists():
                     target.unlink(missing_ok=True)
@@ -94,12 +150,12 @@ async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id
                 temp_paths: list[Path] = []
                 try:
                     for attempt in range(3):
-                        delivery = window * (0.82, 0.60, 0.45)[attempt]
+                        delivery = window * (0.96, 0.88, 0.80)[attempt]
                         response = await client.post(
                             settings.OPENAI_BASE_URL.rstrip('/') + '/audio/speech',
                             headers={'Authorization': f'Bearer {settings.OPENAI_API_KEY}'},
                             json={'model': model, 'voice': voice, 'input': text, 'response_format': 'wav',
-                                  'instructions': style + f'Deliver this short phrase quickly, as a brief upbeat tag at the end of a commercial. Use a brisk, fluent delivery at about {max(3.5, len(text.split()) / delivery):.1f} words per second. Complete the entire line within {delivery:.2f} seconds. Begin immediately. No slow drawl, elongated vowels, or dramatic pauses. Speak the exact words in one fluid phrase.'},
+                                  'instructions': style + f'Deliver this line as part of one continuous commercial narration. Complete it naturally within {delivery:.2f} seconds. Begin immediately. No elongated vowels or dramatic pauses. Speak the exact words in one fluid phrase.'},
                         )
                         if response.status_code >= 400:
                             try:
@@ -158,8 +214,16 @@ async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id
                 finally:
                     for temp_path in temp_paths:
                         temp_path.unlink(missing_ok=True)
+                prepared_now = True
             duration = probe_video_duration(target)
             if duration is None or duration > window + 0.02:
                 raise ValueError('Prepared narration no longer matches the timing window')
+            if prepared_now:
+                _normalise_voice_line(target)
+                duration = probe_video_duration(target)
             lines.append({'start': start, 'end': end, 'text': text, 'path': str(target), 'duration': duration})
-    return {'provider': 'openai', 'model': model, 'voice': voice, 'lines': lines, 'ai_generated': True}
+    return {
+        'provider': 'openai', 'model': model, 'voice': voice,
+        'voice_profile_id': f'openai:{model}:{voice}:commercial-v1:-16lufs', 'target_lufs': -16.0,
+        'lines': lines, 'ai_generated': True,
+    }

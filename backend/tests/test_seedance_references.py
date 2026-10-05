@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from app.services.creative_studio_prompt_service import soften_character_reference_prompt
 from app.services.media.seedance_references import (
     filter_manifest_for_privacy_retry,
     reference_instructions,
@@ -341,6 +342,27 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         final_request = submit.call_args.kwargs
         self.assertIsNone(final_request["image_data_uri_or_url"])
         self.assertIsNone(final_request["extra_image_refs"])
+
+    def test_character_reference_instructions_are_privacy_safe(self):
+        manifest = reference_manifest(self.brief, None)
+        instructions = reference_instructions(manifest)
+        self.assertIn("CHARACTER REFERENCE", instructions)
+        self.assertIn("Do not reproduce or preserve the person's exact facial identity", instructions)
+        self.assertNotIn("preserve this person's face", instructions)
+
+
+class CharacterPromptSofteningTests(unittest.TestCase):
+    def test_character_lock_is_rewritten_for_seedance(self):
+        raw = (
+            "CHARACTER LOCK: Use the exact uploaded male presenter.\n"
+            "Scene 1 - OPENING | 0-6 seconds\nOpen."
+        )
+        softened = soften_character_reference_prompt(raw)
+        self.assertIn("CHARACTER REFERENCE:", softened)
+        self.assertNotIn("CHARACTER LOCK:", softened)
+        self.assertIn("general visual guide", softened)
+        self.assertIn("fictional presenter", softened)
+        self.assertNotIn("exact uploaded male presenter", softened)
 
 
 if __name__ == "__main__":

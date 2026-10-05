@@ -332,7 +332,9 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         use_multimodal = image_role == "reference_image" or len(manifest) > 1 or any(
             asset["role"] != "storyboard" for asset in manifest
         )
-        base_prompt = (prompt or "").strip()
+        from app.services.creative_studio_prompt_service import soften_character_reference_prompt
+
+        base_prompt = soften_character_reference_prompt((prompt or "").strip())
         cs_job_id = str(brief.get("creative_studio_job_id") or "").strip() or None
 
         def _cancel_check() -> bool:
@@ -405,7 +407,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         attempt_plan: list[tuple[str, list[dict[str, str]], bool, str, str | None]] = [
             ("full", manifest, use_multimodal, "", None),
         ]
-        if not strict_reference_lock:
+        if not strict_reference_lock and not bool(brief.get("production_lock_enforced")):
             if anchor_assets and anchor_assets != manifest:
                 attempt_plan.append(
                     ("anchors", anchor_assets, True, "", _PRIVACY_ANCHORS_WARNING),
@@ -561,8 +563,9 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 elif strict_character_reference:
                     err = (
                         "Seedance blocked the selected character reference as photoreal identity content. "
-                        "No replacement person was generated. Choose a non-photoreal or 2D character "
-                        "anchor, or remove the character lock and try again."
+                        "No replacement person was generated. Use the reference as general visual guidance "
+                        "only, choose a non-photoreal or 2D character anchor, or remove the character "
+                        "reference and try again."
                     )
                 elif strict_opening_reference:
                     err = (

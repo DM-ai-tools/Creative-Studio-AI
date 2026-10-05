@@ -814,7 +814,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CONTINUATION PASS", calls[1].kwargs["prompt"])
         self.assertTrue(calls[1].kwargs["brief"]["strict_continuity_reference"])
 
-    async def test_privacy_block_retries_with_scene_continuity_crop(self):
+    async def test_locked_production_does_not_drop_continuity_after_privacy_block(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
         from app.services.file_service import file_service
 
@@ -848,21 +848,12 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             await run_creative_studio_job(job_id)
 
         result = await get_job(job_id)
-        self.assertEqual(result["status"], "done", result.get("error"))
-        self.assertEqual(provider.generate.await_count, 3)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("blocked the previous chapter's continuity frame", result.get("error") or "")
+        self.assertEqual(provider.generate.await_count, 2)
         blocked = provider.generate.call_args_list[1].kwargs["brief"]
-        retry = provider.generate.call_args_list[2].kwargs["brief"]
         self.assertTrue(blocked["strict_continuity_reference"])
         self.assertIsNotNone(blocked["continuity_reference_url"])
-        self.assertFalse(retry["strict_continuity_reference"])
-        self.assertIsNone(retry["continuity_reference_url"])
-        self.assertIsNone(retry["cast_reference_url"])
-        self.assertTrue(any(
-            asset.get("role") == "scene" and "continuity-safe" in asset.get("url", "")
-            for asset in retry["reference_assets"]
-        ))
-        self.assertEqual(result["continuity_privacy_fallback_count"], 1)
-        self.assertFalse(result["partial"])
 
     async def test_worker_exposes_missing_audio_and_usage_through_api_schema(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
@@ -987,6 +978,10 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "app.services.media.seedance_multiscene.save_continuity_frame",
                 return_value="/files/test/final-frame.jpg",
+            ),
+            patch(
+                "app.services.creative_studio_quality_gate.chapter_quality_report",
+                return_value={"status": "passed", "checks": [], "failed_checks": []},
             ),
         ):
             await run_creative_studio_job(job_id)

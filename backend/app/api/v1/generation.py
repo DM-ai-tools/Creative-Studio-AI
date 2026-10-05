@@ -1404,6 +1404,10 @@ class CreativeStudioGenerateResponse(BaseModel):
     product_reference_url: str | None = None
     continuation_available: bool = False
     completed_segments: int | None = None
+    production_id: str | None = None
+    production_report: dict | None = None
+    quality_gate: dict | None = None
+    retry_chapter_available: bool = False
 
 
 class CreativeStudioRecoverContinuationRequest(BaseModel):
@@ -1414,6 +1418,7 @@ class CreativeStudioRecoverContinuationRequest(BaseModel):
     generated_duration_seconds: int | None = None
     continuity_frame_count: int | None = None
     cast_reference_url: str | None = None
+    production_id: str | None = None
 
 
 class CreativeStudioPromptRequest(BaseModel):
@@ -1478,6 +1483,7 @@ class CreativeStudioChatRequest(BaseModel):
     storyboard_image_urls: list[str] = Field(default_factory=list)
     prompt_only_video: bool = False
     video_model: str = "ark-seedance-2-0"
+    session_id: str = Field(default="", max_length=160)
 
 
 class CreativeStudioChatResponse(BaseModel):
@@ -1591,6 +1597,7 @@ async def creative_studio_chat(
         result = await run_creative_studio_chat_turn(
             tenant_id=str(current_user.tenant_id),
             messages=msgs,
+        session_id=data.session_id,
         mode=data.mode,
         chat_model=data.chat_model,
         duration_seconds=data.duration_seconds,
@@ -1752,6 +1759,10 @@ async def creative_studio_job_status(
         product_reference_url=job.get("product_reference_url"),
         continuation_available=bool(job.get("continuation_available")),
         completed_segments=job.get("completed_segments"),
+        production_id=job.get("production_id"),
+        production_report=job.get("production_report"),
+        quality_gate=job.get("quality_gate"),
+        retry_chapter_available=bool(job.get("retry_chapter_available")),
     )
 
 
@@ -1783,6 +1794,7 @@ async def creative_studio_job_continue(
                 generated_duration_seconds=data.generated_duration_seconds,
                 continuity_frame_count=data.continuity_frame_count,
                 cast_reference_url=data.cast_reference_url,
+                production_id=data.production_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

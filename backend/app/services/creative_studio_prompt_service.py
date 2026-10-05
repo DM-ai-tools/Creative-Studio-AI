@@ -52,6 +52,49 @@ NO morphing between scenes — use clear cuts only.
 """.strip()
 
 
+_SOFT_CHARACTER_REFERENCE = (
+    "Use the uploaded reference only as a general visual guide for clothing, age range, "
+    "hairstyle, body type, and overall presentation. Do not reproduce or preserve the "
+    "person's exact facial identity. Generate a fictional presenter with similar general "
+    "characteristics."
+)
+
+
+def soften_character_reference_prompt(prompt: str) -> str:
+    """Rewrite strict character-lock language for Seedance privacy safety."""
+    text = (prompt or "").strip()
+    if not text:
+        return text
+    text = re.sub(r"(?i)CHARACTER\s+LOCK\s*:", "CHARACTER REFERENCE:", text)
+    text = re.sub(
+        r"(?i)Use the exact uploaded\s+(?:male\s+|female\s+)?presenter\.?",
+        _SOFT_CHARACTER_REFERENCE,
+        text,
+    )
+    text = re.sub(
+        r"(?i)preserve (?:this person's|the person's|their) exact (?:facial )?identity",
+        "use the uploaded reference only as general visual guidance without reproducing exact facial identity",
+        text,
+    )
+    text = re.sub(
+        r"(?i)CAST CONTINUITY:\s*keep the same person identity, face, hair, and wardrobe[^.]*\.",
+        (
+            "CAST CONTINUITY: keep a consistent fictional presenter with similar clothing, age "
+            "range, hairstyle, body type, and wardrobe when people appear — do not swap models "
+            "between scenes and do not reproduce any real person's exact facial identity."
+        ),
+        text,
+    )
+    if re.search(r"(?i)CHARACTER\s+REFERENCE\s*:", text) and _SOFT_CHARACTER_REFERENCE not in text:
+        text = re.sub(
+            r"(?i)(CHARACTER\s+REFERENCE\s*:)\s*[^\n]+",
+            rf"\1 {_SOFT_CHARACTER_REFERENCE}",
+            text,
+            count=1,
+        )
+    return text
+
+
 def sanitize_visual_prompt(prompt: str) -> str:
     """Strip overlay/caption instructions; keep Seedance structure intact."""
     text = (prompt or "").strip()
@@ -64,6 +107,7 @@ def sanitize_visual_prompt(prompt: str) -> str:
         text,
     )
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = soften_character_reference_prompt(text)
     if "STRICT NEGATIVE" not in text.upper() and "NO on-screen text" not in text:
         text = f"{text.rstrip()}\n\n{_STRICT_NEGATIVES}"
     return text[:_PROMPT_MAX]

@@ -189,6 +189,7 @@ async def recover_continuation_job(
     generated_duration_seconds: int | None = None,
     continuity_frame_count: int | None = None,
     cast_reference_url: str | None = None,
+    production_id: str | None = None,
 ) -> dict[str, Any]:
     """Rebuild a staged continuation after the in-memory job store was lost."""
     from app.services.logo_overlay import file_url_to_local_path
@@ -213,6 +214,7 @@ async def recover_continuation_job(
             "continuity_privacy_fallback_count": 0,
             "generated_duration_seconds": int(generated_duration_seconds or 0),
             "interactive_staging": int(segment_count or 0) > 1,
+            "production_id": production_id,
         }
     )
     async with _LOCK:
@@ -534,8 +536,10 @@ async def run_creative_studio_job(job_id: str) -> None:
                     )
                     if not re.search(r"(?i)cast continuity", sp):
                         sp = (
-                            f"{sp} CAST CONTINUITY: keep the same person identity, face, hair, "
-                            "and wardrobe when people appear — do not swap models between scenes."
+                            f"{sp} CAST CONTINUITY: keep a consistent fictional presenter with "
+                            "similar clothing, age range, hairstyle, body type, and wardrobe when "
+                            "people appear — do not swap models between scenes and do not "
+                            "reproduce any real person's exact facial identity."
                         )
                 if brand_name:
                     sp = (
@@ -694,6 +698,23 @@ async def run_creative_studio_job(job_id: str) -> None:
         )
 
         finishing_brief = str(data.get("source_brief") or visual_prompt or "")
+        from app.services.creative_studio_production_memory import (
+            ensure_production_memory,
+            load_production_memory,
+            normalized_reference_lock,
+        )
+
+        production_session_id = str(
+            data.get("creative_studio_session_id")
+            or data.get("production_session_id")
+            or job_id
+        ).strip()
+        existing_production = load_production_memory(tenant_id, production_session_id)
+        if existing_production and existing_production.get("chapter_log"):
+            # Continue from the immutable full-film brief. A short button message or
+            # revised per-chapter prompt must never erase cast/style/story context.
+            finishing_brief = str(existing_production.get("canonical_prompt") or finishing_brief)
+            visual_prompt = finishing_brief
         if use_byteplus and requested_duration > clip_cap:
             # The user's timed brief is authoritative. A later planning rewrite
             # can round its final timestamp (for example 26s to 25s/30s); choose
@@ -728,6 +749,30 @@ async def run_creative_studio_job(job_id: str) -> None:
             voice_events = normalize_voiceover_windows(
                 voice_events, duration_seconds=requested_duration,
             )
+        reference_lock = normalized_reference_lock(
+            list(data.get("reference_assets") or []),
+            product_reference_url=str(data.get("product_reference_url") or "").strip() or None,
+            logo_reference_url=str(data.get("logo_reference_url") or "").strip() or None,
+        )
+        production_memory = ensure_production_memory(
+            tenant_id=tenant_id,
+            session_id=production_session_id,
+            prompt=finishing_brief,
+            duration_seconds=requested_duration,
+            clip_cap=clip_cap,
+            aspect=str(data.get("aspect") or "9/16"),
+            resolution=str(data.get("resolution") or "1080p"),
+            model=model,
+            brand_name=str(data.get("brand_name") or ""),
+            product_name=str(data.get("product_name") or ""),
+            voice_events=voice_events,
+            references=reference_lock,
+            storyboard_count=(
+                0 if prompt_only_video else len(list(data.get("storyboard_image_urls") or []))
+            ),
+        )
+        data["production_id"] = production_memory["production_id"]
+        data["production_session_id"] = production_session_id
         from app.services.creative_studio_preflight import validate_video_preflight
         preflight_report = validate_video_preflight(
             prompt=visual_prompt,
@@ -757,16 +802,12 @@ async def run_creative_studio_job(job_id: str) -> None:
                     voice_events, tenant_id=tenant_id, brief=finishing_brief,
                 )
             except (ValueError, RuntimeError, OSError) as exc:
-                if use_byteplus:
-                    logger.warning(
-                        "TTS preflight failed for Seedance; using native audio instead: %s",
-                        exc,
-                    )
-                    timed_tts = False
-                    prepared_narration = None
-                    narration_fallback = True
-                else:
-                    raise
+                # Never silently switch a staged film to a different native
+                # Seedance speaker. Stop before the paid video request.
+                raise ValueError(
+                    "The locked master narration could not be prepared. No Seedance video was "
+                    f"submitted. Fix the narration timing or TTS configuration and retry: {exc}"
+                ) from exc
         if use_byteplus:
             from app.services.creative_studio_picture import compile_picture_prompt
             visual_prompt = compile_picture_prompt(visual_prompt, duration=requested_duration)
@@ -893,7 +934,9 @@ async def run_creative_studio_job(job_id: str) -> None:
             if data.get("product_reference_url")
             else ""
         )
-        motion_prompt = motion_prompt + product_lock
+        from app.services.creative_studio_prompt_service import soften_character_reference_prompt
+
+        motion_prompt = soften_character_reference_prompt(motion_prompt + product_lock)
         motion_prompt = (
             motion_prompt
             + "\n\nFINISHING LOCK: Generate clean footage without readable captions, title cards, "
@@ -910,7 +953,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                 motion_prompt = motion_prompt.replace(line, "[Narration supplied in post-production]")
             motion_prompt += (
                 "\nAUDIO: Generate ambience and foley only. NO speech, dialogue or narration; "
-                "the exact voiceover is mixed separately. Never read production directions aloud."
+                "the exact voiceover is mixed separately. Never read production directions aloud. "
+                "VISIBLE PERFORMANCE: nobody on screen speaks or mouths the narration. Keep mouths "
+                "naturally closed between subtle reactions; narration is strictly off-camera."
             )
         elif sound_on and voice_events:
             motion_prompt += "\nAUDIO: Speak only the exact labelled narration at its specified times. Never read production directions.\n"
@@ -941,19 +986,22 @@ async def run_creative_studio_job(job_id: str) -> None:
             "creative_studio_mode": True,
             "skip_voiceover": skip_vo,
             # Lock narration in post while retaining Seedance ambience and foley.
-            "creative_studio_generate_audio": bool(sound_on),
+            # Exact narration owns the complete audio identity. Native provider
+            # audio can introduce a second speaker and a different mix per call.
+            "creative_studio_generate_audio": bool(sound_on and not timed_tts),
             "creative_studio_job_id": job_id,
             "seed_image_role": seed_image_role,
             "storyboard_image_urls": [] if prompt_only_video else list(data.get("storyboard_image_urls") or [])[:9],
             "product_reference_url": str(data.get("product_reference_url") or "").strip() or None,
             "additional_reference_urls": list(data.get("additional_reference_urls") or [])[:7],
             "reference_assets": list(data.get("reference_assets") or []),
+            # A locked production must never discard its character reference and
+            # continue as an unrelated text-to-video cast.
             "strict_character_reference": any(
-                isinstance(asset, dict)
-                and asset.get("role") == "character"
-                and str(asset.get("url") or "").strip()
-                for asset in data.get("reference_assets") or []
+                asset.get("role") == "character" for asset in reference_lock
             ),
+            "production_lock_enforced": True,
+            "production_id": production_memory["production_id"],
             "logo_reference_url": str(data.get("logo_reference_url") or "").strip() or None,
             "prompt_only_video": prompt_only_video,
         }
@@ -1009,22 +1057,38 @@ async def run_creative_studio_job(job_id: str) -> None:
                 if exact_storyboard_mode
                 else coalesce_shot_windows(shot_windows, clip_cap) if shot_windows else []
             )
+            locked_windows = [
+                (float(item["start"]), float(item["end"]))
+                for item in production_memory.get("shot_list") or []
+            ]
+            if locked_windows:
+                chapter_windows = locked_windows
             segment_durations = [b - a for a, b in chapter_windows] or _seedance_segment_durations(
                 generate_duration, clip_cap
             )
             interactive_staging = bool(data.get("interactive_staging")) and len(segment_durations) > 1
-            stage_index = max(0, min(
-                int(data.get("stage_index") or 0), len(segment_durations) - 1
-            ))
+            accepted_log = list(production_memory.get("chapter_log") or [])
+            resumed_index = len(accepted_log) if data.get("stage_index") is None else int(data.get("stage_index") or 0)
+            stage_index = max(0, min(resumed_index, len(segment_durations) - 1))
             generated_seconds = int(data.get("generated_duration_seconds") or 0)
             segment_paths: list[Path] = [
                 Path(value) for value in (data.get("staged_segment_paths") or [])
                 if Path(value).is_file()
             ]
+            if not segment_paths and accepted_log:
+                segment_paths = [
+                    Path(str(item.get("video_path") or ""))
+                    for item in accepted_log
+                    if Path(str(item.get("video_path") or "")).is_file()
+                ]
             segment_results: list[dict[str, Any]] = []
             partial_warning: str | None = None
             continuity_reference_url: str | None = data.get("continuity_reference_url") or None
             cast_reference_url: str | None = data.get("cast_reference_url") or None
+            if accepted_log and not continuity_reference_url:
+                continuity_reference_url = str(
+                    accepted_log[-1].get("continuity_frame_url") or ""
+                ).strip() or None
             continuity_frame_count = int(data.get("continuity_frame_count") or 0)
             continuity_privacy_fallback_count = int(
                 data.get("continuity_privacy_fallback_count") or 0
@@ -1034,8 +1098,10 @@ async def run_creative_studio_job(job_id: str) -> None:
             segment_prompts: list[str] = []
             offset = 0
             for segment_index, seconds in enumerate(segment_durations):
-                local_prompt = segment_motion_prompt(
-                    motion_prompt, start=offset, end=offset + seconds, total=generate_duration
+                from app.services.creative_studio_production_memory import compile_locked_chapter_prompt
+
+                local_prompt = compile_locked_chapter_prompt(
+                    production_memory, chapter_index=segment_index,
                 )
                 # Timeline slicing keeps only the current authored beat. Repeat
                 # the brand invariant on every billable scene request so it can
@@ -1044,11 +1110,13 @@ async def run_creative_studio_job(job_id: str) -> None:
                     local_prompt += "\n\n" + brand_surface_lock()
                 if prompt_only_video and (segment_index == 0 or not interactive_staging):
                     local_prompt += (
-                        "\n\nDIRECT UPLOAD-GUIDED CHAPTER: Use only the explicitly uploaded "
-                        "product, character and scene references. No GPT-generated storyboard "
-                        "or generated continuity frame is attached to the first chapter. Follow the written character, "
-                        "product, environment, camera and brand locks exactly. "
-                        "Render only this chapter's authored time range; do not recap earlier beats."
+                        "\n\nDIRECT UPLOAD-GUIDED CHAPTER: Use uploaded references as general "
+                        "visual guidance while generating a fictional character. Use the "
+                        "explicitly uploaded product, character and scene references for clothing, "
+                        "styling, environment and product identity — not for exact facial "
+                        "reproduction. No GPT-generated storyboard or generated continuity frame "
+                        "is attached to the first chapter. Render only this chapter's authored "
+                        "time range; do not recap earlier beats."
                     )
                 # Validate the complete first-pass prompt for every chapter before
                 # submitting any billable task. Continuation instructions are short
@@ -1085,6 +1153,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                     return
                 segment_start = elapsed
                 segment_end = elapsed + segment_duration
+                chapter_input_continuity_url = continuity_reference_url
                 chapter_storyboard_urls: list[str] = []
                 if storyboard_urls:
                     board_index = next(
@@ -1431,7 +1500,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                                         "face-free crop…"
                                     ),
                                 )
-                            elif privacy_blocked and not brief.get("strict_character_reference"):
+                            elif (
+                                privacy_blocked
+                                and not brief.get("strict_character_reference")
+                                and not brief.get("production_lock_enforced")
+                            ):
                                 use_privacy_safe_handoff = True
                                 await update_job(
                                     job_id,
@@ -1562,7 +1635,110 @@ async def run_creative_studio_job(job_id: str) -> None:
                         suffix=".mp4",
                         content_type="video/mp4",
                     )
+                    from app.services.creative_studio_quality_gate import chapter_quality_report
+                    from app.services.creative_studio_production_memory import (
+                        append_chapter_log,
+                        public_production_report,
+                    )
+
+                    quality_gate = chapter_quality_report(
+                        preview_path,
+                        expected_duration=float(segment_duration),
+                        previous_continuity_url=chapter_input_continuity_url,
+                        references_locked=(
+                            list(production_memory.get("reference_lock") or [])
+                            == normalized_reference_lock(
+                                list(brief.get("reference_assets") or []),
+                                product_reference_url=brief.get("product_reference_url"),
+                                logo_reference_url=data.get("logo_reference_url"),
+                            )
+                            and bool(production_memory.get("reference_lock_sha256"))
+                        ),
+                    )
                     completed = segment_index + 1
+                    if quality_gate.get("status") != "passed":
+                        await update_job(
+                            job_id,
+                            status="done",
+                            progress=(
+                                f"Chapter {completed}/{len(segment_durations)} failed continuity QA"
+                            ),
+                            error=None,
+                            result={
+                                "status": "done",
+                                "url": saved_part["file_url"],
+                                "model": str((segment_results[-1] or {}).get("model") or model),
+                                "provider": "byteplus",
+                                "duration_seconds": int(round(preview_duration)),
+                                "requested_duration_seconds": generate_duration,
+                                "segment_count": len(segment_durations),
+                                "completed_segments": segment_index,
+                                "continuation_available": False,
+                                "retry_chapter_available": True,
+                                "partial": True,
+                                "quality_gate": quality_gate,
+                                "production_id": production_memory["production_id"],
+                                "production_report": public_production_report(production_memory),
+                                "note": (
+                                    f"Chapter {completed} was rejected by the local quality gate "
+                                    f"({', '.join(quality_gate.get('failed_checks') or [])}). "
+                                    "Generate again in this same chat to retry only this chapter; "
+                                    "earlier accepted chapters and the locked production package are preserved."
+                                ),
+                            },
+                        )
+                        return
+
+                    review_url = str(saved_part["file_url"])
+                    if timed_tts:
+                        from app.services.creative_studio_speech import slice_prepared_narration
+                        from app.services.creative_studio_video_finishing import apply_timed_voiceover
+
+                        chapter_events, chapter_narration = slice_prepared_narration(
+                            prepared_narration, start=segment_start, end=segment_end,
+                        )
+                        if chapter_events:
+                            review_url, voice_preview = await apply_timed_voiceover(
+                                review_url,
+                                chapter_events,
+                                tenant_id=tenant_id,
+                                prepared_narration=chapter_narration,
+                                allow_time_stretch=False,
+                            )
+                            if voice_preview.get("status") != "done":
+                                raise RuntimeError(
+                                    "Chapter narration preview failed; the chapter was not accepted: "
+                                    + str(voice_preview.get("error") or voice_preview.get("reason"))
+                                )
+
+                    from app.services.creative_studio_video_finishing import (
+                        apply_timed_overlays,
+                        extract_overlay_events,
+                    )
+                    chapter_overlays = [
+                        (max(a, segment_start) - segment_start,
+                         min(b, segment_end) - segment_start, text)
+                        for a, b, text in extract_overlay_events(finishing_brief)
+                        if a < segment_end and b > segment_start
+                    ]
+                    if chapter_overlays:
+                        review_url, _ = apply_timed_overlays(
+                            review_url, chapter_overlays, tenant_id=tenant_id,
+                        )
+
+                    append_chapter_log(
+                        tenant_id,
+                        production_memory,
+                        chapter_index=segment_index,
+                        video_url=review_url,
+                        video_path=str(preview_path),
+                        duration_seconds=preview_duration,
+                        continuity_frame_url=continuity_reference_url,
+                        qa=quality_gate,
+                        provider_task_id=str(
+                            (segment_results[-1] or {}).get("task_id") or ""
+                        ) or None,
+                    )
                     await update_job(
                         job_id,
                         status="done",
@@ -1570,7 +1746,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         error=None,
                         result={
                             "status": "done",
-                            "url": saved_part["file_url"],
+                            "url": review_url,
                             "model": str((segment_results[-1] or {}).get("model") or model),
                             "provider": "byteplus",
                             "duration_seconds": int(round(preview_duration)),
@@ -1582,6 +1758,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                             "continuity_frame_count": continuity_frame_count,
                             "continuity_privacy_fallback_count": continuity_privacy_fallback_count,
                             "partial": True,
+                            "quality_gate": quality_gate,
+                            "production_id": production_memory["production_id"],
+                            "production_report": public_production_report(production_memory),
                             "note": (
                                 f"Part {completed}/{len(segment_durations)} is ready. Review this "
                                 "chapter, then generate the next part. The next Seedance call will "
@@ -1597,6 +1776,60 @@ async def run_creative_studio_job(job_id: str) -> None:
                         },
                     )
                     return
+
+            final_chapter_quality: dict[str, Any] | None = None
+            final_chapter_preview_path: Path | None = None
+            if interactive_staging and len(accepted_log) < len(segment_durations):
+                new_paths = segment_paths[len(accepted_log):]
+                if new_paths:
+                    if len(new_paths) == 1:
+                        final_chapter_preview_path = new_paths[0]
+                    else:
+                        preview_dir = (
+                            Path(file_service.upload_dir) / tenant_id / "generated" / "seedance-stitch"
+                        ).resolve()
+                        preview_dir.mkdir(parents=True, exist_ok=True)
+                        final_chapter_preview_path = preview_dir / f"final-part-{job_id[:12]}.mp4"
+                        concat_video_files(new_paths, final_chapter_preview_path)
+                    from app.services.creative_studio_quality_gate import chapter_quality_report
+
+                    final_chapter_quality = chapter_quality_report(
+                        final_chapter_preview_path,
+                        expected_duration=float(segment_durations[-1]),
+                        previous_continuity_url=chapter_input_continuity_url,
+                        references_locked=bool(production_memory.get("reference_lock_sha256")),
+                    )
+                    if final_chapter_quality.get("status") != "passed":
+                        rejected = file_service.save_bytes(
+                            content=final_chapter_preview_path.read_bytes(),
+                            tenant_id=tenant_id,
+                            subfolder="generated",
+                            suffix=".mp4",
+                            content_type="video/mp4",
+                        )
+                        from app.services.creative_studio_production_memory import public_production_report
+
+                        await update_job(
+                            job_id,
+                            status="done",
+                            progress="Final chapter failed continuity QA",
+                            error=None,
+                            result={
+                                "status": "done", "url": rejected["file_url"],
+                                "provider": "byteplus", "model": model,
+                                "requested_duration_seconds": generate_duration,
+                                "segment_count": len(segment_durations),
+                                "completed_segments": len(accepted_log),
+                                "continuation_available": False,
+                                "retry_chapter_available": True,
+                                "partial": True,
+                                "quality_gate": final_chapter_quality,
+                                "production_id": production_memory["production_id"],
+                                "production_report": public_production_report(production_memory),
+                                "note": "The final chapter was rejected. Generate again in this same chat to retry only the final chapter.",
+                            },
+                        )
+                        return
 
             if not segment_paths:
                 raise RuntimeError(
@@ -1679,6 +1912,26 @@ async def run_creative_studio_job(job_id: str) -> None:
                     "reason": "Seedance native audio" if sound_on else "Sound off",
                 },
             }
+            if final_chapter_quality and final_chapter_preview_path:
+                from app.services.creative_studio_production_memory import (
+                    append_chapter_log,
+                    public_production_report,
+                )
+
+                append_chapter_log(
+                    tenant_id,
+                    production_memory,
+                    chapter_index=len(segment_durations) - 1,
+                    video_url=str(saved["file_url"]),
+                    video_path=str(final_chapter_preview_path),
+                    duration_seconds=float(segment_durations[-1]),
+                    continuity_frame_url=continuity_reference_url,
+                    qa=final_chapter_quality,
+                    provider_task_id=str((segment_results[-1] or {}).get("task_id") or "") or None,
+                )
+                result["quality_gate"] = final_chapter_quality
+                result["production_id"] = production_memory["production_id"]
+                result["production_report"] = public_production_report(production_memory)
         else:
             result = await vid_provider.generate(
                 prompt=validate_video_prompt(motion_prompt + "\n" + native_narration(0, generate_duration)),
