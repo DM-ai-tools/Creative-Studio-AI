@@ -67,6 +67,7 @@ import {
 import { buildModelSelectGroups } from '@/lib/modelCatalog'
 import { buildBriefExportPayload, downloadBriefExcel } from '@/lib/exportBriefExcel'
 import { assignAnglesToVariants } from '@/lib/adAngles'
+import { UI } from '@/lib/uiLabels'
 import type { AdFormat, Brand, BrandFacts, BrandKit, BriefReferenceImage, CatalogOption, CompetitorCandidate, CompetitorSocialInsight, PerformanceStatsContext, SocialStyleProfile, StrategyParseResult, StrategyPreviewResult, WebsiteBrandFetchResult } from '@/types'
 import {
   buildCompetitorCandidateOptions,
@@ -2422,15 +2423,15 @@ export default function BriefComposer(_props: BriefComposerProps) {
     <div className="min-h-full app-mesh-bg">
       <header className="sticky top-0 z-20 glass-topbar flex items-center justify-between px-6 py-4">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold text-charcoal tracking-tight">Create Brief</h1>
+          <h1 className="text-xl font-bold text-charcoal tracking-tight">{UI.createProject}</h1>
           <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full">
             {mediaType === 'image'
               ? 'Image'
               : mediaType === 'video'
                 ? 'Video'
                 : mediaType === 'hero_ai_image'
-                  ? 'Hero AI Image'
-                  : 'Creative Studio'}
+                  ? UI.imageAdFromPhoto
+                  : UI.aiAssistant}
           </span>
         </div>
         <Button type="submit" form="brief-form" variant="outline" size="sm" disabled={isSubmitting}>
@@ -2444,8 +2445,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
           {([
             { id: 'image' as const,            label: 'Image',           hint: 'Static & carousel ads' },
             { id: 'video' as const,            label: 'Video',           hint: 'Portrait & landscape' },
-            { id: 'hero_ai_image' as const,   label: 'Hero AI Image',   hint: 'Upload and burn exact copy' },
-            { id: 'creative_studio' as const,  label: 'Creative Studio', hint: 'Chat playground · Seedance', badge: 'NEW' },
+            { id: 'hero_ai_image' as const,   label: UI.imageAdFromPhoto, hint: UI.addTextToImage },
+            { id: 'creative_studio' as const,  label: UI.aiAssistant, hint: 'Chat playground · Seedance', badge: 'NEW' },
           ]).map((tab) => (
             <button
               key={tab.id}
@@ -2499,7 +2500,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
               ? selectedBrandKit.logo_variations.on_light
               : undefined
           }
-          briefTitle={watch('title') || 'Hero AI Image'}
+          briefTitle={watch('title') || UI.imageAdFromPhoto}
         />
       )}
 
@@ -3158,7 +3159,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
               error={errors.objective_id?.message}
             />
             <Input
-              label="Target Variants"
+              label={UI.numberOfCreatives}
               type="number"
               min={1}
               max={100}
@@ -3342,8 +3343,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 {isSeedanceVideo ? (
                   <>
                     <strong>Seedance</strong> builds ads up to <strong>1m 30s</strong> as multiple{' '}
-                    <strong>15s B-roll scenes</strong> (from your scene directions), then stitches
-                    them. Add scene B-roll in the script step for best results. Voiceover/captions
+                    <strong>15s supporting scenes</strong> (from your scene directions), then stitches
+                    them. Add supporting scenes in the script step for best results. Voiceover/captions
                     are added after render.
                   </>
                 ) : (
@@ -3602,7 +3603,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
           {!hideCampaignDetailSteps && mediaType === 'video' && (
           <BriefSection title="Script & Content" step="5">
             <Input
-              label="Hero Product (optional)"
+              label={`${UI.productOrService} (optional)`}
               placeholder="e.g. General & Cosmetic Dentistry"
               error={errors.product_name?.message}
               {...register('product_name')}
@@ -3628,7 +3629,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                   isLoading={generatingNotes}
                   onClick={() => void handleGenerateScriptNotes()}
                 >
-                  Generate script using ICP
+                  {UI.draftScriptForAudience}
                 </Button>
               </div>
               <TextArea
@@ -3637,7 +3638,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 placeholder={
                   wantsVideo && isHeyGen
                     ? 'Writer directions: themes, tone, what to mention — not the words the avatar speaks aloud.'
-                    : 'What should the ad say? Paste script ideas or talking points — or click Generate script using ICP above.'
+                    : `What should the ad say? Paste script ideas or talking points — or click ${UI.draftScriptForAudience} above.`
                 }
                 error={errors.notes?.message}
                 {...register('notes')}
@@ -3646,7 +3647,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 {wantsVideo && isHeyGen ? (
                   <>
                     Optional — skip if you paste your full script in <strong>step 8</strong>. Otherwise use{' '}
-                    <strong>Generate script using ICP</strong> here, then <strong>Approve</strong> in step 8.
+                    <strong>{UI.draftScriptForAudience}</strong> here, then <strong>Approve</strong> in step 8.
                   </>
                 ) : (
                   'Optional. Builds an ICP from audience + offer when those fields are filled.'

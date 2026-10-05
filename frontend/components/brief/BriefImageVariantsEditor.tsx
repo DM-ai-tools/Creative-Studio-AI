@@ -141,10 +141,10 @@ export default function BriefImageVariantsEditor({
           onChange={onChange}
           generatingIndex={null}
           onGenerateSlot={() =>
-            toast('Regenerate AI plans from Create Brief, then edit and save here')
+            toast('Regenerate AI plans from New project, then edit and save here')
           }
           onGenerateAll={() =>
-            toast('Regenerate AI plans from Create Brief, then edit and save here')
+            toast('Regenerate AI plans from New project, then edit and save here')
           }
           angleOptions={angleOptions}
           catalogProducts={catalogProductsFromBrief(brief)}

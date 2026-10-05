@@ -99,14 +99,14 @@ export default function VariantsPage() {
 
   const handleRefresh = () => {
     void refetch()
-    toast.success('Refreshing variants…')
+    toast.success('Refreshing creatives…')
   }
 
   return (
     <div>
       <Topbar
-        title={selectedBrief ? `Variant Library · ${selectedBrief.title}` : 'Variant Library'}
-        subtitle={`${filtered.length} variant${filtered.length !== 1 ? 's' : ''}`}
+        title={selectedBrief ? `Creative library · ${selectedBrief.title}` : 'Creative library'}
+        subtitle={`${filtered.length} creative${filtered.length !== 1 ? 's' : ''}`}
         actions={
           <>
             <Button variant="outline" size="sm" onClick={handleRefresh}>
@@ -121,7 +121,7 @@ export default function VariantsPage() {
       <div className="px-5 py-3 bg-white border-b border-border flex flex-wrap gap-2">
         {briefFilter !== 'all' && selectedBrief && (
           <ChipToggle
-            label={`Brief: ${selectedBrief.title} ✕`}
+            label={`Project: ${selectedBrief.title} ✕`}
             selected
             onToggle={() => setBriefFilter('all')}
           />
@@ -145,7 +145,7 @@ export default function VariantsPage() {
         {(briefs ?? []).slice(0, 4).map((brief) => (
           <ChipToggle
             key={brief.id}
-            label={`Brief: ${brief.title}`}
+            label={`Project: ${brief.title}`}
             selected={briefFilter === brief.id}
             onToggle={() => setBriefFilter(briefFilter === brief.id ? 'all' : brief.id)}
           />
@@ -155,7 +155,7 @@ export default function VariantsPage() {
       <div className="p-5 space-y-4">
         {error ? (
           <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            <p className="font-semibold">Could not load variants</p>
+            <p className="font-semibold">Could not load creatives</p>
             <p className="text-xs mt-1">{typeof error === 'string' ? error : 'Request failed'}</p>
             <Button variant="outline" size="sm" className="mt-2" onClick={handleRefresh}>
               Try again
@@ -165,10 +165,10 @@ export default function VariantsPage() {
 
         {!isLoading && !error && filtered.length === 0 && readyBriefs.length > 0 ? (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-            <p className="font-semibold">Variants exist on briefs but aren’t showing here</p>
+            <p className="font-semibold">Creatives exist on projects but aren’t showing here</p>
             <p className="text-xs mt-1">
-              Open a brief below to view them, or click Refresh. Your latest brief has{' '}
-              {readyBriefs[0]?.completed_variants}/{readyBriefs[0]?.variant_count} variants.
+              Open a project below to view them, or click Refresh. Your latest project has{' '}
+              {readyBriefs[0]?.completed_variants}/{readyBriefs[0]?.variant_count} creatives.
             </p>
             <div className="mt-2 flex flex-wrap gap-2">
               {readyBriefs.slice(0, 5).map((b) => (

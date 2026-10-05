@@ -150,7 +150,7 @@ function buildBriefOverviewSheet(payload: BriefExportPayload): Array<[string, st
   add('Step 1 — Campaign & Brand', 'Campaign Name', payload.step1.campaign_name)
   add('Step 1 — Campaign & Brand', 'Brand', payload.step1.brand_name)
   add('Step 1 — Campaign & Brand', 'Objective', payload.step1.objective)
-  add('Step 1 — Campaign & Brand', 'Target Variants', payload.step1.target_variants)
+  add('Step 1 — Campaign & Brand', 'Number of creatives', payload.step1.target_variants)
 
   add('Step 2 — Creative Formats', 'Creative Formats', payload.step2.creative_formats)
   add('Step 2 — Creative Formats', 'Aspect Ratio', payload.step2.aspect_ratio_hint)
@@ -171,7 +171,7 @@ function buildBriefOverviewSheet(payload: BriefExportPayload): Array<[string, st
   add('Step 4 — Platform & Placement', 'Placements', payload.step4.placements)
   add('Step 4 — Platform & Placement', 'Hook Frameworks', payload.step4.hook_frameworks)
 
-  add('Step 5 — Script & Content', 'Hero Product', payload.step5.hero_product)
+  add('Step 5 — Script & Content', 'Product or service', payload.step5.hero_product)
   add('Step 5 — Script & Content', 'Offer / Key Message', payload.step5.offer_key_message)
   add('Step 5 — Script & Content', 'Creative Brief Notes', payload.step5.creative_brief_notes)
 

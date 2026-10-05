@@ -643,7 +643,7 @@ export default function AvatarScriptPanel({
               onClick={() => void runIcpGenerate('default')}
               title="Builds an ICP profile from your Target Audience + Offer, then writes the script"
             >
-              Generate script using ICP
+              Draft script for this audience
             </Button>
           )}
           <Button
@@ -665,7 +665,7 @@ export default function AvatarScriptPanel({
       </p>
 
       <p className="text-[11px] text-mid mb-2 rounded-lg bg-violet-50 border border-violet-200/80 px-3 py-2 text-violet-900">
-        <strong>Generate script using ICP</strong> builds a buyer profile from your{' '}
+        <strong>Draft script for this audience</strong> builds a buyer profile from your{' '}
         <strong>Target Audience</strong> and <strong>Offer</strong> fields, then writes dialogue
         that speaks directly to that avatar's pain and desire.
       </p>
@@ -972,7 +972,7 @@ export default function AvatarScriptPanel({
 
       {!showPreview && (
         <p className="text-[11px] text-mid mt-3">
-          Click <strong>Generate script using ICP</strong> (recommended) or{' '}
+          Click <strong>Draft script for this audience</strong> (recommended) or{' '}
           <strong>Generate spoken script</strong>, then <strong>Approve</strong>. HeyGen uses this
           exact dialogue — B-roll and text cuts are synced to what the avatar says in each beat.
         </p>

@@ -211,7 +211,7 @@ export default function HistoryPage() {
   return (
     <div>
       <Topbar
-        title="History"
+        title="Generation history"
         subtitle={`${rows.length} ${tab} item${rows.length !== 1 ? 's' : ''} · ${periodLabel}`}
         actions={
           <>

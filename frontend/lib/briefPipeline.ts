@@ -165,9 +165,9 @@ export function buildPipelineTasks(
     { task: 'Plan', provider: copyModel?.label ?? 'Copy model', status: target ? 'Done' : 'Pending', progress: target ? '1/1' : '0/1', cost: '—', latency: '—' },
     { task: 'Hook Gen', provider: copyModel?.label ?? 'Copy model', status: variants.length ? 'Done' : 'Pending', progress: `${Math.min(variants.length, target)}/${target || '—'}`, cost: '—', latency: '—' },
     { task: 'Copy Gen', provider: copyModel?.label ?? 'Copy model', status: variants.length ? 'Done' : 'Pending', progress: `${Math.min(variants.length, target)}/${target || '—'}`, cost: '—', latency: '—' },
-    { task: 'Image Gen', provider: imageModel?.label ?? 'Image model', status: imageDone >= target && target ? 'Done' : imageDone ? 'Running' : 'Pending', progress: `${imageDone}/${target || '—'}`, cost: '—', latency: '—' },
-    { task: 'Video Gen', provider: videoModel?.label ?? 'Video model', status: videoDone >= target && target ? 'Done' : videoDone ? 'Running' : 'Pending', progress: `${videoDone}/${target || '—'}`, cost: '—', latency: '—' },
-    { task: 'Compliance', provider: 'compliance-svc', status: complianceDone >= target && target ? 'Done' : complianceDone ? 'Running' : 'Pending', progress: `${complianceDone}/${target || '—'}`, cost: '—', latency: '—' },
+    { task: 'Image Gen', provider: imageModel?.label ?? 'Image model', status: imageDone >= target && target ? 'Done' : imageDone ? 'Generating' : 'Pending', progress: `${imageDone}/${target || '—'}`, cost: '—', latency: '—' },
+    { task: 'Video Gen', provider: videoModel?.label ?? 'Video model', status: videoDone >= target && target ? 'Done' : videoDone ? 'Generating' : 'Pending', progress: `${videoDone}/${target || '—'}`, cost: '—', latency: '—' },
+    { task: 'Compliance', provider: 'compliance-svc', status: complianceDone >= target && target ? 'Done' : complianceDone ? 'Generating' : 'Pending', progress: `${complianceDone}/${target || '—'}`, cost: '—', latency: '—' },
   ]
 }
 

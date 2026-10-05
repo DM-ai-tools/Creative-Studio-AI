@@ -188,8 +188,8 @@ export default function BriefDetailPage() {
         (brief.formats ?? []).every((f) => f === 'static' || f === 'carousel')
       toast.success(
         isImageOnly
-          ? 'Brief ready — choose your image model, then click Generate variants'
-          : 'Brief ready — click Generate video to start',
+          ? 'Project ready — choose your image model, then click Generate creatives'
+          : 'Project ready — click Generate video to start',
         { duration: 5000 }
       )
     }, 250)
@@ -398,8 +398,8 @@ export default function BriefDetailPage() {
       })
       toast.success(
         result.status === 'RUNNING' || result.variants_created === 0
-          ? 'Generation started — HeyGen can take 10–35 min. Stay on this page; variants appear when ready.'
-          : `${result.variants_created} variants generated!`
+          ? 'Generation started — HeyGen can take 10–35 min. Stay on this page; creatives appear when ready.'
+          : `${result.variants_created} creatives generated!`
       )
       setShowRegenerateModal(false)
       refetchBrief()
@@ -436,7 +436,7 @@ export default function BriefDetailPage() {
   const handleApprove = async (variantId: string) => {
     try {
       await variantsApi.approve(variantId)
-      toast.success('Variant approved')
+      toast.success('Creative approved')
       refetchVariants()
     } catch {
       toast.error('Failed to approve')
@@ -446,7 +446,7 @@ export default function BriefDetailPage() {
   const handleReject = async (variantId: string) => {
     try {
       await variantsApi.reject(variantId)
-      toast.success('Variant rejected')
+      toast.success('Creative rejected')
       refetchVariants()
     } catch {
       toast.error('Failed to reject')
@@ -454,10 +454,10 @@ export default function BriefDetailPage() {
   }
 
   const handleDeleteVariant = async (variantId: string) => {
-    if (!window.confirm('Delete this variant?')) return
+    if (!window.confirm('Delete this creative?')) return
     try {
       await variantsApi.delete(variantId)
-      toast.success('Variant deleted')
+      toast.success('Creative deleted')
       if (selectedVariant?.id === variantId) setSelectedVariant(null)
       refetchVariants()
     } catch {
@@ -476,7 +476,7 @@ export default function BriefDetailPage() {
       await variantsApi.regenerateImage(variantId, {
         image_model: genSettings?.imageModel || undefined,
       })
-      toast.success('Retrying this image only — other variants stay as they are')
+      toast.success('Retrying this image only — other creatives stay as they are')
       void refetchVariants()
     } catch (err: unknown) {
       setRetryingVariantId(null)
@@ -546,7 +546,7 @@ export default function BriefDetailPage() {
   if (briefLoading) {
     return (
       <div>
-        <Topbar title="Brief detail" />
+        <Topbar title="Project detail" />
         <div className="p-5 space-y-3">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="skeleton h-16 rounded-xl" />
@@ -557,7 +557,7 @@ export default function BriefDetailPage() {
   }
 
   if (!brief) {
-    return <div className="p-5 text-sm text-lt">Brief not found.</div>
+    return <div className="p-5 text-sm text-lt">Project not found.</div>
   }
 
   if (!genSettings) {
@@ -589,7 +589,7 @@ export default function BriefDetailPage() {
           : '⚡ Generate video'
         : hasVariants
           ? '⚡ Generate more'
-          : '⚡ Generate variants'
+          : '⚡ Generate creatives'
 
   const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
   const scriptFromPdf = kb.script_source === 'pdf'
@@ -646,7 +646,7 @@ export default function BriefDetailPage() {
                 : 'border-transparent text-mid hover:text-navy hover:border-border'
             }`}
           >
-            Brief
+            Project
           </button>
           <button
             type="button"
@@ -658,7 +658,7 @@ export default function BriefDetailPage() {
             }`}
           >
             <span className="text-[10px]">◆</span>
-            Creative Studio
+            AI assistant
             <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
               NEW
             </span>
@@ -685,7 +685,7 @@ export default function BriefDetailPage() {
               ⏱ The last variant is taking longer than expected — the Runway job may be stuck.
             </p>
             <p className="text-amber-700">
-              {brief.completed_variants} of {brief.variant_count} variants finished.
+              {brief.completed_variants} of {brief.variant_count} creatives finished.
               You can keep waiting or reset so you can regenerate the missing variant.
             </p>
             <div className="flex gap-2">
@@ -709,11 +709,11 @@ export default function BriefDetailPage() {
             Number(brief.completed_variants || 0) < Math.max(1, brief.variant_count))) && (
           <div className="text-sm text-lt rounded-lg border border-mint/30 bg-mint/5 px-3 py-2 space-y-2">
             <p>
-              Generation in progress — {brief.completed_variants}/{brief.variant_count} variants ready.
+              Generation in progress — {brief.completed_variants}/{brief.variant_count} creatives ready.
               {wantsVideoBrief && isHeyGen
                 ? ' HeyGen video can take 10–35 minutes.'
-                : ' Image variants usually finish in a few minutes each.'}{' '}
-              This page checks every few seconds and will show each variant as it completes.
+                : ' Image creatives usually finish in a few minutes each.'}{' '}
+              This page checks every few seconds and will show each creative as it completes.
             </p>
             {(variants?.length ?? 0) < Math.max(1, brief.variant_count) && (
               <p className="text-xs text-mid">
@@ -922,7 +922,7 @@ export default function BriefDetailPage() {
         )}
 
         <div>
-          <h3 className="text-sm font-bold text-navy mb-3">Variants ({variants?.length ?? 0})</h3>
+          <h3 className="text-sm font-bold text-navy mb-3">Creatives ({variants?.length ?? 0})</h3>
           <VariantGrid
             variants={(variants ?? []) as Variant[]}
             isLoading={variantsLoading}

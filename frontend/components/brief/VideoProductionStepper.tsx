@@ -10,8 +10,8 @@ const STEPS: { id: ProductionStepId; label: string; hint: string }[] = [
   },
   {
     id: 'broll',
-    label: '2. B-roll scenes',
-    hint: 'Scene map generated from your approved script — same timestamps',
+    label: '2. Supporting scenes',
+    hint: 'Scene map generated from your approved script — same timestamps (B-roll)',
   },
   {
     id: 'avatar',

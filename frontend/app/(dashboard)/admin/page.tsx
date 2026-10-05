@@ -83,7 +83,7 @@ export default function AdminPage() {
             { label: 'New today', value: statsLoading ? '—' : s?.users_today },
             { label: 'New this week', value: statsLoading ? '—' : s?.users_this_week },
             { label: 'Brands', value: statsLoading ? '—' : s?.brands },
-            { label: 'Briefs', value: statsLoading ? '—' : s?.briefs },
+            { label: 'Projects', value: statsLoading ? '—' : s?.briefs },
             { label: 'Variants', value: statsLoading ? '—' : s?.variants },
             { label: 'Storage', value: statsLoading ? '—' : formatFileSize(s?.storage_bytes ?? 0) },
           ].map((item) => (
@@ -99,7 +99,7 @@ export default function AdminPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-light">
-                  {['Company', 'Users', 'Brands', 'Briefs', 'Variants', 'Last activity', 'Joined'].map((h) => (
+                  {['Company', 'Users', 'Brands', 'Projects', 'Creatives', 'Last activity', 'Joined'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
                   ))}
                 </tr>
@@ -141,7 +141,7 @@ export default function AdminPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-light">
-                  {['Name', 'Email', 'Client', 'Role', 'Status', 'Briefs', 'Variants', 'Last login', 'Joined', 'Actions'].map((h) => (
+                  {['Name', 'Email', 'Client', 'Role', 'Status', 'Projects', 'Creatives', 'Last login', 'Joined', 'Actions'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
                   ))}
                 </tr>

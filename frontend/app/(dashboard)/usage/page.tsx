@@ -1,6 +1,6 @@
 'use client'
 
-import React from 'react'
+import React, { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Topbar from '@/components/layout/Topbar'
 import Card from '@/components/ui/Card'
@@ -11,7 +11,7 @@ import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { timeAgo } from '@/lib/utils'
-import type { AdminUsage } from '@/types'
+import type { AdminUsage, SeedanceCreditsCheck } from '@/types'
 
 function money(n: number | null | undefined, estimated = false) {
   if (n == null || Number.isNaN(n)) return '—'
@@ -39,10 +39,45 @@ const tdClass = 'px-4 py-2.5 text-mid'
 const theadRowClass = 'bg-light'
 const tbodyRowClass = 'border-b border-border hover:bg-light/50'
 
+function seedanceStatusBadge(status: SeedanceCreditsCheck['status']) {
+  switch (status) {
+    case 'ok':
+      return <Badge variant="green">Credits OK</Badge>
+    case 'no_credits':
+      return <Badge variant="red">No credits</Badge>
+    case 'not_configured':
+      return <Badge variant="gray">Not configured</Badge>
+    case 'auth_error':
+      return <Badge variant="red">Auth error</Badge>
+    case 'connection_error':
+      return <Badge variant="blue">Connection error</Badge>
+    default:
+      return <Badge variant="gray">Unknown</Badge>
+  }
+}
+
 export default function UsagePage() {
   const router = useRouter()
   const { user } = useAuth()
   const { data, isLoading, refetch } = useApi(() => adminApi.getUsage(), [])
+  const [seedanceCheck, setSeedanceCheck] = useState<SeedanceCreditsCheck | null>(null)
+  const [seedanceChecking, setSeedanceChecking] = useState(false)
+  const [seedanceCheckError, setSeedanceCheckError] = useState<string | null>(null)
+
+  const runSeedanceCheck = async () => {
+    setSeedanceChecking(true)
+    setSeedanceCheckError(null)
+    try {
+      const result = await adminApi.checkSeedanceCredits()
+      setSeedanceCheck(result)
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Could not check Seedance credits.'
+      setSeedanceCheckError(message)
+    } finally {
+      setSeedanceChecking(false)
+    }
+  }
 
   if (user?.role !== 'admin') {
     return (
@@ -61,7 +96,7 @@ export default function UsagePage() {
   return (
     <div>
       <Topbar
-        title="Usage"
+        title="Usage & costs"
         subtitle="API spend, request volume, and model breakdown — last 30 days"
       />
 
@@ -88,6 +123,95 @@ export default function UsagePage() {
         </div>
 
         <UsageAnalyticsDashboard usage={usage ?? { totals: { calls: 0, failed_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, credits: 0, cost_usd: 0 }, by_provider: [], by_model: [], recent: [] }} loading={isLoading} />
+
+        <Card title="Seedance / BytePlus billing">
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1 max-w-2xl">
+                <p className="text-sm text-mid leading-relaxed">
+                  Check whether your BytePlus ModelArk account can accept new Seedance 2.0 and 2.5
+                  video jobs. This replaces manual probe scripts in the backend.
+                </p>
+                {seedanceCheck?.probe_note && (
+                  <p className="text-xs text-muted leading-relaxed">{seedanceCheck.probe_note}</p>
+                )}
+              </div>
+              <Button size="sm" onClick={runSeedanceCheck} disabled={seedanceChecking}>
+                {seedanceChecking ? 'Checking…' : 'Check Seedance credits'}
+              </Button>
+            </div>
+
+            {seedanceCheckError && (
+              <p className="text-sm text-red-600">{seedanceCheckError}</p>
+            )}
+
+            {seedanceCheck && (
+              <div className="rounded-xl border border-border bg-light/40 p-4 space-y-4">
+                <div className="flex flex-wrap items-center gap-3">
+                  {seedanceStatusBadge(seedanceCheck.status)}
+                  <span className="text-sm text-navy font-semibold">{seedanceCheck.message}</span>
+                  <span className="text-xs text-lt">
+                    Checked {seedanceCheck.checked_at ? timeAgo(seedanceCheck.checked_at) : 'just now'}
+                  </span>
+                </div>
+
+                {seedanceCheck.task_history && (
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    {[
+                      { label: 'Total tasks', value: seedanceCheck.task_history.total_tasks },
+                      { label: 'Recent succeeded', value: seedanceCheck.task_history.recent_succeeded },
+                      { label: 'Recent failed', value: seedanceCheck.task_history.recent_failed },
+                      { label: 'Billing failures', value: seedanceCheck.task_history.recent_billing_failures },
+                    ].map((item) => (
+                      <div key={item.label} className="rounded-lg bg-white/70 px-3 py-2">
+                        <div className="text-[10px] font-bold text-lt uppercase tracking-wide mb-0.5">
+                          {item.label}
+                        </div>
+                        <div className="text-lg font-extrabold text-navy tabular-nums">{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(seedanceCheck.models?.length ?? 0) > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className={theadRowClass}>
+                          {['Model', 'API model', 'Billing', 'Details'].map((h) => (
+                            <th key={h} className={thClass}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {seedanceCheck.models.map((row) => (
+                          <tr key={row.catalog_id} className={tbodyRowClass}>
+                            <td className={`${tdClass} font-semibold text-navy`}>{row.label}</td>
+                            <td className={`${tdClass} font-mono text-[11px] break-all`}>{row.api_model}</td>
+                            <td className={tdClass}>
+                              <Badge
+                                variant={
+                                  row.billing_status === 'ok'
+                                    ? 'green'
+                                    : row.billing_status === 'no_credits'
+                                      ? 'red'
+                                      : 'gray'
+                                }
+                              >
+                                {row.billing_status}
+                              </Badge>
+                            </td>
+                            <td className={tdClass}>{row.message}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
 
         {hasSeedance && (
           <Card title="Seedance / BytePlus video" padding={false}>

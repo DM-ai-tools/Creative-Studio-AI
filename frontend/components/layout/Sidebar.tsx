@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import type { User } from '@/types'
 import { BrandMark } from '@/components/brand/BrandMark'
+import { UI } from '@/lib/uiLabels'
 import {
   IconDashboard,
   IconPalette,
@@ -29,10 +30,10 @@ interface NavItem {
 const workspaceNav: NavItem[] = [
   { href: '/dashboard', icon: <IconDashboard />, label: 'Dashboard' },
   { href: '/brand-kit', icon: <IconPalette />, label: 'Brand Kit' },
-  { href: '/briefs', icon: <IconFileText />, label: 'Briefs' },
-  { href: '/variants', icon: <IconFilm />, label: 'Variants' },
-  { href: '/history', icon: <IconHistory />, label: 'History' },
-  { href: '/brand-safety', icon: <IconShield />, label: 'Brand Safety' },
+  { href: '/briefs', icon: <IconFileText />, label: UI.projects },
+  { href: '/variants', icon: <IconFilm />, label: UI.creativeLibrary },
+  { href: '/history', icon: <IconHistory />, label: UI.generationHistory },
+  { href: '/brand-safety', icon: <IconShield />, label: UI.brandContentChecks },
 ]
 
 const performanceNav: NavItem[] = [
@@ -42,7 +43,7 @@ const performanceNav: NavItem[] = [
 
 const accountNav: NavItem[] = [
   { href: '/admin', icon: <IconSettings />, label: 'Admin' },
-  { href: '/usage', icon: <IconUsage />, label: 'Usage' },
+  { href: '/usage', icon: <IconUsage />, label: UI.usageAndCosts },
 ]
 
 const allNav = [...workspaceNav, ...performanceNav, ...accountNav]

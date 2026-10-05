@@ -11,6 +11,7 @@ import { SkeletonLine } from '@/components/ui/Loading'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { briefsApi, performanceApi, variantsApi } from '@/lib/api'
+import { UI, briefStatusLabel } from '@/lib/uiLabels'
 import { getBriefStatusColor, formatROAS, timeAgo } from '@/lib/utils'
 import type { Brief, BriefStatus, FatigueAlert, TopPerformer } from '@/types'
 
@@ -137,7 +138,7 @@ export default function DashboardPage() {
               leftIcon={<svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>}
               onClick={() => router.push('/briefs/new')}
             >
-              New Brief
+              {UI.newProject}
             </Button>
           </>
         }
@@ -162,7 +163,7 @@ export default function DashboardPage() {
             isLoading={statsLoading}
           />
           <MetricCard
-            label="Brand Safety"
+            label={UI.brandContentChecks}
             value={passRate}
             sub={hasStats && stats.brand_safety_pass_rate != null ? 'compliance pass rate' : 'No checks yet'}
             isLoading={statsLoading}
@@ -184,7 +185,7 @@ export default function DashboardPage() {
             <div className="bg-surface-elevated rounded-2xl border border-border shadow-card overflow-hidden">
               <div className="flex items-center justify-between px-5 py-4 border-b border-border/60 bg-gradient-to-r from-surface/50 to-transparent">
                 <div>
-                  <h3 className="text-sm font-bold text-charcoal tracking-tight">Recent Briefs</h3>
+                  <h3 className="text-sm font-bold text-charcoal tracking-tight">Recent projects</h3>
                   <p className="text-[11px] text-muted mt-0.5">Latest creative campaigns</p>
                 </div>
                 <Link href="/briefs" className="text-[11px] font-bold text-accent hover:text-accent-dark transition-colors flex items-center gap-1">
@@ -205,15 +206,15 @@ export default function DashboardPage() {
                 </div>
               ) : !briefs?.length ? (
                 <EmptyState
-                  title="No briefs yet"
-                  description="Create your first brief to start generating AI-powered creative content."
-                  action={<Button size="sm" onClick={() => router.push('/briefs/new')}>Create Brief</Button>}
+                  title="No projects yet"
+                  description="Create your first project to start generating AI-powered creative content."
+                  action={<Button size="sm" onClick={() => router.push('/briefs/new')}>{UI.newProject}</Button>}
                 />
               ) : (
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-surface/60">
-                      {['Brief', 'Format', 'Variants', 'Status', 'Created'].map(h => (
+                      {['Project', 'Format', 'Creatives', 'Status', 'Created'].map(h => (
                         <th key={h} className="text-left px-4 py-2.5 text-[10px] font-bold text-muted/80 uppercase tracking-[0.08em] border-b border-border/50 first:pl-5 last:pr-5">
                           {h}
                         </th>
@@ -241,7 +242,9 @@ export default function DashboardPage() {
                             <span className="text-muted/60">/{b.variant_count}</span>
                           </td>
                           <td className="px-4 py-3.5">
-                            <Badge variant={variant} dot={dot}>{b.status}</Badge>
+                            <Badge variant={variant} dot={dot}>
+                              {briefStatusLabel(b.status, b.completed_variants, b.variant_count)}
+                            </Badge>
                           </td>
                           <td className="pr-5 py-3.5 text-[11px] text-muted whitespace-nowrap">
                             {timeAgo(b.created_at)}

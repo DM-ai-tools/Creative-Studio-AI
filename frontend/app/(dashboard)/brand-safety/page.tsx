@@ -51,7 +51,7 @@ export default function BrandSafetyPage() {
 
   return (
     <div>
-      <Topbar title="Brand Safety" subtitle="Compliance monitoring for all generated creative" />
+      <Topbar title="Brand & content checks" subtitle="Compliance monitoring for all generated creative" />
 
       <div className="p-5 space-y-4">
         {/* Score summary */}

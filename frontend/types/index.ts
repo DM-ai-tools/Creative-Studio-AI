@@ -109,6 +109,28 @@ export interface SeedanceUsageSummary {
   recent_clips: SeedanceUsageClip[]
 }
 
+export interface SeedanceCreditsCheck {
+  checked_at: string
+  configured: boolean
+  status: 'ok' | 'no_credits' | 'not_configured' | 'auth_error' | 'connection_error' | 'error'
+  message: string
+  task_history?: {
+    total_tasks: number
+    recent_succeeded: number
+    recent_failed: number
+    recent_billing_failures: number
+  } | null
+  models: Array<{
+    catalog_id: string
+    label: string
+    api_model: string
+    billing_status: string
+    message: string
+    probe_task_id?: string | null
+  }>
+  probe_note?: string | null
+}
+
 export interface AdminUsage {
   totals: {
     calls: number

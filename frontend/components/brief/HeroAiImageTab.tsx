@@ -7,6 +7,7 @@ import { generationApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
 import { assetUrl } from '@/lib/utils'
 import { variantsApi } from '@/lib/api'
+import { UI } from '@/lib/uiLabels'
 import type { Brand } from '@/types'
 
 type Props = {
@@ -34,7 +35,7 @@ export default function HeroAiImageTab({
   onBrandChange,
   logoUrl,
   logoOnLightUrl,
-  briefTitle = 'Hero AI Image',
+  briefTitle = UI.imageAdFromPhoto,
 }: Props) {
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState('')
@@ -89,7 +90,7 @@ export default function HeroAiImageTab({
       setResult(null)
       toast.success('Prompt ready — review or edit the copy before generating')
     } catch (err: unknown) {
-      toast.error(extractApiError(err, 'Could not generate Hero AI Image'))
+      toast.error(extractApiError(err, `Could not generate ${UI.imageAdFromPhoto.toLowerCase()}`))
     } finally {
       setBusy(null)
     }
@@ -123,9 +124,9 @@ export default function HeroAiImageTab({
       setHeadline(response.headline)
       setPrompt(response.prompt)
       setResult(response)
-      toast.success('Final Hero AI Image ready')
+      toast.success(`Final ${UI.imageAdFromPhoto.toLowerCase()} ready`)
     } catch (err: unknown) {
-      toast.error(extractApiError(err, 'Could not generate Hero AI Image'))
+      toast.error(extractApiError(err, `Could not generate ${UI.imageAdFromPhoto.toLowerCase()}`))
     } finally {
       setBusy(null)
     }
@@ -158,7 +159,7 @@ export default function HeroAiImageTab({
   return (
     <div className="w-full max-w-[1200px] mx-auto p-6 md:p-8 space-y-5">
       <div className="rounded-xl border border-accent/30 bg-accent/5 p-5 space-y-2">
-        <h2 className="text-lg font-bold text-charcoal">Hero AI Image</h2>
+        <h2 className="text-lg font-bold text-charcoal">{UI.imageAdFromPhoto}</h2>
         <p className="text-xs text-mid">
           Upload a product or hero image. AI uses your brand, industry, and niche to generate copy.
           Edit the copy before generating; GPT Image 2 renders the final hook and headline as part of the ad design.
@@ -274,7 +275,7 @@ export default function HeroAiImageTab({
             className="w-full rounded-lg border border-border px-3 py-2 text-sm text-charcoal"
           />
           <Button type="button" variant="outline" isLoading={busy === 'prompt'} onClick={() => void generatePrompt()}>
-            Generate Prompt First
+            {UI.suggestAdCopy}
           </Button>
           <Button
             type="button"
@@ -297,14 +298,14 @@ export default function HeroAiImageTab({
       {result && (
         <div className="rounded-xl border border-accent/30 bg-white p-4 space-y-3">
           <p className="text-xs font-bold uppercase tracking-wide text-navy">Final image</p>
-          <img src={assetUrl(result.image_url) || result.image_url} alt="Generated Hero AI Image" className="max-w-full rounded-lg border border-border" />
+          <img src={assetUrl(result.image_url) || result.image_url} alt={`Generated ${UI.imageAdFromPhoto}`} className="max-w-full rounded-lg border border-border" />
           <p className="text-xs text-mid">
             Hook: <strong>{result.hook}</strong>
             <br />
             Headline: <strong>{result.headline}</strong>
           </p>
           <Button type="button" variant="outline" isLoading={saving} onClick={() => void saveToVariants()}>
-            Save to Variants
+            {UI.saveToCreativeLibrary}
           </Button>
         </div>
       )}

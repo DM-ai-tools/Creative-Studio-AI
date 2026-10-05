@@ -1,7 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext,
+  AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext, SeedanceCreditsCheck,
   SuggestAdAnglesResult, StrategyParseResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult, ReferenceImageAnalysisResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
@@ -922,6 +922,9 @@ export const adminApi = {
   getStats: () => api.get<AdminStats>('/admin/stats').then((r) => r.data),
 
   getUsage: () => api.get<AdminUsage>('/admin/usage').then((r) => r.data),
+
+  checkSeedanceCredits: () =>
+    api.post<SeedanceCreditsCheck>('/admin/seedance/check-credits').then((r) => r.data),
 }
 
 export default api

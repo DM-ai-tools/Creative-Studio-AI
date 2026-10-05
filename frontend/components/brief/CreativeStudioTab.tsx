@@ -22,6 +22,7 @@ import {
   storyboardFramesForVideo,
 } from '@/lib/csChatHistory'
 import CsMessageContent from '@/components/brief/CsMessageContent'
+import { UI } from '@/lib/uiLabels'
 
 type ChatMode = 'auto' | 'ask' | 'generate'
 type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
@@ -1011,7 +1012,7 @@ export default function CreativeStudioTab({
   const saveToVariants = async (msg: ChatMessage) => {
     if (!msg.mediaUrl) return
     if (!briefId && !brandId) {
-      toast.error('Select a brand (or open from a brief) to save to Variants')
+      toast.error(`Select a brand (or open from a project) to save to ${UI.creativeLibrary.toLowerCase()}`)
       return
     }
     try {
@@ -1025,13 +1026,13 @@ export default function CreativeStudioTab({
         seed_image_url: msg.seedImageUrl || approvedImageUrl || null,
         brief_id: briefId || undefined,
         brand_id: brandId || undefined,
-        brief_title: briefTitle || brandName || 'Creative Studio',
+        brief_title: briefTitle || brandName || UI.aiAssistant,
         product_name: productName || '',
       })
       updateMessage(msg.id, { variantId: variant.id })
-      toast.success('Saved to Variants library')
+      toast.success(`Saved to ${UI.creativeLibrary.toLowerCase()}`)
     } catch (err) {
-      toast.error(extractApiError(err, 'Could not save to Variants'))
+      toast.error(extractApiError(err, `Could not save to ${UI.creativeLibrary.toLowerCase()}`))
     }
   }
 
@@ -2125,11 +2126,11 @@ export default function CreativeStudioTab({
               ~
             </span>
             <div className="min-w-0">
-              <p className="text-sm font-bold text-white truncate">Creative Studio</p>
+              <p className="text-sm font-bold text-white truncate">{UI.aiAssistant}</p>
               <p className="text-[11px] text-white/45 truncate">
                 {sessions.find((s) => s.id === activeChatId)?.title || 'New chat'} · history on the left ·{' '}
                 <Link href="/variants" className="text-[#b8f000] underline">
-                  Variants
+                  {UI.creativeLibrary}
                 </Link>
               </p>
             </div>
@@ -2222,7 +2223,7 @@ export default function CreativeStudioTab({
                       }`}
                     >
                       <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
-                        {isUser ? 'You' : 'Creative Studio'}
+                        {isUser ? 'You' : UI.aiAssistant}
                       </p>
                       <CsMessageContent
                         content={m.content}
@@ -2461,14 +2462,14 @@ export default function CreativeStudioTab({
                                 onClick={() => void saveToVariants(m)}
                                 className="text-[11px] font-semibold px-3 py-1.5 rounded-full bg-white/10 border border-white/20 text-white"
                               >
-                                Save to Variants
+                                {UI.saveToCreativeLibrary}
                               </button>
                             ) : (
                               <Link
                                 href="/variants"
                                 className="text-[11px] font-semibold px-3 py-1.5 rounded-full border border-[#b8f000]/40 text-[#b8f000]"
                               >
-                                Open Variants
+                                {UI.openCreativeLibrary}
                               </Link>
                             )}
                             {m.mediaMode === 'image' && m.mediaUrl ? (

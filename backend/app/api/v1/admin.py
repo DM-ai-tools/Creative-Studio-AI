@@ -15,8 +15,13 @@ from app.models.brief import Brief
 from app.models.variant import Variant
 from app.models.asset import Asset
 from app.schemas.auth import UserResponse
-from app.schemas.admin import AdminClientResponse, AdminStatsResponse
+from app.schemas.admin import (
+    AdminClientResponse,
+    AdminStatsResponse,
+    SeedanceCreditsCheckResponse,
+)
 from app.services.auth_service import _user_response
+from app.services.seedance_health import check_seedance_credits
 from app.services.usage_tracker import usage_summary
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -271,3 +276,10 @@ async def admin_usage(current_user=Depends(_require_admin)):
         tenant_id=current_user.tenant_id,
         platform=platform,
     )
+
+
+@router.post("/seedance/check-credits", response_model=SeedanceCreditsCheckResponse)
+async def admin_check_seedance_credits(current_user=Depends(_require_admin)):
+    """Probe BytePlus Seedance billing without leaving manual scripts."""
+    result = await check_seedance_credits(probe_billing=True)
+    return SeedanceCreditsCheckResponse(**result)

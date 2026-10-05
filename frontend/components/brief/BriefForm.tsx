@@ -165,7 +165,7 @@ export default function BriefForm({ onSuccess, onCancel, defaultBrandId }: Brief
 
       <div className="flex gap-2 pt-2">
         <Button type="button" variant="outline" onClick={onCancel} className="flex-1">Cancel</Button>
-        <Button type="submit" variant="primary" isLoading={isSubmitting} disabled={!hasBrands} className="flex-1">Create Brief</Button>
+        <Button type="submit" variant="primary" isLoading={isSubmitting} disabled={!hasBrands} className="flex-1">New project</Button>
       </div>
     </form>
   )

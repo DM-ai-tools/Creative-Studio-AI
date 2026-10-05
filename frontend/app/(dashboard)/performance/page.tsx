@@ -65,7 +65,7 @@ export default function PerformancePage() {
           <MetricCard label="Active Variants" value={stats?.active_variants ?? '—'} isLoading={statsLoading} />
           <MetricCard label="Avg ROAS (7d)" value={stats ? formatROAS(stats.avg_roas_7d) : '—'} isLoading={statsLoading} />
           <MetricCard
-            label="Brand Safety Pass"
+            label="Brand & content checks pass"
             value={
               stats?.brand_safety_pass_rate == null
                 ? '—'

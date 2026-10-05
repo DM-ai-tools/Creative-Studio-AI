@@ -32,9 +32,9 @@ const HERO_SLIDES = [
 
 const STUDIO_TOOLS = [
   { id: 'brand-kit', label: 'Brand Kit', blurb: 'Voice, colours, offers, guardrails' },
-  { id: 'briefs', label: 'Briefs', blurb: 'Industry → niche → objective → angles' },
+  { id: 'briefs', label: 'Projects', blurb: 'Industry → niche → objective → angles' },
   { id: 'variants', label: 'Variants', blurb: 'Hooks, on-image copy, image prompts' },
-  { id: 'safety', label: 'Brand Safety', blurb: 'Claims, policy, ACCC-aware checks' },
+  { id: 'safety', label: 'Brand & content checks', blurb: 'Claims, policy, ACCC-aware checks' },
   { id: 'performance', label: 'Performance', blurb: 'Fatigue, CTR, ROAS signals' },
   { id: 'export', label: 'Export to Meta', blurb: 'Ship approved creatives' },
 ]

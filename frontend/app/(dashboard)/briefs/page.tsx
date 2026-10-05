@@ -11,6 +11,7 @@ import { SkeletonLine } from '@/components/ui/Loading'
 import { useApi } from '@/hooks/useApi'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { briefsApi } from '@/lib/api'
+import { UI, partialStatusLabel } from '@/lib/uiLabels'
 import { cn, timeAgo } from '@/lib/utils'
 import type { Brief, BriefStatus } from '@/types'
 
@@ -20,9 +21,9 @@ type BadgeVariant = 'green' | 'mint' | 'amber' | 'red' | 'blue' | 'gray'
 
 const statusMeta: Record<string, { badge: BadgeVariant; dot: boolean; label: string }> = {
   READY:      { badge: 'green',  dot: true,  label: 'Ready' },
-  RUNNING:    { badge: 'mint',   dot: true,  label: 'Running' },
-  GENERATING: { badge: 'mint',   dot: true,  label: 'Running' },
-  PARTIAL:    { badge: 'amber',  dot: true,  label: 'Partial' },
+  RUNNING:    { badge: 'mint',   dot: true,  label: UI.generating },
+  GENERATING: { badge: 'mint',   dot: true,  label: UI.generating },
+  PARTIAL:    { badge: 'amber',  dot: true,  label: UI.partiallyCompleted },
   PENDING:    { badge: 'amber',  dot: false, label: 'Pending' },
   FAILED:     { badge: 'red',    dot: true,  label: 'Failed' },
   EXPORTED:   { badge: 'blue',   dot: false, label: 'Exported' },
@@ -77,7 +78,9 @@ function BriefCard({ brief, onReset, onDelete }: {
             {brief.title}
           </h3>
           <Badge variant={meta.badge} dot={meta.dot} className="shrink-0 mt-0.5">
-            {meta.label}
+            {brief.status === 'PARTIAL'
+              ? partialStatusLabel(brief.completed_variants, brief.variant_count)
+              : meta.label}
           </Badge>
         </div>
 
@@ -104,7 +107,7 @@ function BriefCard({ brief, onReset, onDelete }: {
             </svg>
             <span>
               <strong className="text-charcoal">{brief.completed_variants}</strong>
-              /{brief.variant_count} variants
+              /{brief.variant_count} {UI.creatives}
             </span>
           </div>
           <span className="text-[10px] text-muted">{timeAgo(brief.created_at)}</span>
@@ -200,7 +203,7 @@ export default function BriefsPage() {
 
   const handleResetAll = async () => {
     if (!stuckRunning.length) return
-    if (!confirm(`Reset ${stuckRunning.length} stuck brief(s) to DRAFT?`)) return
+    if (!confirm(`Reset ${stuckRunning.length} stuck project(s) to DRAFT?`)) return
     try {
       await Promise.all(stuckRunning.map((b: Brief) => briefsApi.update(b.id, { status: 'DRAFT' })))
       toast.success('Stuck briefs reset')
@@ -218,7 +221,7 @@ export default function BriefsPage() {
   return (
     <div className="min-h-full">
       <Topbar
-        title="Briefs"
+        title={UI.projects}
         subtitle={briefs ? `${briefs.length} brief${briefs.length !== 1 ? 's' : ''}` : undefined}
         actions={
           <Button
@@ -227,7 +230,7 @@ export default function BriefsPage() {
             leftIcon={<svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>}
             onClick={() => router.push('/briefs/new')}
           >
-            New Brief
+            {UI.newProject}
           </Button>
         }
       />

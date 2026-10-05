@@ -243,7 +243,7 @@ export default function ImageVariantSlotsPanel({
             <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
               Slots stay empty until you click <strong>Generate AI for all</strong>. Static ads get
               hook + on-image CTA. Carousel cards are visual + short headline; the campaign CTA
-              burns on the last card of each creative. Change <strong>Target Variants</strong> in step 1
+              burns on the last card of each creative. Change <strong>Number of creatives</strong> in step 1
               to add or remove slots.
             </p>
           </div>
