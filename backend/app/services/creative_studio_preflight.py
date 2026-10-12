@@ -13,6 +13,8 @@ def validate_video_preflight(
     sound_on: bool, voice_events: list[tuple[float, float, str]] | None,
     reference_assets: list[dict[str, Any]] | None,
     product_reference_url: str | None, logo_reference_url: str | None,
+    speech_mode: str = "external_voiceover",
+    require_storyboard_coverage: bool = True,
 ) -> dict[str, Any]:
     """Build a reviewable asset/shot lock and block structurally invalid jobs."""
     validate_video_prompt(prompt)
@@ -29,12 +31,12 @@ def validate_video_preflight(
         errors.append("Long Seedance videos require an explicit timed multi-scene plan.")
     if scene_count >= 2 and not windows:
         errors.append("Scene timings are missing, overlapping, or do not cover the full duration.")
-    if boards and scene_count and len(boards) > scene_count:
+    if require_storyboard_coverage and boards and scene_count and len(boards) > scene_count:
         errors.append(
             f"Storyboard coverage mismatch: {scene_count} timed scenes but {len(boards)} "
             "selected images. Remove stale images that do not belong to the current plan."
         )
-    if boards and scene_count and len(boards) < scene_count:
+    if require_storyboard_coverage and boards and scene_count and len(boards) < scene_count:
         errors.append(
             f"Storyboard coverage mismatch: select one approved image for every timed scene "
             f"before long-video generation ({len(boards)} selected for {scene_count} scenes)."
@@ -68,12 +70,19 @@ def validate_video_preflight(
         warnings.append("Narration covers less than 25% of the timeline; ambience is needed between lines.")
     if errors:
         raise ValueError("Video preflight failed: " + " ".join(errors))
+    native_presenter = bool(sound_on and speech_mode == "native_presenter")
     return {
         "status": "passed", "duration_seconds": duration,
         "scene_count": scene_count or len(windows),
         "shot_windows": [{"start": a, "end": b} for a, b in windows],
         "storyboard_count": len(boards),
-        "provider_image_mode": "approved first frame per Seedance chapter" if boards else "continuity/text guided",
+        "provider_image_mode": (
+            "approved first frame per Seedance chapter"
+            if boards and require_storyboard_coverage
+            else "approved B-roll references"
+            if boards
+            else "continuity/text guided"
+        ),
         "asset_lock": {
             "opening_frame": bool(seed_image_url or boards),
             "character_references": sum(1 for asset in assets if str(asset.get("role") or "").lower() == "character"),
@@ -86,8 +95,17 @@ def validate_video_preflight(
             "narration_words": words, "spoken_window_seconds": round(spoken, 3),
             "single_voice_bed": bool(voices),
             "voice_rates": voice_rates,
-            "provider_speech": "disabled when exact narration is present",
-            "visible_speaker_mode": "off-camera narration; visible people do not lip-sync",
+            "speech_mode": speech_mode,
+            "provider_speech": (
+                "enabled; Seedance owns voice and mouth motion"
+                if native_presenter
+                else "disabled when exact narration is present"
+            ),
+            "visible_speaker_mode": (
+                "on-camera presenter may speak and lip-sync"
+                if native_presenter
+                else "off-camera narration; visible people do not lip-sync"
+            ),
         },
         "warnings": warnings,
     }

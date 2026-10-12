@@ -8,12 +8,20 @@ export type CsPipelineAction =
   | 'generate_video'
   | 'continue_video'
   | 'generate_storyboard'
+  | 'generate_next_chapter_image'
+  | 'generate_broll_image'
+  | 'generate_all_broll'
+  | 'regenerate_broll_image'
+  | 'approve_broll'
+  | 'approve_all_broll'
 
 export interface CsStoryboardFrame {
   id: string
   index?: number
   title?: string
   url?: string
+  /** BytePlus TOS URL — passed unchanged to Seedance when present. */
+  byteplusUrl?: string
   imagePrompt?: string
   overlays?: string[]
   status?: string
@@ -43,8 +51,9 @@ export interface CsChatMessage {
   content: string
   attachments?: CsChatAttachment[]
   jobId?: string
-  mediaMode?: 'image' | 'video' | 'storyboard'
+  mediaMode?: 'image' | 'video' | 'storyboard' | 'broll_board'
   mediaUrl?: string
+  byteplusUrl?: string
   seedImageUrl?: string
   model?: string
   status?: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
@@ -57,6 +66,9 @@ export interface CsChatMessage {
   suggestedActions?: CsPipelineAction[]
   phase?: string
   storyboard?: CsStoryboardFrame[]
+  chapterIndex?: number
+  filmTotalChapters?: number
+  brollIndex?: number
   /** Saved when a staged Seedance part finishes — used to resume after server reload. */
   continuationMeta?: {
     completed_segments: number
@@ -65,6 +77,11 @@ export interface CsChatMessage {
     requested_duration_seconds?: number
     continuity_frame_count?: number
     production_id?: string
+    continuity_video_reference_url?: string
+    continuity_reference_url?: string
+    staged_segment_paths?: string[]
+    chapter_index?: number
+    film_total_chapters?: number
   }
 }
 
@@ -83,6 +100,11 @@ export interface CsChatSession {
   additionalReferenceUrls: string[]
   phase: string
   videoModel?: string
+  speechMode: 'native_presenter' | 'external_voiceover'
+  promptOnlyVideo: boolean
+  cloneMode: boolean
+  cloneSceneId: string
+  cloneCount: number
 }
 
 function scopeKey(briefId?: string, brandId?: string) {
@@ -126,6 +148,11 @@ export function emptyCsSession(title = 'New chat'): CsChatSession {
     characterReferenceUrl: '',
     additionalReferenceUrls: [],
     phase: '',
+    speechMode: 'native_presenter',
+    promptOnlyVideo: true,
+    cloneMode: false,
+    cloneSceneId: '',
+    cloneCount: 4,
   }
 }
 
@@ -158,6 +185,12 @@ function parseStoredSessions(raw: string | null): CsChatSession[] {
         ? s.additionalReferenceUrls.map(String).filter(Boolean).slice(0, 7)
         : [],
       phase: String(s.phase || ''),
+      speechMode:
+        s.speechMode === 'external_voiceover' ? 'external_voiceover' : 'native_presenter',
+      promptOnlyVideo: s.promptOnlyVideo !== false,
+      cloneMode: Boolean(s.cloneMode),
+      cloneSceneId: String(s.cloneSceneId || ''),
+      cloneCount: Math.max(2, Math.min(6, Number(s.cloneCount || 4))),
     }))
 }
 

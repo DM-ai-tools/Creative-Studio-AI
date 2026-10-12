@@ -6,6 +6,7 @@ from PIL import Image
 from app.services.creative_studio_job_service import _seedance_segment_durations
 from app.services.logo_overlay import pad_image_bytes_for_seedance_reference
 from app.services.media.byteplus_seedance_client import (
+    ark_api_key_for_model,
     is_seedance_25_model,
     map_aspect_to_ratio,
     map_resolution,
@@ -41,6 +42,22 @@ class SeedanceModelTests(unittest.TestCase):
     def test_is_seedance_25_model(self):
         self.assertTrue(is_seedance_25_model("ark-seedance-2-5"))
         self.assertFalse(is_seedance_25_model("ark-seedance-2-0"))
+
+    def test_api_key_selection_by_model(self):
+        from app.core.config import settings
+
+        original_20 = settings.ARK_API_KEY
+        original_25 = settings.ARK_API_KEY_25
+        try:
+            settings.ARK_API_KEY = "key-2-0"
+            settings.ARK_API_KEY_25 = "key-2-5"
+            self.assertEqual(ark_api_key_for_model("ark-seedance-2-0"), "key-2-0")
+            self.assertEqual(ark_api_key_for_model("ark-seedance-2-5"), "key-2-5")
+            settings.ARK_API_KEY_25 = ""
+            self.assertEqual(ark_api_key_for_model("ark-seedance-2-5"), "key-2-0")
+        finally:
+            settings.ARK_API_KEY = original_20
+            settings.ARK_API_KEY_25 = original_25
 
     def test_map_aspect_includes_four_by_five(self):
         self.assertEqual(map_aspect_to_ratio("4/5"), "4:5")

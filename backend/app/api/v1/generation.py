@@ -1374,6 +1374,7 @@ class CreativeStudioGenerateRequest(BaseModel):
     aspect: str = "9/16"
     resolution: str = "1080p"
     sound_on: bool = True
+    speech_mode: Literal["native_presenter", "external_voiceover"] = "external_voiceover"
     negative_prompt: str = ""
 
 
@@ -1403,11 +1404,23 @@ class CreativeStudioGenerateResponse(BaseModel):
     media_mode: str | None = None
     product_reference_url: str | None = None
     continuation_available: bool = False
+    next_chapter_image_available: bool = False
     completed_segments: int | None = None
+    continuity_reference_url: str | None = None
+    staged_segment_paths: list[str] | None = None
+    chapter_index: int | None = None
+    film_total_chapters: int | None = None
     production_id: str | None = None
     production_report: dict | None = None
     quality_gate: dict | None = None
     retry_chapter_available: bool = False
+    continuity_video_reference_url: str | None = None
+    broll_index: int | None = None
+    broll_title: str | None = None
+    byteplus_url: str | None = None
+    asset_role: str | None = None
+    clone_mode: bool = False
+    character_reference_url: str | None = None
 
 
 class CreativeStudioRecoverContinuationRequest(BaseModel):
@@ -1418,6 +1431,7 @@ class CreativeStudioRecoverContinuationRequest(BaseModel):
     generated_duration_seconds: int | None = None
     continuity_frame_count: int | None = None
     cast_reference_url: str | None = None
+    continuity_video_reference_url: str | None = None
     production_id: str | None = None
 
 
@@ -1454,6 +1468,12 @@ class CreativeStudioReference(BaseModel):
     role: Literal["product", "logo", "scene", "character", "reference"]
 
 
+class BrollBoardApproval(BaseModel):
+    index: int = Field(ge=1, le=24)
+    url: str = Field(min_length=1)
+    byteplus_url: str = ""
+
+
 class CreativeStudioChatRequest(BaseModel):
     messages: list[CreativeStudioChatMessage] = Field(default_factory=list)
     mode: str = Field(default="auto", description="auto | ask | generate")
@@ -1462,13 +1482,17 @@ class CreativeStudioChatRequest(BaseModel):
     aspect: str = "9/16"
     resolution: str = "1080p"
     sound_on: bool = True
+    speech_mode: Literal["native_presenter", "external_voiceover"] = "native_presenter"
     attachment_urls: list[str] = Field(default_factory=list)
     brand_name: str = ""
     product_name: str = ""
     # Supercomputer pipeline
     action: str = Field(
         default="continue",
-        description="continue | generate_image | regenerate_image | approve_next | generate_video",
+        description=(
+            "continue | generate_image | regenerate_image | approve_next | generate_video | "
+            "generate_next_chapter_image"
+        ),
     )
     image_prompt: str = ""
     video_prompt: str = ""
@@ -1482,8 +1506,19 @@ class CreativeStudioChatRequest(BaseModel):
     reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
     storyboard_image_urls: list[str] = Field(default_factory=list)
     prompt_only_video: bool = False
+    preserve_image_text: bool = False
     video_model: str = "ark-seedance-2-0"
     session_id: str = Field(default="", max_length=160)
+    chapter_index: int | None = Field(default=None, ge=0, le=24)
+    continuity_style_url: str = ""
+    accumulated_segment_paths: list[str] = Field(default_factory=list)
+    broll_index: int | None = Field(default=None, ge=1, le=24)
+    approved_broll_url: str = ""
+    approved_broll_byteplus_url: str = ""
+    broll_board_approvals: list[BrollBoardApproval] = Field(default_factory=list)
+    clone_mode: bool = False
+    clone_scene_id: str = ""
+    clone_count: int = Field(default=4, ge=2, le=6)
 
 
 class CreativeStudioChatResponse(BaseModel):
@@ -1509,6 +1544,9 @@ class CreativeStudioChatResponse(BaseModel):
     partial: bool = False
     aspect: str | None = None
     error: str | None = None
+    chapter_index: int | None = None
+    film_total_chapters: int | None = None
+    broll_index: int | None = None
 
 
 @router.get("/creative-studio/niches", response_model=list[CreativeStudioNicheOption])
@@ -1518,6 +1556,13 @@ async def creative_studio_niches(_current_user=Depends(get_current_user)):
     return [CreativeStudioNicheOption(**n) for n in CREATIVE_STUDIO_NICHES]
 
 
+@router.get("/creative-studio/clone-scenes")
+async def creative_studio_clone_scenes(_current_user=Depends(get_current_user)):
+    from app.services.creative_studio_clone import clone_scene_groups
+
+    return clone_scene_groups()
+
+
 @router.get("/creative-studio/models")
 async def creative_studio_models(_current_user=Depends(get_current_user)):
     """Creative Studio catalog: OpenRouter chat + GPT Image 2 + Seedance."""
@@ -1525,6 +1570,9 @@ async def creative_studio_models(_current_user=Depends(get_current_user)):
         byteplus_seedance_video_catalog_options,
     )
     from app.services.media.byteplus_seedance_client import ark_configured
+    from app.services.media.byteplus_seedream_catalog import (
+        byteplus_seedream_catalog_options,
+    )
     from app.services.media.higgsfield_catalog import (
         higgsfield_image_catalog_options,
         higgsfield_video_catalog_options,
@@ -1548,6 +1596,8 @@ async def creative_studio_models(_current_user=Depends(get_current_user)):
         video_models.extend(higgsfield_video_catalog_options())
     image_models = []
     image_models.extend(openai_image_catalog_options())
+    if ark_ok:
+        image_models.extend(byteplus_seedream_catalog_options())
     if hf_ok:
         image_models.extend(higgsfield_image_catalog_options())
     chat_models = prompt_llm_catalog_options()
@@ -1558,7 +1608,9 @@ async def creative_studio_models(_current_user=Depends(get_current_user)):
     if not oai_ok:
         messages.append("Set OPENAI_API_KEY for GPT Image 2 stills.")
     if not ark_ok:
-        messages.append("Set ARK_API_KEY for BytePlus Seedance 2.0.")
+        messages.append(
+            "Set ARK_API_KEY (Seedance 2.0) and/or ARK_API_KEY_25 (Seedance 2.5)."
+        )
     if not hf_ok:
         messages.append("Optional: HIGGSFIELD keys for extra image/video models.")
 
@@ -1591,6 +1643,12 @@ async def creative_studio_chat(
         "regenerate_image",
         "approve_next",
         "generate_video",
+        "generate_next_chapter_image",
+        "generate_broll_image",
+        "generate_all_broll",
+        "regenerate_broll_image",
+        "approve_broll",
+        "approve_all_broll",
     }:
         raise HTTPException(status_code=422, detail="messages required")
     try:
@@ -1604,6 +1662,7 @@ async def creative_studio_chat(
         aspect=data.aspect,
         resolution=data.resolution,
         sound_on=data.sound_on,
+        speech_mode=data.speech_mode,
         attachment_urls=list(data.attachment_urls or []),
         brand_name=data.brand_name,
         product_name=data.product_name,
@@ -1629,7 +1688,20 @@ async def creative_studio_chat(
         reference_assets=[asset.model_dump() for asset in data.reference_assets],
         storyboard_image_urls=list(data.storyboard_image_urls or []),
         prompt_only_video=bool(data.prompt_only_video),
+        preserve_image_text=bool(data.preserve_image_text),
         video_model=data.video_model,
+        chapter_index=data.chapter_index,
+        continuity_style_url=data.continuity_style_url,
+        accumulated_segment_paths=list(data.accumulated_segment_paths or []),
+        broll_index=data.broll_index,
+        approved_broll_url=data.approved_broll_url,
+        approved_broll_byteplus_url=data.approved_broll_byteplus_url,
+        broll_board_approvals=[
+            row.model_dump() for row in (data.broll_board_approvals or [])
+        ],
+        clone_mode=bool(data.clone_mode),
+        clone_scene_id=data.clone_scene_id,
+        clone_count=data.clone_count,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1709,6 +1781,7 @@ async def creative_studio_generate(
             "aspect": data.aspect,
             "resolution": data.resolution,
             "sound_on": data.sound_on,
+            "speech_mode": data.speech_mode,
             "negative_prompt": data.negative_prompt,
         },
     )
@@ -1758,11 +1831,25 @@ async def creative_studio_job_status(
         media_mode=job.get("media_mode"),
         product_reference_url=job.get("product_reference_url"),
         continuation_available=bool(job.get("continuation_available")),
+        next_chapter_image_available=bool(job.get("next_chapter_image_available")),
         completed_segments=job.get("completed_segments"),
+        continuity_reference_url=job.get("continuity_reference_url"),
+        staged_segment_paths=job.get("staged_segment_paths")
+        if isinstance(job.get("staged_segment_paths"), list)
+        else None,
+        chapter_index=job.get("chapter_index"),
+        film_total_chapters=job.get("film_total_chapters"),
         production_id=job.get("production_id"),
         production_report=job.get("production_report"),
         quality_gate=job.get("quality_gate"),
         retry_chapter_available=bool(job.get("retry_chapter_available")),
+        continuity_video_reference_url=job.get("continuity_video_reference_url"),
+        broll_index=job.get("broll_index"),
+        broll_title=job.get("broll_title"),
+        byteplus_url=job.get("byteplus_url"),
+        asset_role=job.get("asset_role"),
+        clone_mode=bool(job.get("clone_mode")),
+        character_reference_url=job.get("character_reference_url"),
     )
 
 
@@ -1775,7 +1862,7 @@ async def creative_studio_job_continue(
     data: CreativeStudioRecoverContinuationRequest | None = Body(default=None),
     current_user=Depends(get_current_user),
 ):
-    """After review, generate the next Seedance chapter from the prior final frame."""
+    """After review, generate the next Seedance chapter from the approved prior video."""
     from app.services.creative_studio_job_service import (
         create_continuation_job,
         recover_continuation_job,
@@ -1794,6 +1881,7 @@ async def creative_studio_job_continue(
                 generated_duration_seconds=data.generated_duration_seconds,
                 continuity_frame_count=data.continuity_frame_count,
                 cast_reference_url=data.cast_reference_url,
+                continuity_video_reference_url=data.continuity_video_reference_url,
                 production_id=data.production_id,
             )
         except ValueError as exc:

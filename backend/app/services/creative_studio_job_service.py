@@ -83,6 +83,559 @@ def _seedance_segment_durations(total_seconds: int, clip_cap: int = 15) -> list[
     return [base + (1 if i < remainder else 0) for i in range(count)]
 
 
+def _chapter_timeline_window(
+    data: dict[str, Any],
+    production_memory: dict[str, Any] | None,
+    *,
+    generate_duration: float,
+) -> tuple[float, float]:
+    """Return the active chapter's global timeline window."""
+    index = max(0, int(data.get("film_chapter_index") or 0))
+    shots = list((production_memory or {}).get("shot_list") or [])
+    if index < len(shots):
+        start = float(shots[index].get("start") or 0.0)
+        end = float(shots[index].get("end") or start + generate_duration)
+        if end > start:
+            return start, end
+
+    total = max(
+        float(data.get("full_film_duration") or generate_duration),
+        float(generate_duration),
+    )
+    durations = _seedance_segment_durations(int(round(total)), clip_cap=15)
+    if index < len(durations):
+        start = float(sum(durations[:index]))
+        return start, min(total, start + float(durations[index]))
+    start = min(total, float(index) * float(generate_duration))
+    return start, min(total, start + float(generate_duration))
+
+
+def _localize_timed_events(
+    events: list[tuple[float, float, str]],
+    *,
+    start: float,
+    end: float,
+) -> list[tuple[float, float, str]]:
+    """Clip global finishing events to one chapter and rebase them to 00:00."""
+    return [
+        (max(float(a), start) - start, min(float(b), end) - start, str(text))
+        for a, b, text in events
+        if float(a) < end and float(b) > start
+    ]
+
+
+def _video_job_result_payload(
+    *,
+    result: dict[str, Any] | None,
+    model: str,
+    seed_url: str | None,
+    generate_duration: int,
+    requested_duration: int,
+    stitch_note: str,
+    credits: float | None,
+    out_warn: str | None,
+) -> dict[str, Any]:
+    """Persist poll fields for chapter staging and long-film continuations."""
+    payload: dict[str, Any] = {
+        "url": (result or {}).get("url"),
+        "model": str((result or {}).get("model") or model),
+        "provider": (result or {}).get("provider"),
+        "seed_image_url": seed_url,
+        "duration_seconds": (result or {}).get("duration_seconds") or generate_duration,
+        "requested_duration_seconds": requested_duration,
+        "segment_count": (result or {}).get("segment_count"),
+        "continuity_chained": bool((result or {}).get("continuity_chained")),
+        "continuity_frame_count": (result or {}).get("continuity_frame_count"),
+        "continuity_privacy_fallback_count": (result or {}).get(
+            "continuity_privacy_fallback_count"
+        ),
+        "storyboard_scene_anchored": bool((result or {}).get("storyboard_scene_anchored")),
+        "partial": bool((result or {}).get("partial")),
+        "credits_estimate": credits or None,
+        "duration_warning": str(out_warn) if out_warn else None,
+        "note": str((result or {}).get("note") or stitch_note),
+        "voiceover": (result or {}).get("voiceover"),
+        "audio_present": (result or {}).get("audio_present"),
+        "audio_warning": (result or {}).get("audio_warning"),
+        "provider_usage": (result or {}).get("provider_usage"),
+        "text_overlays_applied": bool((result or {}).get("text_overlays_applied")),
+        "text_overlay_count": (result or {}).get("text_overlay_count"),
+        "logo_applied": bool((result or {}).get("logo_applied")),
+        "logo_end_hold_seconds": (result or {}).get("logo_end_hold_seconds"),
+        "logo_warning": (result or {}).get("logo_warning"),
+        "logo_deferred": (result or {}).get("logo_deferred"),
+    }
+    for key in (
+        "next_chapter_image_available",
+        "continuation_available",
+        "retry_chapter_available",
+        "completed_segments",
+        "generated_duration_seconds",
+        "continuity_reference_url",
+        "continuity_video_reference_url",
+        "cast_reference_url",
+        "staged_segment_paths",
+        "chapter_index",
+        "film_chapter_index",
+        "film_total_chapters",
+        "production_id",
+        "production_report",
+        "quality_gate",
+        "broll_segment_count",
+        "next_job_id",
+    ):
+        if key not in (result or {}):
+            continue
+        value = (result or {}).get(key)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+async def _apply_chapter_image_staging_result(
+    *,
+    tenant_id: str,
+    data: dict[str, Any],
+    result: dict[str, Any],
+    production_memory: dict[str, Any],
+    generate_duration: int,
+    voice_events: list[tuple[float, float, str]] | None = None,
+    prepared_narration: dict[str, Any] | None = None,
+    overlay_events: list[tuple[float, float, str]] | None = None,
+) -> dict[str, Any]:
+    """
+    After one chapter video completes in image-first staging mode, either
+    pause for the next GPT still or stitch the full film on the last chapter.
+    """
+    if not data.get("chapter_image_staging"):
+        return result
+    if str(result.get("status") or "") != "done" or not result.get("url"):
+        return result
+
+    from app.services.creative_studio_production_memory import (
+        append_chapter_log,
+        public_production_report,
+    )
+    from app.services.creative_studio_quality_gate import chapter_quality_report
+    from app.services.file_service import file_service
+    from app.services.ffmpeg_util import probe_video_duration
+    from app.services.media.seedance_multiscene import (
+        concat_video_files,
+        save_continuity_frame,
+        trim_video_to_duration,
+    )
+    from app.services.video_subtitles import _ensure_local_video
+
+    film_chapter_index = int(data.get("film_chapter_index") or 0)
+    film_total_chapters = int(data.get("film_total_chapters") or 1)
+    full_film_duration = int(data.get("full_film_duration") or generate_duration)
+    accumulated = [
+        Path(value)
+        for value in (data.get("accumulated_segment_paths") or [])
+        if Path(value).is_file()
+    ]
+
+    local_path = _ensure_local_video(str(result["url"]), tenant_id=tenant_id)
+    if not local_path or not Path(local_path).is_file():
+        result["status"] = "failed"
+        result["error"] = "Chapter video file could not be read for staging"
+        return result
+    chapter_path = Path(local_path)
+    preview_duration = probe_video_duration(chapter_path) or float(generate_duration)
+    continuity_reference_url = save_continuity_frame(chapter_path, tenant_id=tenant_id)
+    quality_gate = chapter_quality_report(
+        chapter_path,
+        expected_duration=float(generate_duration),
+        previous_continuity_url=str(data.get("continuity_reference_url") or "").strip() or None,
+        references_locked=bool(production_memory.get("reference_lock_sha256")),
+    )
+    if quality_gate.get("status") != "passed":
+        result.update(
+            {
+                "retry_chapter_available": True,
+                "next_chapter_image_available": False,
+                "continuation_available": False,
+                "partial": True,
+                "quality_gate": quality_gate,
+                "production_id": production_memory.get("production_id"),
+                "production_report": public_production_report(production_memory),
+                "note": (
+                    f"Chapter {film_chapter_index + 1}/{film_total_chapters} failed continuity QA "
+                    f"({', '.join(quality_gate.get('failed_checks') or [])}). "
+                    "Regenerate this chapter's still and video; earlier chapters are preserved."
+                ),
+            }
+        )
+        return result
+
+    saved_part = file_service.save_bytes(
+        content=chapter_path.read_bytes(),
+        tenant_id=tenant_id,
+        subfolder="generated",
+        suffix=".mp4",
+        content_type="video/mp4",
+    )
+    raw_chapter_url = str(saved_part["file_url"])
+    review_url = raw_chapter_url
+    chapter_start, chapter_end = _chapter_timeline_window(
+        data,
+        production_memory,
+        generate_duration=float(generate_duration),
+    )
+    if prepared_narration and voice_events:
+        from app.services.creative_studio_speech import slice_prepared_narration
+        from app.services.creative_studio_video_finishing import apply_timed_voiceover
+
+        chapter_voice_events, chapter_narration = slice_prepared_narration(
+            prepared_narration,
+            start=chapter_start,
+            end=chapter_end,
+        )
+        if chapter_voice_events:
+            review_url, preview_voice = await apply_timed_voiceover(
+                review_url,
+                chapter_voice_events,
+                tenant_id=tenant_id,
+                prepared_narration=chapter_narration,
+                allow_time_stretch=False,
+            )
+            if preview_voice.get("status") != "done":
+                raise RuntimeError(
+                    "Chapter narration preview failed: "
+                    + str(preview_voice.get("error") or preview_voice.get("reason"))
+                )
+    chapter_overlays = _localize_timed_events(
+        overlay_events or [],
+        start=chapter_start,
+        end=chapter_end,
+    )
+    if chapter_overlays:
+        from app.services.creative_studio_video_finishing import apply_timed_overlays
+
+        review_url, _ = apply_timed_overlays(
+            review_url,
+            chapter_overlays,
+            tenant_id=tenant_id,
+        )
+    append_chapter_log(
+        tenant_id,
+        production_memory,
+        chapter_index=film_chapter_index,
+        video_url=review_url,
+        video_path=str(chapter_path),
+        duration_seconds=preview_duration,
+        continuity_frame_url=continuity_reference_url,
+        qa=quality_gate,
+        provider_task_id=str(result.get("task_id") or "") or None,
+        provider_video_url=str(result.get("remote_url") or "") or None,
+    )
+    chapter_paths = [*accumulated, chapter_path]
+    staged_paths = [str(path) for path in chapter_paths]
+
+    if film_chapter_index + 1 < film_total_chapters:
+        result.update(
+            {
+                "url": review_url,
+                "duration_seconds": int(round(preview_duration)),
+                "requested_duration_seconds": full_film_duration,
+                "segment_count": film_total_chapters,
+                "completed_segments": film_chapter_index + 1,
+                "continuation_available": False,
+                "next_chapter_image_available": True,
+                "partial": True,
+                "quality_gate": quality_gate,
+                "production_id": production_memory.get("production_id"),
+                "production_report": public_production_report(production_memory),
+                "continuity_reference_url": continuity_reference_url,
+                "staged_segment_paths": staged_paths,
+                "film_chapter_index": film_chapter_index,
+                "film_total_chapters": film_total_chapters,
+                "chapter_index": film_chapter_index + 1,
+                "note": (
+                    f"Chapter {film_chapter_index + 1}/{film_total_chapters} is ready. "
+                    "Review this part, then start chapter "
+                    f"{film_chapter_index + 2} — Seedance continues the same presenter "
+                    "from this clip's final frame (no new presenter photo)."
+                ),
+            }
+        )
+        return result
+
+    stitch_dir = (
+        Path(file_service.upload_dir) / tenant_id / "generated" / "seedance-stitch"
+    ).resolve()
+    stitch_dir.mkdir(parents=True, exist_ok=True)
+    if len(chapter_paths) == 1:
+        final_path = chapter_paths[0]
+    else:
+        stitched_path = stitch_dir / f"cs-chapters-{uuid.uuid4().hex[:12]}.mp4"
+        concat_video_files(chapter_paths, stitched_path)
+        trimmed = trim_video_to_duration(stitched_path, float(full_film_duration))
+        final_path = trimmed or stitched_path
+    final_duration = probe_video_duration(final_path) or float(full_film_duration)
+    final_export_path = final_path
+    final_work_url = file_service.save_bytes(
+        content=final_path.read_bytes(),
+        tenant_id=tenant_id,
+        subfolder="generated",
+        suffix=".mp4",
+        content_type="video/mp4",
+    )["file_url"]
+
+    voiceover_result: dict[str, Any] | None = None
+    if prepared_narration and voice_events:
+        from app.services.creative_studio_video_finishing import apply_timed_voiceover
+
+        final_work_url, voiceover_result = await apply_timed_voiceover(
+            final_work_url,
+            voice_events,
+            tenant_id=tenant_id,
+            prepared_narration=prepared_narration,
+            allow_time_stretch=False,
+        )
+        if voiceover_result.get("status") != "done":
+            raise RuntimeError(
+                "Final master narration failed: "
+                + str(voiceover_result.get("error") or voiceover_result.get("reason"))
+            )
+
+    logo_url = str(data.get("logo_reference_url") or "").strip() or None
+    logo_applied = False
+    overlays_applied = False
+    if overlay_events:
+        from app.services.creative_studio_picture import compose_campaign_graphics
+
+        final_work_url, overlays_applied = compose_campaign_graphics(
+            final_work_url,
+            overlay_events,
+            tenant_id=tenant_id,
+            logo_url=logo_url,
+        )
+        logo_applied = bool(logo_url and overlays_applied)
+
+    final_local = _ensure_local_video(final_work_url, tenant_id=tenant_id)
+    if final_local and Path(final_local).is_file():
+        final_export_path = Path(final_local)
+
+    saved_final = file_service.save_bytes(
+        content=final_export_path.read_bytes(),
+        tenant_id=tenant_id,
+        subfolder="generated",
+        suffix=".mp4",
+        content_type="video/mp4",
+    )
+    result.update(
+        {
+            "url": saved_final["file_url"],
+            "logo_applied": logo_applied,
+            "logo_end_hold_seconds": 3.0 if logo_applied else None,
+            "voiceover": voiceover_result,
+            "text_overlays_applied": overlays_applied,
+            "text_overlay_count": len(overlay_events or []) if overlays_applied else 0,
+            "duration_seconds": int(round(final_duration)),
+            "requested_duration_seconds": full_film_duration,
+            "segment_count": film_total_chapters,
+            "completed_segments": film_total_chapters,
+            "continuation_available": False,
+            "next_chapter_image_available": False,
+            "partial": False,
+            "quality_gate": quality_gate,
+            "production_id": production_memory.get("production_id"),
+            "production_report": public_production_report(production_memory),
+            "staged_segment_paths": staged_paths,
+            "film_chapter_index": film_chapter_index,
+            "film_total_chapters": film_total_chapters,
+            "note": (
+                f"All {film_total_chapters} chapters are stitched into one "
+                f"{int(round(final_duration))}s film."
+            ),
+        }
+    )
+    return result
+
+
+async def _run_chapter_broll_segments(
+    *,
+    job_id: str,
+    tenant_id: str,
+    data: dict[str, Any],
+    brief: dict[str, Any],
+    copy: dict[str, Any],
+    format_type: str,
+    model: str,
+    vid_provider: Any,
+    broll_segments: list[dict[str, Any]],
+    native_narration,
+    generate_duration: int,
+) -> dict[str, Any]:
+    from pathlib import Path
+
+    from app.services.creative_studio_timeline import validate_video_prompt
+    from app.services.file_service import file_service
+    from app.services.ffmpeg_util import probe_video_duration
+    from app.services.media.seedance_multiscene import concat_video_files, conform_shot_duration
+    from app.services.video_subtitles import _ensure_local_video
+
+    segment_paths: list[Path] = []
+    segment_results: list[dict[str, Any]] = []
+    total = len(broll_segments)
+    continuity_url = (
+        str(data.get("continuity_style_url") or data.get("continuity_reference_url") or "")
+        .strip()
+        or None
+    )
+    for seg_index, segment in enumerate(broll_segments):
+        if is_job_cancel_requested(job_id):
+            return {"status": "cancelled", "error": "Cancelled by user"}
+        seg_url = str(segment.get("first_frame_url") or "").strip()
+        text_to_video = bool(segment.get("text_to_video")) or (
+            str(segment.get("kind") or "") == "presenter" and not seg_url
+        )
+        if not seg_url and not text_to_video:
+            raise RuntimeError(f"B-roll segment {seg_index + 1} is missing its approved still")
+        target_dur = float(segment.get("duration") or 4.0)
+        provider_dur = int(
+            segment.get("provider_duration") or max(4, math.ceil(target_dur))
+        )
+        title = str(segment.get("title") or segment.get("kind") or f"Segment {seg_index + 1}")
+        await update_job(
+            job_id,
+            progress=(
+                f"Presenter segment {seg_index + 1}/{total} (text-to-video)…"
+                if text_to_video
+                else f"B-roll segment {seg_index + 1}/{total} — {title[:48]}…"
+            ),
+        )
+        seg_prompt = str(segment.get("prompt") or "").strip()
+        narration = native_narration(
+            float(segment.get("start") or 0.0),
+            float(segment.get("end") or target_dur),
+        )
+        if text_to_video:
+            use_continuity = bool(segment.get("use_continuity")) and bool(continuity_url)
+            seg_motion = validate_video_prompt(
+                seg_prompt + narration
+            )
+            seg_brief = {
+                **brief,
+                "storyboard_image_urls": [],
+                "strict_opening_reference": False,
+                "continuity_reference_url": continuity_url if use_continuity else None,
+                "strict_continuity_reference": use_continuity,
+            }
+            source_image = continuity_url if use_continuity else None
+        else:
+            text_lock = (
+                "TEXT LOCK: Preserve every existing letter, number and label in the still exactly. "
+                if segment.get("preserve_text")
+                else ""
+            )
+            seg_motion = validate_video_prompt(
+                "FIRST FRAME LOCK: The attached approved still is the exact composition. "
+                "Animate subtly only — do not redraw or replace it.\n"
+                + text_lock
+                + "\n"
+                + seg_prompt
+                + narration
+            )
+            seg_brief = {
+                **brief,
+                "storyboard_image_urls": [seg_url],
+                "strict_opening_reference": True,
+            }
+            source_image = seg_url
+        seg_result = await vid_provider.generate(
+            prompt=seg_motion,
+            brief=seg_brief,
+            copy=copy,
+            format_type=format_type,
+            model=model,
+            tenant_id=tenant_id,
+            source_image_url=source_image,
+            duration_seconds=provider_dur,
+        )
+        if str((seg_result or {}).get("status") or "") != "done" or not (seg_result or {}).get("url"):
+            raise RuntimeError(
+                f"B-roll segment {seg_index + 1} failed: "
+                + str((seg_result or {}).get("error") or "no video returned")
+            )
+        segment_results.append(seg_result or {})
+        local = _ensure_local_video(str(seg_result["url"]), tenant_id=tenant_id)
+        if not local:
+            raise RuntimeError(f"B-roll segment {seg_index + 1} could not be read from disk")
+        trimmed = conform_shot_duration(Path(local), Path(local).with_suffix(".trim.mp4"), target_dur)
+        segment_paths.append(trimmed if trimmed else Path(local))
+
+    if not segment_paths:
+        raise RuntimeError("No B-roll segments were generated")
+
+    if len(segment_paths) == 1:
+        final_path = segment_paths[0]
+    else:
+        stitch_dir = (
+            Path(file_service.upload_dir) / tenant_id / "generated" / "seedance-stitch"
+        ).resolve()
+        stitch_dir.mkdir(parents=True, exist_ok=True)
+        final_path = stitch_dir / f"broll-ch-{job_id[:12]}.mp4"
+        concat_video_files(segment_paths, final_path)
+
+    actual_duration = probe_video_duration(final_path) or float(generate_duration)
+    saved = file_service.save_bytes(
+        content=final_path.read_bytes(),
+        tenant_id=tenant_id,
+        subfolder="generated",
+        suffix=".mp4",
+        content_type="video/mp4",
+    )
+    return {
+        "status": "done",
+        "model": str((segment_results[-1] or {}).get("model") or model),
+        "provider": "byteplus",
+        "url": saved["file_url"],
+        "duration_seconds": int(round(actual_duration)),
+        "requested_duration_seconds": generate_duration,
+        "segment_count": len(segment_paths),
+        "broll_segment_count": len(segment_paths),
+        "generated_duration_seconds": sum(
+            int(seg.get("provider_duration") or 4) for seg in broll_segments
+        ),
+        "continuity_chained": False,
+        "continuity_frame_count": 0,
+        "storyboard": [str(seg.get("title") or "") for seg in broll_segments],
+        "note": (
+            f"Generated {len(segment_paths)} approved-still B-roll segments and stitched "
+            f"one {int(round(actual_duration))}s chapter."
+        ),
+    }
+
+
+def _terminal_broll_provider_error(error: Any) -> str | None:
+    """Translate non-retryable image-provider failures into an actionable message."""
+    raw = str(error or "").strip()
+    low = raw.lower()
+    if not raw:
+        return None
+    if any(
+        marker in low
+        for marker in (
+            "credit_balance_exhausted",
+            "insufficient_quota",
+            "no credits remaining",
+        )
+    ):
+        return (
+            "GPT Image 2 could not generate the B-roll because the OpenAI API credit "
+            "balance is exhausted. Add OpenAI API credits, then use Generate remaining "
+            "B-roll stills. No Seedance video request was sent."
+        )
+    if any(marker in low for marker in ("invalid_api_key", "incorrect api key", "401 unauthorized")):
+        return (
+            "GPT Image 2 could not generate the B-roll because the configured OpenAI API "
+            "key was rejected. Correct the API key, then generate the remaining B-roll stills."
+        )
+    return None
+
+
 async def create_job(*, tenant_id: str, payload: dict[str, Any]) -> str:
     job_id = str(uuid.uuid4())
     async with _LOCK:
@@ -150,7 +703,12 @@ async def cancel_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
         try:
             from app.services.media.byteplus_seedance_client import delete_video_task
 
-            await delete_video_task(str(provider_task_id))
+            cancel_model = None
+            if isinstance(job.get("payload"), dict):
+                cancel_model = job["payload"].get("model")
+            if isinstance(job.get("result"), dict):
+                cancel_model = cancel_model or job["result"].get("model")
+            await delete_video_task(str(provider_task_id), model=cancel_model)
         except Exception as exc:
             logger.warning("Could not delete BytePlus task %s: %s", provider_task_id, exc)
 
@@ -189,6 +747,7 @@ async def recover_continuation_job(
     generated_duration_seconds: int | None = None,
     continuity_frame_count: int | None = None,
     cast_reference_url: str | None = None,
+    continuity_video_reference_url: str | None = None,
     production_id: str | None = None,
 ) -> dict[str, Any]:
     """Rebuild a staged continuation after the in-memory job store was lost."""
@@ -201,6 +760,12 @@ async def recover_continuation_job(
             "Could not locate the reviewed video part on the server. "
             "Re-open this chat and try again, or regenerate from your brief."
         )
+    approved_video_reference = str(continuity_video_reference_url or "").strip()
+    if not approved_video_reference.startswith(("http://", "https://", "asset://")):
+        raise ValueError(
+            "The approved chapter's original Seedance video reference is unavailable. "
+            "Continuation was stopped before submitting another billable generation."
+        )
     continuity_url = save_continuity_frame(video_path, tenant_id=tenant_id)
     next_id = str(uuid.uuid4())
     cont_payload = dict(payload or {})
@@ -210,6 +775,7 @@ async def recover_continuation_job(
             "staged_segment_paths": [str(video_path)],
             "continuity_reference_url": continuity_url,
             "cast_reference_url": cast_reference_url or continuity_url,
+            "continuity_video_reference_url": approved_video_reference,
             "continuity_frame_count": int(continuity_frame_count or 0),
             "continuity_privacy_fallback_count": 0,
             "generated_duration_seconds": int(generated_duration_seconds or 0),
@@ -262,6 +828,18 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
                 "progress": existing.get("progress") or "Queued — starting next part…",
             }
 
+        approved_video_reference = str(
+            result.get("continuity_video_reference_url") or ""
+        ).strip()
+        if not approved_video_reference:
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": (
+                    "The approved chapter video reference is unavailable. The next Seedance "
+                    "call was not submitted, so no continuation credits were used."
+                ),
+            }
         next_id = str(uuid.uuid4())
         payload = dict(parent.get("payload") or {})
         payload.update({
@@ -269,6 +847,7 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
             "staged_segment_paths": list(result.get("staged_segment_paths") or []),
             "continuity_reference_url": result.get("continuity_reference_url"),
             "cast_reference_url": result.get("cast_reference_url"),
+            "continuity_video_reference_url": approved_video_reference,
             "continuity_frame_count": int(result.get("continuity_frame_count") or 0),
             "continuity_privacy_fallback_count": int(
                 result.get("continuity_privacy_fallback_count") or 0
@@ -361,11 +940,14 @@ async def run_creative_studio_job(job_id: str) -> None:
         model = (data.get("model") or "").strip()
         prompt_only_requested = bool(data.get("prompt_only_video"))
         neg = (data.get("negative_prompt") or "").strip()
-        # Image prompts must exclude typography, but video prompts must retain the user's
-        # exact overlay copy. Sanitizing both was silently deleting all requested text.
+        preserve_image_text = bool(data.get("preserve_image_text"))
+        # Storyboard images stay typography-free by default. The explicit
+        # image-first workflow preserves requested in-scene screen/sign text so
+        # the user can review spelling before sending the still to Seedance.
         visual_prompt = (
             prompt
             if str(data.get("media_mode") or "video").strip().lower() == "video"
+            or preserve_image_text
             else sanitize_visual_prompt(prompt)
         )
         product_ref_early = str(data.get("product_reference_url") or "").strip()
@@ -399,17 +981,100 @@ async def run_creative_studio_job(job_id: str) -> None:
                 .strip()
                 or None
             )
-            if product_ref:
+            clone_mode = bool(data.get("clone_mode"))
+            background_only_image = bool(data.get("background_only_image")) or bool(
+                data.get("broll_index")
+            )
+            character_refs: list[str] = []
+            scene_ref = None
+            for asset in data.get("reference_assets") or []:
+                if not isinstance(asset, dict):
+                    continue
+                role = str(asset.get("role") or "").strip().lower()
+                url = str(asset.get("url") or "").strip()
+                if role == "character" and url and url not in character_refs:
+                    character_refs.append(url)
+                if role == "scene" and url and not scene_ref:
+                    scene_ref = url
+            contains_person = bool(re.search(
+                r"(?i)\b(?:person|people|woman|man|adult|presenter|customer|worker|staff|homeowner)\b",
+                visual_prompt,
+            ))
+            character_refs = character_refs[:8]
+            generated_character_url: str | None = None
+            if clone_mode and not character_refs:
+                identity_direction = str(data.get("clone_identity_prompt") or "").strip()
+                identity_prompt = (
+                    "Create one photorealistic reusable character reference portrait. "
+                    f"Person description: {identity_direction or 'a polished professional adult suitable for the requested advertising scene'}. "
+                    "Show exactly one person, waist-up or full-body, facing camera with a natural neutral expression. "
+                    "Use clean soft studio lighting and a simple neutral background. Keep the face, hair, age, skin tone, "
+                    "body build and wardrobe clear for identity reuse. Correct anatomy and natural hands. "
+                    "No other people, no collage, no captions, no logos, no watermark and no readable text."
+                )
                 await update_job(
                     job_id,
-                    progress="Generating image from your product photo…",
+                    progress="Creating a reusable Character portrait first…",
+                )
+                identity_result = await provider.generate(
+                    prompt=identity_prompt,
+                    tenant_id=tenant_id,
+                    model=model,
+                    format_type=format_type,
+                    reference_purpose="character",
+                )
+                generated_character_url = str((identity_result or {}).get("url") or "").strip() or None
+                if not generated_character_url:
+                    await update_job(
+                        job_id,
+                        status="failed",
+                        progress="Failed",
+                        error=(identity_result or {}).get("error") or "Could not create the Character portrait",
+                    )
+                    return
+                character_refs = [generated_character_url]
+                await update_job(
+                    job_id,
+                    progress="Character created. Building the clone scene from that identity…",
+                )
+            character_ref = character_refs[0] if character_refs else None
+            if background_only_image and not clone_mode:
+                visual_prompt = (
+                    "SUPPORTING B-ROLL OR BACKGROUND STILL ONLY. Do not depict, recreate or "
+                    "place the selected presenter or character in this image. Do not create a "
+                    "talking head or spokesperson. Generate only the environment, product, "
+                    "props, display visual or contextual workers explicitly requested by this "
+                    f"B-roll prompt. {visual_prompt}"
+                )
+            continuity_style = str(data.get("continuity_style_url") or "").strip() or None
+            reference_url = product_ref
+            reference_purpose = "product"
+            if continuity_style:
+                reference_url = continuity_style
+                reference_purpose = "style"
+                if not re.search(r"(?i)continuity", visual_prompt):
+                    visual_prompt = (
+                        f"{visual_prompt} CAST CONTINUITY: match the attached continuity frame."
+                    )
+            elif not background_only_image and (clone_mode or contains_person) and character_ref:
+                reference_url = character_ref
+                reference_purpose = "character"
+            elif not reference_url and scene_ref:
+                reference_url = scene_ref
+                reference_purpose = "scene"
+            if reference_url:
+                await update_job(
+                    job_id,
+                    progress=f"Generating image from your {reference_purpose} reference…",
                 )
             result = await provider.generate(
                 prompt=visual_prompt,
                 tenant_id=tenant_id,
                 model=model,
                 format_type=format_type,
-                reference_image_url=product_ref,
+                reference_image_url=reference_url,
+                reference_image_urls=character_refs if clone_mode else None,
+                reference_purpose=reference_purpose,
             )
             if is_job_cancel_requested(job_id):
                 await update_job(
@@ -423,11 +1088,20 @@ async def run_creative_studio_job(job_id: str) -> None:
                 provider=str((result or {}).get("provider") or "image"),
                 model=model,
             )
+            if generated_character_url and credits:
+                credits *= 2
             note = (result or {}).get("note") or (
-                "Still matched to attached product photo."
+                "Clone image saved as a reusable Character reference."
+                if clone_mode
+                else
+                "GPT Image 2 starting scene; verify all requested in-scene text before approving."
+                if preserve_image_text
+                else "Still matched to attached product photo."
                 if product_ref
                 else "Visual-only still (no on-image text requested)."
             )
+            if clone_mode and generated_character_url:
+                note = "Created a reusable Character portrait, then generated the clone scene from that identity."
             await update_job(
                 job_id,
                 status=str((result or {}).get("status") or "failed"),
@@ -435,10 +1109,19 @@ async def run_creative_studio_job(job_id: str) -> None:
                 error=(result or {}).get("error"),
                 result={
                     "url": (result or {}).get("url"),
+                    "byteplus_url": (result or {}).get("byteplus_url"),
                     "model": str((result or {}).get("model") or model),
                     "provider": (result or {}).get("provider"),
                     "credits_estimate": credits or None,
                     "product_reference_url": product_ref,
+                    "reference_image_url": reference_url,
+                    "reference_purpose": reference_purpose,
+                    "broll_index": data.get("broll_index"),
+                    "broll_title": data.get("broll_title"),
+                    "media_mode": "broll_image" if data.get("broll_index") else "image",
+                    "asset_role": "character" if clone_mode else "still",
+                    "clone_mode": clone_mode,
+                    "character_reference_url": generated_character_url or character_ref,
                     "note": note,
                 },
             )
@@ -667,6 +1350,180 @@ async def run_creative_studio_job(job_id: str) -> None:
             )
             return
 
+        if mode == "broll_board":
+            if is_job_cancel_requested(job_id):
+                await update_job(
+                    job_id,
+                    status="cancelled",
+                    progress="Stopped by user",
+                    error="Cancelled by user",
+                )
+                return
+            plan_in = data.get("broll_plan") or data.get("storyboard_scenes") or []
+            if not isinstance(plan_in, list) or not plan_in:
+                await update_job(
+                    job_id,
+                    status="failed",
+                    progress="Failed",
+                    error="No B-roll images to generate",
+                )
+                return
+            brand_name = str(data.get("brand_name") or "").strip()
+            provider = get_image_provider(model)
+            frames: list[dict[str, Any]] = []
+            total = min(12, len(plan_in))
+            style_anchor: str | None = None
+            terminal_error: str | None = None
+            await update_job(
+                job_id,
+                progress=f"B-roll board 0/{total} — generating dashboard stills…",
+            )
+
+            async def _one_broll(item: dict[str, Any], idx: int) -> dict[str, Any]:
+                broll_idx = int(item.get("index") or idx + 1)
+                sp = str(item.get("image_prompt") or item.get("prompt") or "").strip()
+                title = str(item.get("title") or f"IMAGE {broll_idx}")[:80]
+                wants_readable = bool(item.get("wants_readable_text", True))
+                frame_prompt = sp if wants_readable or preserve_image_text else sanitize_visual_prompt(sp)
+                if brand_name:
+                    frame_prompt = (
+                        f"{frame_prompt} Keep all screens, clothing, cartons, signs and packaging clean "
+                        "and unbranded. Verified brand artwork is composited after generation."
+                    )
+                ref_url = style_anchor
+                ref_purpose = "style"
+                res = await provider.generate(
+                    prompt=frame_prompt[:2200],
+                    tenant_id=tenant_id,
+                    model=model,
+                    format_type=format_type,
+                    reference_image_url=ref_url,
+                    reference_purpose=ref_purpose,
+                )
+                return {
+                    "id": str(item.get("id") or f"broll-{broll_idx}"),
+                    "index": broll_idx,
+                    "title": title,
+                    "image_prompt": sp[:2200],
+                    "overlays": list(item.get("overlays") or [])[:6],
+                    "url": (res or {}).get("url"),
+                    "byteplus_url": (res or {}).get("byteplus_url"),
+                    "status": str((res or {}).get("status") or "failed"),
+                    "error": (res or {}).get("error"),
+                    "wants_readable_text": wants_readable,
+                }
+
+            for i, item in enumerate(plan_in[:total]):
+                if is_job_cancel_requested(job_id):
+                    await update_job(
+                        job_id,
+                        status="cancelled",
+                        progress="Stopped by user",
+                        error="Cancelled by user",
+                        result={"storyboard": frames, "media_mode": "broll_board"},
+                    )
+                    return
+                if not isinstance(item, dict):
+                    continue
+                broll_idx = int(item.get("index") or i + 1)
+                title_hint = str(item.get("title") or f"IMAGE {broll_idx}")[:40]
+                await update_job(
+                    job_id,
+                    progress=f"B-roll IMAGE {broll_idx} ({i + 1}/{total}) — {title_hint}…",
+                    result={
+                        "storyboard": frames
+                        + [
+                            {
+                                "id": str(item.get("id") or f"broll-{broll_idx}"),
+                                "index": broll_idx,
+                                "title": title_hint,
+                                "url": None,
+                                "status": "running",
+                            }
+                        ],
+                        "media_mode": "broll_board",
+                    },
+                )
+                try:
+                    frame = await _one_broll(item, i)
+                except Exception as exc:
+                    logger.exception("B-roll IMAGE %s failed", broll_idx)
+                    frame = {
+                        "id": f"broll-{broll_idx}",
+                        "index": broll_idx,
+                        "title": title_hint,
+                        "image_prompt": "",
+                        "overlays": [],
+                        "url": None,
+                        "status": "failed",
+                        "error": str(exc)[:400],
+                    }
+                frames.append(frame)
+                terminal_error = _terminal_broll_provider_error(frame.get("error"))
+                if frame.get("url") and not style_anchor:
+                    style_anchor = str(frame["url"])
+                done_urls = [f.get("url") for f in frames if f.get("url")]
+                await update_job(
+                    job_id,
+                    progress=(
+                        f"B-roll IMAGE {broll_idx} done — "
+                        f"{len(done_urls)}/{total} still(s) ready…"
+                    ),
+                    result={
+                        "url": done_urls[0] if done_urls else None,
+                        "storyboard": list(frames),
+                        "media_mode": "broll_board",
+                    },
+                )
+                if terminal_error:
+                    await update_job(
+                        job_id,
+                        progress=f"B-roll generation stopped after IMAGE {broll_idx}",
+                        error=terminal_error,
+                    )
+                    break
+
+            ok_frames = [f for f in frames if f.get("url") and f.get("status") in {"done", "mock"}]
+            first_url = (ok_frames[0]["url"] if ok_frames else None) or (
+                frames[0].get("url") if frames else None
+            )
+            status = "done" if ok_frames else "failed"
+            first_frame_error = next(
+                (str(frame.get("error") or "").strip() for frame in frames if frame.get("error")),
+                "",
+            )
+            err = (
+                None
+                if ok_frames
+                else terminal_error
+                or first_frame_error[:600]
+                or "All B-roll stills failed"
+            )
+            await update_job(
+                job_id,
+                status=status,
+                progress=(
+                    f"B-roll board ready — {len(ok_frames)}/{total} stills"
+                    if ok_frames
+                    else "B-roll board stopped — provider action required"
+                    if terminal_error
+                    else "B-roll board failed"
+                ),
+                error=err,
+                result={
+                    "url": first_url,
+                    "model": model,
+                    "provider": "openai",
+                    "storyboard": frames,
+                    "media_mode": "broll_board",
+                    "note": (
+                        f"B-roll board: {len(ok_frames)} still(s) ready. "
+                        "Regenerate any wrong dashboard, then Approve all B-roll for Seedance."
+                    ),
+                },
+            )
+            return
+
         seed_url: str | None = None
         use_byteplus = is_byteplus_seedance_model(model)
         clip_cap = seedance_clip_cap_seconds(model) if use_byteplus else 15
@@ -684,14 +1541,28 @@ async def run_creative_studio_job(job_id: str) -> None:
             and not seed_url
         )
         requested_duration = max(5, min(600, int(data.get("duration_seconds") or 15)))
-        if use_byteplus and requested_duration > 120:
+        chapter_image_staging = bool(data.get("chapter_image_staging"))
+        memory_duration = (
+            max(5, min(600, int(data.get("full_film_duration") or requested_duration)))
+            if chapter_image_staging
+            else requested_duration
+        )
+        if use_byteplus and memory_duration > 120:
             raise ValueError(
                 "Creative Studio Seedance long-video mode supports up to 120 seconds. "
                 "Choose 2m or shorter."
             )
         sound_on = bool(data.get("sound_on", True))
+        speech_mode = str(data.get("speech_mode") or "external_voiceover").strip().lower()
+        if speech_mode not in {"native_presenter", "external_voiceover"}:
+            speech_mode = "external_voiceover"
+        native_presenter_speech = bool(sound_on and speech_mode == "native_presenter")
         from app.core.config import settings
-        from app.services.creative_studio_video_finishing import extract_voiceover_events, voiceover_requested
+        from app.services.creative_studio_video_finishing import (
+            extract_overlay_events,
+            extract_voiceover_events,
+            voiceover_requested,
+        )
         from app.services.creative_studio_timeline import (
             segment_motion_prompt, validate_video_prompt, explicit_shot_windows,
             select_complete_timeline_prompt,
@@ -725,29 +1596,32 @@ async def run_creative_studio_job(job_id: str) -> None:
                 total=requested_duration,
             )
         voice_events = extract_voiceover_events(
-            finishing_brief, duration_seconds=requested_duration
+            finishing_brief, duration_seconds=memory_duration
         )
+        overlay_events = extract_overlay_events(finishing_brief)
         if sound_on and not voice_events:
             voice_events = extract_voiceover_events(
-                visual_prompt, duration_seconds=requested_duration
+                visual_prompt, duration_seconds=memory_duration
             )
         if sound_on and not voice_events:
             from app.services.creative_studio_video_finishing import plan_requested_voiceover
 
             try:
                 voice_events = await plan_requested_voiceover(
-                    finishing_brief, duration_seconds=requested_duration
+                    finishing_brief, duration_seconds=memory_duration
                 )
             except Exception:
                 logger.exception("Narration planning failed; requesting native narration")
         prepared_narration = None
         narration_fallback = False
-        timed_tts = bool(sound_on and voice_events)
+        # Native presenter mode gives one engine ownership of both the voice and
+        # mouth motion. External voiceover preserves the existing exact-TTS path.
+        timed_tts = bool(sound_on and voice_events and not native_presenter_speech)
         if timed_tts:
             from app.services.creative_studio_video_finishing import normalize_voiceover_windows
 
             voice_events = normalize_voiceover_windows(
-                voice_events, duration_seconds=requested_duration,
+                voice_events, duration_seconds=memory_duration,
             )
         reference_lock = normalized_reference_lock(
             list(data.get("reference_assets") or []),
@@ -758,7 +1632,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             tenant_id=tenant_id,
             session_id=production_session_id,
             prompt=finishing_brief,
-            duration_seconds=requested_duration,
+            duration_seconds=memory_duration,
             clip_cap=clip_cap,
             aspect=str(data.get("aspect") or "9/16"),
             resolution=str(data.get("resolution") or "1080p"),
@@ -781,9 +1655,11 @@ async def run_creative_studio_job(job_id: str) -> None:
             seed_image_url=seed_url,
             sound_on=sound_on,
             voice_events=voice_events,
+            speech_mode=speech_mode,
             reference_assets=list(data.get("reference_assets") or []),
             product_reference_url=str(data.get("product_reference_url") or "").strip() or None,
             logo_reference_url=str(data.get("logo_reference_url") or "").strip() or None,
+            require_storyboard_coverage=bool(data.get("require_storyboard_coverage", True)),
         )
         await update_job(
             job_id,
@@ -958,12 +1834,31 @@ async def run_creative_studio_job(job_id: str) -> None:
                 "naturally closed between subtle reactions; narration is strictly off-camera."
             )
         elif sound_on and voice_events:
-            motion_prompt += "\nAUDIO: Speak only the exact labelled narration at its specified times. Never read production directions.\n"
+            motion_prompt += (
+                "\nAUDIO MODE — NATIVE PRESENTER SPEECH: Seedance owns the only spoken voice "
+                "and the matching mouth motion. The visible presenter speaks only the exact labelled "
+                "dialogue at its specified times. During B-roll, the identical voice continues off-camera. "
+                "Use one consistent voice, accent, pitch, pace, tone and loudness. Never read production "
+                "directions and never add a second narrator.\n"
+            )
         elif sound_on and voiceover_requested(finishing_brief):
             motion_prompt += (
                 "\nAUDIO: Include a short natural voiceover relevant to the scene and campaign. "
                 "Do not read camera directions, scene labels, or production instructions."
             )
+        if chapter_image_staging and seed_url:
+            motion_prompt = (
+                "FIRST FRAME LOCK: The attached approved still is the exact opening composition. "
+                "Begin on this frame and animate forward — do not replace, redraw, or ignore it.\n\n"
+                + motion_prompt
+            )
+            approved_frames = [
+                str(url or "").strip()
+                for url in (data.get("storyboard_image_urls") or [])
+                if str(url or "").strip()
+            ]
+            if seed_url not in approved_frames:
+                data["storyboard_image_urls"] = [seed_url, *approved_frames][:9]
         def native_narration(start: float, end: float) -> str:
             if not sound_on or timed_tts:
                 return ""
@@ -989,6 +1884,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             # Exact narration owns the complete audio identity. Native provider
             # audio can introduce a second speaker and a different mix per call.
             "creative_studio_generate_audio": bool(sound_on and not timed_tts),
+            "creative_studio_speech_mode": speech_mode,
             "creative_studio_job_id": job_id,
             "seed_image_role": seed_image_role,
             "storyboard_image_urls": [] if prompt_only_video else list(data.get("storyboard_image_urls") or [])[:9],
@@ -1021,8 +1917,23 @@ async def run_creative_studio_job(job_id: str) -> None:
             )
             return
         shot_windows = explicit_shot_windows(motion_prompt, total=generate_duration) if use_byteplus else []
+        broll_segments = list(data.get("broll_segments") or [])
+        if chapter_image_staging and use_byteplus and broll_segments:
+            result = await _run_chapter_broll_segments(
+                job_id=job_id,
+                tenant_id=tenant_id,
+                data=data,
+                brief=brief,
+                copy=copy,
+                format_type=format_type,
+                model=model,
+                vid_provider=vid_provider,
+                broll_segments=broll_segments,
+                native_narration=native_narration,
+                generate_duration=generate_duration,
+            )
         # Keep short multi-shot ads in one model context for product/cast continuity.
-        if use_byteplus and generate_duration > clip_cap:
+        elif use_byteplus and generate_duration > clip_cap:
             from app.services.file_service import file_service
             from app.services.ffmpeg_util import probe_video_duration
             from app.services.logo_overlay import file_url_to_local_path
@@ -1085,9 +1996,16 @@ async def run_creative_studio_job(job_id: str) -> None:
             partial_warning: str | None = None
             continuity_reference_url: str | None = data.get("continuity_reference_url") or None
             cast_reference_url: str | None = data.get("cast_reference_url") or None
+            continuity_video_reference_url: str | None = (
+                data.get("continuity_video_reference_url") or None
+            )
             if accepted_log and not continuity_reference_url:
                 continuity_reference_url = str(
                     accepted_log[-1].get("continuity_frame_url") or ""
+                ).strip() or None
+            if accepted_log and not continuity_video_reference_url:
+                continuity_video_reference_url = str(
+                    accepted_log[-1].get("provider_video_url") or ""
                 ).strip() or None
             continuity_frame_count = int(data.get("continuity_frame_count") or 0)
             continuity_privacy_fallback_count = int(
@@ -1151,6 +2069,12 @@ async def run_creative_studio_job(job_id: str) -> None:
                         error="Cancelled by user",
                     )
                     return
+                if interactive_staging and segment_index > 0 and not continuity_video_reference_url:
+                    raise RuntimeError(
+                        "The previous approved Seedance chapter video reference is unavailable. "
+                        "Generation stopped before submitting the next billable chapter to avoid "
+                        "inventing a different presenter, voice or location."
+                    )
                 segment_start = elapsed
                 segment_end = elapsed + segment_duration
                 chapter_input_continuity_url = continuity_reference_url
@@ -1264,6 +2188,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         ]
                         attempt_cast_reference_url = cast_reference_url
                         attempt_continuity_reference_url = continuity_reference_url
+                        attempt_continuity_video_url = continuity_video_reference_url
                         attempt_strict_continuity = bool(continuity_reference_url)
                         attempt_strict_character = bool(brief.get("strict_character_reference"))
                         attempt_source_image_url = (
@@ -1338,6 +2263,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                                 "reference_assets": attempt_reference_assets,
                                 "cast_reference_url": attempt_cast_reference_url,
                                 "continuity_reference_url": attempt_continuity_reference_url,
+                                "continuity_video_reference_url": attempt_continuity_video_url,
                                 "strict_continuity_reference": attempt_strict_continuity,
                                 "strict_character_reference": attempt_strict_character,
                                 "strict_opening_reference": attempt_strict_opening,
@@ -1565,6 +2491,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                         usable_duration,
                     )
                     segment_paths.append(segment_path)
+                    next_video_reference = str(
+                        (segment_result or {}).get("remote_url") or ""
+                    ).strip()
+                    if next_video_reference.startswith(("http://", "https://", "asset://")):
+                        continuity_video_reference_url = next_video_reference
                     chapter_elapsed += usable_duration
                     chapter_remaining = max(0.0, float(segment_duration) - chapter_elapsed)
 
@@ -1738,6 +2669,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                         provider_task_id=str(
                             (segment_results[-1] or {}).get("task_id") or ""
                         ) or None,
+                        provider_video_url=str(
+                            (segment_results[-1] or {}).get("remote_url") or ""
+                        ) or None,
                     )
                     await update_job(
                         job_id,
@@ -1764,10 +2698,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                             "note": (
                                 f"Part {completed}/{len(segment_durations)} is ready. Review this "
                                 "chapter, then generate the next part. The next Seedance call will "
-                                "use this part's exact final frame and the remaining timed prompt."
+                                "use this approved chapter video, its exact final frame and the remaining timed prompt."
                             ),
                             "staged_segment_paths": [str(path) for path in segment_paths],
                             "continuity_reference_url": continuity_reference_url,
+                            "continuity_video_reference_url": continuity_video_reference_url,
                             "cast_reference_url": cast_reference_url,
                             "generated_duration_seconds": generated_seconds,
                             "provider_usage": [
@@ -1928,6 +2863,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                     continuity_frame_url=continuity_reference_url,
                     qa=final_chapter_quality,
                     provider_task_id=str((segment_results[-1] or {}).get("task_id") or "") or None,
+                    provider_video_url=str(
+                        (segment_results[-1] or {}).get("remote_url") or ""
+                    ) or None,
                 )
                 result["quality_gate"] = final_chapter_quality
                 result["production_id"] = production_memory["production_id"]
@@ -1960,8 +2898,12 @@ async def run_creative_studio_job(job_id: str) -> None:
             finishing_brief = str(data.get("source_brief") or visual_prompt or "")
             current_url = str(result["url"])
             overlay_events = extract_overlay_events(finishing_brief)
+            defer_finishing_for_staged_film = bool(
+                data.get("chapter_image_staging")
+                and int(data.get("film_total_chapters") or 1) > 1
+            )
 
-            if timed_tts:
+            if timed_tts and not defer_finishing_for_staged_film:
                 try:
                     current_url, voiceover_result = await apply_timed_voiceover(
                         current_url, voice_events, tenant_id=tenant_id,
@@ -1992,7 +2934,7 @@ async def run_creative_studio_job(job_id: str) -> None:
 
             logo_url = str(data.get("logo_reference_url") or "").strip() or None
             logo_applied = False
-            if overlay_events:
+            if overlay_events and not defer_finishing_for_staged_film:
                 from app.services.creative_studio_picture import compose_campaign_graphics
                 current_url, overlays_applied = compose_campaign_graphics(
                     current_url, overlay_events, tenant_id=tenant_id,
@@ -2001,28 +2943,43 @@ async def run_creative_studio_job(job_id: str) -> None:
                 result["text_overlays_applied"] = overlays_applied
                 result["text_overlay_count"] = len(overlay_events)
                 logo_applied = bool(logo_url and overlays_applied)
-            elif logo_url:
-                from app.services.creative_studio_picture import apply_uploaded_logo_end_hold
+            elif logo_url and not defer_finishing_for_staged_film:
+                # Multi-chapter image-first films stitch several 15s clips. Burning
+                # the logo on each chapter pollutes the middle of the ad (e.g. 0:10–0:15
+                # of clip 1). Defer logo to the final stitched export only.
+                film_total = int(data.get("film_total_chapters") or 1)
+                film_index = int(data.get("film_chapter_index") or 0)
+                defer_logo_for_staging = bool(
+                    data.get("chapter_image_staging") and film_total > 1
+                )
+                if not defer_logo_for_staging:
+                    from app.services.creative_studio_picture import apply_uploaded_logo_end_hold
 
-                try:
-                    current_url, end_logo_applied = apply_uploaded_logo_end_hold(
-                        current_url,
-                        tenant_id=tenant_id,
-                        logo_url=logo_url,
-                        hold_seconds=5.0,
-                    )
-                    if end_logo_applied:
-                        logo_applied = True
-                        result["logo_end_hold_seconds"] = min(
-                            5.0,
-                            float((result or {}).get("duration_seconds") or generate_duration or 5),
+                    try:
+                        current_url, end_logo_applied = apply_uploaded_logo_end_hold(
+                            current_url,
+                            tenant_id=tenant_id,
+                            logo_url=logo_url,
+                            hold_seconds=5.0,
                         )
-                except Exception as exc:
-                    logger.exception("Creative Studio logo end hold failed")
-                    result["logo_warning"] = (
-                        "Uploaded logo could not be composited on the end hold: "
-                        + str(exc)[:240]
-                    )
+                        if end_logo_applied:
+                            logo_applied = True
+                            result["logo_end_hold_seconds"] = min(
+                                5.0,
+                                float(
+                                    (result or {}).get("duration_seconds")
+                                    or generate_duration
+                                    or 5
+                                ),
+                            )
+                    except Exception as exc:
+                        logger.exception("Creative Studio logo end hold failed")
+                        result["logo_warning"] = (
+                            "Uploaded logo could not be composited on the end hold: "
+                            + str(exc)[:240]
+                        )
+                else:
+                    result["logo_deferred"] = film_index + 1 < film_total
             if logo_applied:
                 result["logo_applied"] = True
             if timed_tts and (result.get("voiceover") or {}).get("status") != "done":
@@ -2146,45 +3103,34 @@ async def run_creative_studio_job(job_id: str) -> None:
                 " Exact USD charge is unavailable in the task response; check BytePlus billing."
             )
         status = str((result or {}).get("status") or "failed")
+        if chapter_image_staging and isinstance(result, dict):
+            result = await _apply_chapter_image_staging_result(
+                tenant_id=tenant_id,
+                data=data,
+                result=result,
+                production_memory=production_memory,
+                generate_duration=generate_duration,
+                voice_events=voice_events,
+                prepared_narration=prepared_narration,
+                overlay_events=overlay_events,
+            )
+            status = str(result.get("status") or status)
         await update_job(
             job_id,
             status=status if status in {"done", "mock", "failed"} else "failed",
             progress=("Completed with audio warnings" if (result or {}).get("audio_warning") else "Done")
             if status in {"done", "mock"} else "Failed",
             error=(result or {}).get("error"),
-            result={
-                "url": (result or {}).get("url"),
-                "model": str((result or {}).get("model") or model),
-                "provider": (result or {}).get("provider"),
-                "seed_image_url": seed_url,
-                "duration_seconds": (result or {}).get("duration_seconds")
-                or generate_duration,
-                "requested_duration_seconds": requested_duration,
-                "segment_count": (result or {}).get("segment_count"),
-                "continuity_chained": bool((result or {}).get("continuity_chained")),
-                "continuity_frame_count": (result or {}).get("continuity_frame_count"),
-                "continuity_privacy_fallback_count": (
-                    result or {}
-                ).get("continuity_privacy_fallback_count"),
-                "storyboard_scene_anchored": bool(
-                    (result or {}).get("storyboard_scene_anchored")
-                ),
-                "partial": bool((result or {}).get("partial")),
-                "credits_estimate": credits or None,
-                "duration_warning": str(out_warn) if out_warn else None,
-                "note": stitch_note,
-                "voiceover": (result or {}).get("voiceover"),
-                "audio_present": (result or {}).get("audio_present"),
-                "audio_warning": (result or {}).get("audio_warning"),
-                "provider_usage": (result or {}).get("provider_usage"),
-                "text_overlays_applied": bool(
-                    (result or {}).get("text_overlays_applied")
-                ),
-                "text_overlay_count": (result or {}).get("text_overlay_count"),
-                "logo_applied": bool((result or {}).get("logo_applied")),
-                "logo_end_hold_seconds": (result or {}).get("logo_end_hold_seconds"),
-                "logo_warning": (result or {}).get("logo_warning"),
-            },
+            result=_video_job_result_payload(
+                result=result if isinstance(result, dict) else {},
+                model=model,
+                seed_url=seed_url,
+                generate_duration=generate_duration,
+                requested_duration=requested_duration,
+                stitch_note=stitch_note,
+                credits=credits,
+                out_warn=out_warn,
+            ),
         )
     except Exception as exc:
         logger.exception("Creative Studio job %s failed", job_id)

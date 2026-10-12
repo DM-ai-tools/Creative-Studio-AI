@@ -72,6 +72,59 @@ def normalized_reference_lock(
     ]
 
 
+def reference_lock_conflicts(
+    locked: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> bool:
+    """True when incoming refs contradict an already locked production package."""
+    locked_by_url = {
+        str(item.get("url") or "").strip(): str(item.get("role") or "reference").strip().lower()
+        for item in locked
+        if str(item.get("url") or "").strip()
+    }
+    locked_by_role = {
+        str(item.get("role") or "reference").strip().lower(): str(item.get("url") or "").strip()
+        for item in locked
+        if str(item.get("url") or "").strip()
+    }
+    for item in incoming:
+        url = str(item.get("url") or "").strip()
+        role = str(item.get("role") or "reference").strip().lower()
+        if not url:
+            continue
+        if url in locked_by_url and locked_by_url[url] != role:
+            return True
+        if role in locked_by_role and locked_by_role[role] != url:
+            if role in {"product", "logo", "character", "scene"}:
+                return True
+    return False
+
+
+def merge_reference_lock(
+    locked: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Keep locked refs authoritative; allow new supplemental refs (e.g. presenter anchor)."""
+    combined: list[dict[str, Any]] = [dict(item) for item in locked]
+    locked_urls = {str(item.get("url") or "").strip() for item in locked}
+    locked_roles = {
+        str(item.get("role") or "reference").strip().lower() for item in locked
+    }
+    for item in incoming:
+        url = str(item.get("url") or "").strip()
+        role = str(item.get("role") or "reference").strip().lower()
+        if not url or url in locked_urls:
+            continue
+        if role in locked_roles:
+            continue
+        combined.append({"url": url, "role": role})
+    return normalized_reference_lock(
+        combined,
+        product_reference_url=None,
+        logo_reference_url=None,
+    )
+
+
 def _chapter_windows(
     prompt: str, duration: int, clip_cap: int, *, storyboard_count: int = 0
 ) -> list[tuple[float, float]]:
@@ -213,17 +266,29 @@ def ensure_production_memory(
     existing = load_production_memory(tenant_id, session_id)
     prompt_hash = _digest(str(prompt or "").strip())
     refs_hash = _digest(references)
-    if existing and existing.get("status") == "active" and existing.get("chapter_log"):
-        if existing.get("canonical_prompt_sha256") != prompt_hash:
-            # Button labels and short follow-up prompts must never replace the film bible.
-            # A new chat creates a new session id and therefore a new production.
-            prompt = str(existing.get("canonical_prompt") or prompt)
-        if existing.get("reference_lock_sha256") != refs_hash:
-            raise ValueError(
-                "Production references are already locked. Keep the same character, product, "
-                "scene and logo assets for every chapter, or start a new Creative Studio chat."
-            )
-        return existing
+    if existing and existing.get("status") == "active":
+        locked = bool(existing.get("chapter_log")) or bool(
+            existing.get("broll_plan") or existing.get("approved_broll")
+        )
+        if locked:
+            if existing.get("chapter_log") and existing.get("canonical_prompt_sha256") != prompt_hash:
+                # Button labels and short follow-up prompts must never replace the film bible.
+                # A new chat creates a new session id and therefore a new production.
+                prompt = str(existing.get("canonical_prompt") or prompt)
+            if existing.get("reference_lock_sha256") != refs_hash:
+                locked_refs = list(existing.get("reference_lock") or [])
+                if reference_lock_conflicts(locked_refs, references):
+                    raise ValueError(
+                        "Production references are already locked. Keep the same character, product, "
+                        "scene and logo assets for every chapter, or start a new Creative Studio chat."
+                    )
+                merged = merge_reference_lock(locked_refs, references)
+                if merged != locked_refs:
+                    existing["reference_lock"] = merged
+                    existing["reference_lock_sha256"] = _digest(merged)
+                    existing["updated_at"] = _now()
+                    save_production_memory(tenant_id, existing)
+            return existing
     memory = create_production_memory(
         tenant_id=tenant_id,
         session_id=session_id,
@@ -303,6 +368,7 @@ def append_chapter_log(
     continuity_frame_url: str | None,
     qa: dict[str, Any],
     provider_task_id: str | None,
+    provider_video_url: str | None = None,
 ) -> None:
     log = list(memory.get("chapter_log") or [])
     entry = {
@@ -315,6 +381,7 @@ def append_chapter_log(
         "qa_status": qa.get("status"),
         "qa": qa,
         "provider_task_id": provider_task_id,
+        "provider_video_url": provider_video_url,
         "reference_lock_sha256": memory.get("reference_lock_sha256"),
     }
     log = [item for item in log if int(item.get("chapter") or 0) != chapter_index + 1]
@@ -324,6 +391,76 @@ def append_chapter_log(
     if len(log) >= len(memory.get("shot_list") or []):
         memory["status"] = "complete"
     save_production_memory(tenant_id, memory)
+
+
+def ensure_broll_plan(memory: dict[str, Any], plan: list[dict[str, Any]]) -> None:
+    if not plan:
+        return
+    existing = list(memory.get("broll_plan") or [])
+    if existing:
+        return
+    memory["broll_plan"] = plan
+    memory["approved_broll"] = dict(memory.get("approved_broll") or {})
+
+
+def approve_broll_still(
+    tenant_id: str,
+    memory: dict[str, Any],
+    *,
+    index: int,
+    url: str,
+    title: str = "",
+    byteplus_url: str | None = None,
+) -> None:
+    approved = dict(memory.get("approved_broll") or {})
+    approved[str(int(index))] = {
+        "index": int(index),
+        "title": title[:120],
+        "url": str(url or "").strip(),
+        "byteplus_url": str(byteplus_url or "").strip() or None,
+        "approved_at": _now(),
+    }
+    memory["approved_broll"] = approved
+    save_production_memory(tenant_id, memory)
+
+
+def approved_broll_urls(memory: dict[str, Any]) -> dict[int, str]:
+    approved = memory.get("approved_broll") or {}
+    out: dict[int, str] = {}
+    if isinstance(approved, dict):
+        for key, value in approved.items():
+            if isinstance(value, dict):
+                url = str(value.get("url") or "").strip()
+                if url:
+                    out[int(key)] = url
+            elif isinstance(value, str) and value.strip():
+                out[int(key)] = value.strip()
+    return out
+
+
+def approved_broll_seedance_urls(memory: dict[str, Any]) -> dict[int, str]:
+    """URLs to pass to Seedance — prefer BytePlus TOS URLs for same-account trust."""
+    approved = memory.get("approved_broll") or {}
+    out: dict[int, str] = {}
+    if isinstance(approved, dict):
+        for key, value in approved.items():
+            if isinstance(value, dict):
+                seedance_url = str(value.get("byteplus_url") or value.get("url") or "").strip()
+                if seedance_url:
+                    out[int(key)] = seedance_url
+            elif isinstance(value, str) and value.strip():
+                out[int(key)] = value.strip()
+    return out
+
+
+def pending_broll_indices(memory: dict[str, Any]) -> list[int]:
+    plan = list(memory.get("broll_plan") or [])
+    approved = approved_broll_urls(memory)
+    return [
+        int(item["index"])
+        for item in plan
+        if int(item["index"]) not in approved
+    ]
 
 
 def public_production_report(memory: dict[str, Any]) -> dict[str, Any]:
@@ -339,5 +476,7 @@ def public_production_report(memory: dict[str, Any]) -> dict[str, Any]:
         "voice_lock": memory.get("voice_lock"),
         "style_guide": memory.get("style_guide"),
         "chapter_log": memory.get("chapter_log") or [],
+        "broll_plan_count": len(memory.get("broll_plan") or []),
+        "approved_broll_count": len(approved_broll_urls(memory)),
     }
 

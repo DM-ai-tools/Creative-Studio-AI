@@ -294,6 +294,9 @@ export const assetsApi = {
     metadata?: Record<string, unknown>
   }) => api.post<Asset>('/assets/register-generated', data).then((r) => r.data),
 
+  updateMetadata: (id: string, metadata: Record<string, unknown>) =>
+    api.patch<Asset>(`/assets/${id}/metadata`, { metadata }).then((r) => r.data),
+
   delete: (id: string) => api.delete(`/assets/${id}`),
 }
 
@@ -677,6 +680,7 @@ export const generationApi = {
     aspect?: string
     resolution?: string
     sound_on?: boolean
+    speech_mode?: 'native_presenter' | 'external_voiceover'
     negative_prompt?: string
   }) =>
     api
@@ -704,6 +708,7 @@ export const generationApi = {
         production_report?: Record<string, unknown> | null
         quality_gate?: Record<string, unknown> | null
         retry_chapter_available?: boolean
+        continuity_video_reference_url?: string | null
       }>('/generation/creative-studio', data, { timeout: 60_000 })
       .then((r) => r.data),
 
@@ -729,6 +734,14 @@ export const generationApi = {
         continuity_frame_count?: number | null
         partial?: boolean
         continuation_available?: boolean
+        next_chapter_image_available?: boolean
+        continuity_reference_url?: string | null
+        staged_segment_paths?: string[] | null
+        chapter_index?: number | null
+        film_total_chapters?: number | null
+        broll_index?: number | null
+        broll_title?: string | null
+        byteplus_url?: string | null
         completed_segments?: number | null
         credits_estimate?: number | null
         duration_warning?: string | null
@@ -737,6 +750,7 @@ export const generationApi = {
         production_report?: Record<string, unknown> | null
         quality_gate?: Record<string, unknown> | null
         retry_chapter_available?: boolean
+        continuity_video_reference_url?: string | null
         storyboard?: {
           id?: string
           index?: number
@@ -748,6 +762,9 @@ export const generationApi = {
           error?: string | null
         }[]
         media_mode?: string | null
+        asset_role?: string | null
+        clone_mode?: boolean
+        character_reference_url?: string | null
       }>(`/generation/creative-studio/jobs/${encodeURIComponent(jobId)}`, {
         timeout: 30_000,
       })
@@ -763,6 +780,7 @@ export const generationApi = {
       generated_duration_seconds?: number
       continuity_frame_count?: number
       cast_reference_url?: string
+      continuity_video_reference_url?: string
       production_id?: string
     },
   ) =>
@@ -800,6 +818,14 @@ export const generationApi = {
       })
       .then((r) => r.data),
 
+  creativeStudioCloneScenes: () =>
+    api
+      .get<{
+        categories: { id: string; label: string }[]
+        scenes: { id: string; category: string; title: string; description: string }[]
+      }>('/generation/creative-studio/clone-scenes', { timeout: 15_000 })
+      .then((r) => r.data),
+
   creativeStudioModels: () =>
     api
       .get<{
@@ -822,6 +848,7 @@ export const generationApi = {
     aspect?: string
     resolution?: string
     sound_on?: boolean
+    speech_mode?: 'native_presenter' | 'external_voiceover'
     attachment_urls?: string[]
     brand_name?: string
     product_name?: string
@@ -832,6 +859,12 @@ export const generationApi = {
       | 'approve_next'
       | 'generate_video'
       | 'generate_storyboard'
+      | 'generate_next_chapter_image'
+      | 'generate_broll_image'
+      | 'generate_all_broll'
+      | 'regenerate_broll_image'
+      | 'approve_broll'
+      | 'approve_all_broll'
     image_prompt?: string
     video_prompt?: string
     approved_image_url?: string
@@ -841,11 +874,22 @@ export const generationApi = {
     reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' }[]
     storyboard_image_urls?: string[]
     prompt_only_video?: boolean
+    preserve_image_text?: boolean
     image_model?: string
     revision_notes?: string
     phase?: string
     video_model?: string
     session_id?: string
+    chapter_index?: number
+    continuity_style_url?: string
+    accumulated_segment_paths?: string[]
+    broll_index?: number
+    approved_broll_url?: string
+    approved_broll_byteplus_url?: string
+    broll_board_approvals?: { index: number; url: string; byteplus_url?: string }[]
+    clone_mode?: boolean
+    clone_scene_id?: string
+    clone_count?: number
   }) =>
     api
       .post<{
@@ -873,6 +917,9 @@ export const generationApi = {
         }[]
         duration_seconds?: number | null
         aspect?: string | null
+        chapter_index?: number | null
+        film_total_chapters?: number | null
+        broll_index?: number | null
         error?: string | null
       }>('/generation/creative-studio/chat', data, { timeout: 120_000 })
       .then((r) => r.data),

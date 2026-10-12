@@ -28,8 +28,9 @@ type ChatMode = 'auto' | 'ask' | 'generate'
 type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
 type AspectId = '9/16' | '1/1' | '16/9' | '4/3' | '4/5'
 type ResolutionId = '480p' | '720p' | '1080p'
+type SpeechMode = 'native_presenter' | 'external_voiceover'
 type PipelineAction = CsPipelineAction
-type MediaLibrarySection = 'uploads' | 'generations' | 'liked'
+type MediaLibrarySection = 'uploads' | 'generations' | 'characters' | 'liked'
 type MediaLibraryFilter = 'recent' | 'all' | 'images' | 'videos' | 'audio'
 type MediaLibrarySort = 'newest' | 'oldest' | 'name'
 
@@ -75,16 +76,85 @@ const MODES: { id: ChatMode; label: string; hint: string }[] = [
   { id: 'generate', label: 'Generate', hint: 'Start production plan' },
 ]
 
+function isChapterHandoffReady(
+  m: ChatMessage,
+  projectDurationSeconds: number,
+  clipCap: number,
+): boolean {
+  if (m.mediaMode !== 'video' || m.status !== 'done' || !m.mediaUrl) return false
+  if (projectDurationSeconds <= clipCap) return false
+  const clipSeconds = m.durationSeconds ?? 0
+  if (clipSeconds > clipCap) return false
+  const content = String(m.content || '')
+  if (/All \d+ chapters are stitched|stitched into one/i.test(content)) return false
+  if (
+    m.continuationMeta?.completed_segments &&
+    m.continuationMeta?.segment_count &&
+    m.continuationMeta.completed_segments < m.continuationMeta.segment_count
+  ) {
+    return true
+  }
+  if (m.phase === 'awaiting_chapter_image') return true
+  if (/Partial video ready|Chapter \d+\/\d+ is ready|Part \d+\/\d+ is ready/i.test(content)) {
+    return true
+  }
+  return clipSeconds > 0 && clipSeconds <= clipCap && projectDurationSeconds > clipCap
+}
+
 const ACTION_LABELS: Record<string, string> = {
   generate_image: 'Generate image (GPT Image 2)',
   regenerate_image: 'Regenerate image',
   approve_next: 'Approve & Next → Seedance video',
   generate_video: 'Generate video',
   continue_video: 'Generate next part',
+  generate_next_chapter_image: 'Generate next chapter still',
+  generate_broll_image: 'Generate B-roll still (one at a time)',
+  generate_all_broll: 'Generate remaining B-roll stills',
+  regenerate_broll_image: 'Regenerate B-roll still',
+  approve_broll: 'Approve B-roll → lock for Seedance',
+  approve_all_broll: 'Approve all B-roll → lock for Seedance',
+}
+
+function chapterHandoffLabel(m: ChatMessage, clipCap: number, projectDurationSeconds: number) {
+  const nextChapter =
+    m.continuationMeta?.chapter_index ??
+    (isChapterHandoffReady(m, projectDurationSeconds, clipCap) ? 1 : 0)
+  return nextChapter >= 1
+    ? `Start chapter ${nextChapter + 1} → Seedance`
+    : ACTION_LABELS.approve_next
 }
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function mergeStoryboardFrames(
+  current: NonNullable<ChatMessage['storyboard']> | undefined,
+  incoming: NonNullable<ChatMessage['storyboard']>,
+): NonNullable<ChatMessage['storyboard']> {
+  if (!incoming.length) return current || []
+  const byKey = new Map<string, NonNullable<ChatMessage['storyboard']>[number]>()
+  for (const frame of current || []) {
+    byKey.set(String(frame.index ?? frame.id), frame)
+  }
+  for (const frame of incoming) {
+    const key = String(frame.index ?? frame.id)
+    const prev = byKey.get(key)
+    byKey.set(
+      key,
+      prev
+        ? {
+            ...prev,
+            ...frame,
+            url: frame.url || prev.url,
+            imagePrompt: frame.imagePrompt || prev.imagePrompt,
+          }
+        : frame,
+    )
+  }
+  return Array.from(byKey.values()).sort(
+    (a, b) => Number(a.index || 0) - Number(b.index || 0),
+  )
 }
 
 function seedanceClipCap(modelId: string) {
@@ -95,6 +165,13 @@ function seedanceModelLabel(modelId: string) {
   return seedanceClipCap(modelId) >= 30 ? 'Seedance 2.5' : 'Seedance 2.0'
 }
 
+function imageModelLabel(modelId: string) {
+  if (/seedream.*flash/i.test(modelId)) return 'Seedream 5.0 Flash'
+  if (/seedream.*pro/i.test(modelId)) return 'Seedream 5.0 Pro'
+  if (/seedream/i.test(modelId)) return 'Seedream 5.0 Lite'
+  return 'GPT Image 2'
+}
+
 function buildContinuationRecoveryPayload(args: {
   sessionId: string
   videoModel: string
@@ -103,6 +180,7 @@ function buildContinuationRecoveryPayload(args: {
   aspect: AspectId
   resolution: ResolutionId
   soundOn: boolean
+  speechMode: SpeechMode
   promptOnlyVideo: boolean
   productName: string
   brandName: string
@@ -125,6 +203,7 @@ function buildContinuationRecoveryPayload(args: {
     aspect: args.aspect,
     resolution: args.resolution,
     sound_on: args.soundOn,
+    speech_mode: args.speechMode,
     product_name: args.productName || '',
     brand_name: args.brandName || '',
     negative_prompt: 'watermark, random unreadable text, UI chrome',
@@ -147,15 +226,89 @@ function buildContinuationRecoveryPayload(args: {
 
 function formatChatTime(ts: number) {
   try {
-    return new Date(ts).toLocaleString(undefined, {
+    const date = new Date(ts)
+    const now = new Date()
+    const time = date.toLocaleString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (date.toDateString() === now.toDateString()) return `Today · ${time}`
+    if (date.toDateString() === yesterday.toDateString()) return `Yesterday · ${time}`
+    return date.toLocaleString(undefined, {
       month: 'short',
       day: 'numeric',
+      ...(date.getFullYear() !== now.getFullYear() ? { year: 'numeric' as const } : {}),
       hour: '2-digit',
       minute: '2-digit',
     })
   } catch {
     return ''
   }
+}
+
+function chatDateGroupLabel(ts: number) {
+  const date = new Date(ts)
+  const now = new Date()
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (date.toDateString() === now.toDateString()) return 'Today'
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return date.toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    ...(date.getFullYear() !== now.getFullYear() ? { year: 'numeric' as const } : {}),
+  })
+}
+
+function groupSessionsByDate(sessions: CsChatSession[]) {
+  const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  const groups: { label: string; sessions: CsChatSession[] }[] = []
+  for (const session of sorted) {
+    const label = chatDateGroupLabel(session.updatedAt)
+    const last = groups[groups.length - 1]
+    if (last?.label === label) last.sessions.push(session)
+    else groups.push({ label, sessions: [session] })
+  }
+  return groups
+}
+
+function csSessionFieldsEqual(a: CsChatSession, b: CsChatSession): boolean {
+  return (
+    a.title === b.title &&
+    a.imagePrompt === b.imagePrompt &&
+    a.videoPrompt === b.videoPrompt &&
+    a.approvedImageUrl === b.approvedImageUrl &&
+    a.productReferenceUrl === b.productReferenceUrl &&
+    a.logoReferenceUrl === b.logoReferenceUrl &&
+    a.characterReferenceUrl === b.characterReferenceUrl &&
+    JSON.stringify(a.additionalReferenceUrls) === JSON.stringify(b.additionalReferenceUrls) &&
+    a.phase === b.phase &&
+    (a.videoModel || '') === (b.videoModel || '') &&
+    a.speechMode === b.speechMode &&
+    a.promptOnlyVideo === b.promptOnlyVideo &&
+    a.cloneMode === b.cloneMode &&
+    a.cloneSceneId === b.cloneSceneId &&
+    a.cloneCount === b.cloneCount &&
+    JSON.stringify(a.messages) === JSON.stringify(b.messages)
+  )
+}
+
+/** Only real usage (messages, approvals, refs) bumps last-used date — not opening a chat. */
+function csSessionActivityChanged(before: CsChatSession, after: CsChatSession): boolean {
+  return (
+    JSON.stringify(before.messages) !== JSON.stringify(after.messages) ||
+    before.phase !== after.phase ||
+    before.approvedImageUrl !== after.approvedImageUrl ||
+    before.imagePrompt !== after.imagePrompt ||
+    before.videoPrompt !== after.videoPrompt ||
+    before.productReferenceUrl !== after.productReferenceUrl ||
+    before.logoReferenceUrl !== after.logoReferenceUrl ||
+    before.characterReferenceUrl !== after.characterReferenceUrl ||
+    JSON.stringify(before.additionalReferenceUrls) !== JSON.stringify(after.additionalReferenceUrls)
+  )
 }
 
 export default function CreativeStudioTab({
@@ -180,6 +333,11 @@ export default function CreativeStudioTab({
     cacheKey: 'brands/list-cs',
     ttlMs: API_CACHE_TTL.catalog,
   })
+  const { data: cloneCatalog } = useApi(
+    () => generationApi.creativeStudioCloneScenes(),
+    [],
+    { cacheKey: 'generation/cs-clone-scenes-v1', ttlMs: API_CACHE_TTL.catalog },
+  )
 
   const [pickedBrandId, setPickedBrandId] = useState(brandIdProp || '')
   const brandId = (brandIdProp || pickedBrandId || '').trim() || undefined
@@ -189,6 +347,7 @@ export default function CreativeStudioTab({
   const [sessions, setSessions] = useState<CsChatSession[]>([])
   const [activeChatId, setActiveChatId] = useState<string>('')
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [composerSettingsOpen, setComposerSettingsOpen] = useState(true)
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [composer, setComposer] = useState(initialPrompt || '')
@@ -200,10 +359,14 @@ export default function CreativeStudioTab({
   const [resolution, setResolution] = useState<ResolutionId>('720p')
   const [videoModel, setVideoModel] = useState('ark-seedance-2-0')
   const [soundOn, setSoundOn] = useState(true)
+  const [speechMode, setSpeechMode] = useState<SpeechMode>('native_presenter')
   const [useStoryboardReferences, setUseStoryboardReferences] = useState(false)
-  // GPT image/storyboard generation is intentionally disabled for Creative Studio.
-  // Keep this as a constant so React Fast Refresh cannot preserve an older false state.
-  const promptOnlyVideo = true
+  // Direct Seedance remains the default. Image-first is opt-in so existing
+  // chats keep their current cost and generation behaviour.
+  const [promptOnlyVideo, setPromptOnlyVideo] = useState(true)
+  const [cloneMode, setCloneMode] = useState(false)
+  const [cloneSceneId, setCloneSceneId] = useState('')
+  const [cloneCount, setCloneCount] = useState(4)
   const [busy, setBusy] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -237,6 +400,8 @@ export default function CreativeStudioTab({
   const pollingJobsRef = useRef<Set<string>>(new Set())
   const savingLibraryUrlsRef = useRef<Set<string>>(new Set())
   const skipNextHistorySaveRef = useRef(false)
+  const viewOnlyChatIdRef = useRef<string | null>(null)
+  const defaultVideoModelRef = useRef('dreamina-seedance-2-0-280128')
   const resumeCheckedSessionRef = useRef('')
 
   const chatModels = useMemo(
@@ -248,7 +413,13 @@ export default function CreativeStudioTab({
     () => (csModels?.video_models || []) as GenerationModelOption[],
     [csModels],
   )
+  const imageModels = useMemo(
+    () => (csModels?.image_models || []) as GenerationModelOption[],
+    [csModels],
+  )
   const clipCap = seedanceClipCap(videoModel)
+  const imageModelLabelText = imageModelLabel(imageModel)
+  const projectDurationSeconds = duration === 'auto' ? 90 : Number(duration)
   const videoModelLabel = seedanceModelLabel(videoModel)
   const selectedChatLabel = useMemo(() => {
     if (chatModel === 'auto') return 'Auto'
@@ -296,6 +467,11 @@ export default function CreativeStudioTab({
         : session.phase || '',
     )
     if (session.videoModel) setVideoModel(session.videoModel)
+    setSpeechMode(session.speechMode || 'native_presenter')
+    setPromptOnlyVideo(session.promptOnlyVideo !== false)
+    setCloneMode(Boolean(session.cloneMode))
+    setCloneSceneId(session.cloneSceneId || '')
+    setCloneCount(Math.max(2, Math.min(6, session.cloneCount || 4)))
     setAttachments([])
     setComposer('')
   }, [])
@@ -309,7 +485,10 @@ export default function CreativeStudioTab({
   }, [csModels?.image_model_default])
 
   useEffect(() => {
-    if (csModels?.video_model_default) setVideoModel(csModels.video_model_default)
+    if (csModels?.video_model_default) {
+      defaultVideoModelRef.current = csModels.video_model_default
+      setVideoModel((current) => current || csModels.video_model_default!)
+    }
   }, [csModels?.video_model_default])
 
   useEffect(() => {
@@ -343,17 +522,21 @@ export default function CreativeStudioTab({
     }
     setSessions((prev) => {
       const existing = prev.find((s) => s.id === activeChatId)
+      const messagesUnchanged =
+        existing && JSON.stringify(existing.messages) === JSON.stringify(messages)
       const title =
-        messages.length > 0
-          ? titleFromMessages(messages)
-          : existing?.title && existing.title !== 'New chat'
-            ? existing.title
-            : 'New chat'
+        messagesUnchanged && existing?.title
+          ? existing.title
+          : messages.length > 0
+            ? titleFromMessages(messages)
+            : existing?.title && existing.title !== 'New chat'
+              ? existing.title
+              : 'New chat'
       const nextSession: CsChatSession = {
         id: activeChatId,
         title,
         createdAt: existing?.createdAt || Date.now(),
-        updatedAt: Date.now(),
+        updatedAt: existing?.updatedAt || Date.now(),
         messages,
         imagePrompt,
         videoPrompt,
@@ -364,8 +547,31 @@ export default function CreativeStudioTab({
         additionalReferenceUrls,
         phase,
         videoModel,
+        speechMode,
+        promptOnlyVideo,
+        cloneMode,
+        cloneSceneId,
+        cloneCount,
       }
-      const next = [nextSession, ...prev.filter((s) => s.id !== activeChatId)]
+      if (existing && csSessionFieldsEqual(existing, nextSession)) {
+        viewOnlyChatIdRef.current = null
+        return prev
+      }
+      const openedForViewOnly = viewOnlyChatIdRef.current === activeChatId
+      if (openedForViewOnly) viewOnlyChatIdRef.current = null
+      const activityChanged =
+        Boolean(existing) &&
+        csSessionActivityChanged(existing!, nextSession) &&
+        !openedForViewOnly
+      const savedSession: CsChatSession = {
+        ...nextSession,
+        updatedAt: activityChanged ? Date.now() : existing?.updatedAt || Date.now(),
+      }
+      const next = activityChanged
+        ? [savedSession, ...prev.filter((s) => s.id !== activeChatId)]
+        : [...prev.map((s) => (s.id === activeChatId ? savedSession : s))].sort(
+            (a, b) => b.updatedAt - a.updatedAt,
+          )
       saveCsChatSessions(briefId, brandId, next)
       setCsActiveChatId(briefId, brandId, activeChatId)
       return next
@@ -381,6 +587,11 @@ export default function CreativeStudioTab({
     additionalReferenceUrls,
     phase,
     videoModel,
+    speechMode,
+    promptOnlyVideo,
+    cloneMode,
+    cloneSceneId,
+    cloneCount,
     activeChatId,
     briefId,
     brandId,
@@ -407,9 +618,12 @@ export default function CreativeStudioTab({
     if (id === activeChatId) return
     const session = sessions.find((s) => s.id === id)
     if (!session) return
+    viewOnlyChatIdRef.current = id
     setCsActiveChatId(briefId, brandId, id)
     applySession(session)
   }
+
+  const sessionGroups = useMemo(() => groupSessionsByDate(sessions), [sessions])
 
   const deleteChat = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation()
@@ -477,8 +691,9 @@ export default function CreativeStudioTab({
       asset.metadata?.source === 'creative_studio_generated'
     let assets = imageLibrary.filter((asset) => {
       if (mediaLibrarySection === 'generations') return isGenerated(asset)
+      if (mediaLibrarySection === 'characters') return asset.metadata?.role === 'character'
       if (mediaLibrarySection === 'liked') return likedAssetIds.includes(asset.id)
-      return !isGenerated(asset)
+      return mediaLibraryFilter === 'recent' ? true : !isGenerated(asset)
     })
     if (mediaLibraryFilter === 'images') {
       assets = assets.filter((asset) => asset.file_type.startsWith('image/'))
@@ -497,7 +712,7 @@ export default function CreativeStudioTab({
 
   const storeGeneratedImages = useCallback(
     async (
-      images: Array<{ url: string; title: string; role: 'still' | 'storyboard' }>,
+      images: Array<{ url: string; title: string; role: 'still' | 'storyboard' | 'character' }>,
       jobId: string,
     ) => {
       const fresh = images.filter(
@@ -553,18 +768,133 @@ export default function CreativeStudioTab({
     [],
   )
 
+  const regenerateBrollFrame = useCallback(
+    async (
+      boardMessage: ChatMessage,
+      frame: NonNullable<ChatMessage['storyboard']>[number],
+    ) => {
+      if (!frame.index || busy) return
+      patchStoryboardFrame(boardMessage.id, frame.id, { url: undefined, status: 'running' })
+      setBusy(true)
+      try {
+        const historyForApi = messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+        const res = await generationApi.creativeStudioChat({
+          session_id: activeChatId,
+          messages: historyForApi,
+          mode,
+          chat_model: chatModel,
+          duration_seconds: duration === 'auto' ? undefined : Number(duration),
+          aspect,
+          resolution,
+          sound_on: soundOn,
+          speech_mode: speechMode,
+          brand_name: effectiveBrandName,
+          product_name: productName || '',
+          action: 'regenerate_broll_image',
+          image_model: imageModel,
+          video_model: videoModel,
+          broll_index: frame.index,
+          logo_reference_url: logoReferenceUrl || selectedBrand?.logo_url || '',
+          reference_assets: messages
+            .flatMap((m) => m.attachments || [])
+            .filter((a) => a.role)
+            .map((a) => ({ url: a.url, role: a.role || 'reference' }))
+            .slice(0, 9),
+        })
+        const jobId = res.job_id
+        if (!jobId) {
+          toast.error(res.error || 'Could not start B-roll regeneration')
+          patchStoryboardFrame(boardMessage.id, frame.id, { status: 'failed' })
+          return
+        }
+        const deadline = Date.now() + 20 * 60 * 1000
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 4000))
+          const poll = await generationApi.creativeStudioJob(jobId)
+          if (poll.status === 'done' || poll.status === 'mock') {
+            const url = poll.url || ''
+            patchStoryboardFrame(boardMessage.id, frame.id, {
+              url: url || undefined,
+              status: 'done',
+            })
+            if (url) {
+              void storeGeneratedImages(
+                [{ url, title: frame.title || `IMAGE ${frame.index}`, role: 'still' }],
+                jobId,
+              )
+            }
+            toast.success(`IMAGE ${frame.index} regenerated — review text, then approve`)
+            return
+          }
+          if (poll.status === 'failed' || poll.status === 'cancelled') {
+            patchStoryboardFrame(boardMessage.id, frame.id, {
+              status: 'failed',
+              url: undefined,
+            })
+            toast.error(poll.error || 'B-roll regeneration failed')
+            return
+          }
+        }
+        toast.error('B-roll regeneration timed out')
+      } catch (err) {
+        patchStoryboardFrame(boardMessage.id, frame.id, { status: 'failed' })
+        toast.error(extractApiError(err, 'B-roll regeneration failed'))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [
+      activeChatId,
+      aspect,
+      busy,
+      chatModel,
+      duration,
+      effectiveBrandName,
+      imageModel,
+      logoReferenceUrl,
+      messages,
+      mode,
+      patchStoryboardFrame,
+      productName,
+      resolution,
+      selectedBrand?.logo_url,
+      soundOn,
+      speechMode,
+      storeGeneratedImages,
+      videoModel,
+    ],
+  )
+
   const pollJobIntoMessage = useCallback(
     async (
       jobId: string,
       assistantMsgId: string,
-      mediaMode: 'image' | 'video' | 'storyboard',
+      mediaMode: 'image' | 'video' | 'storyboard' | 'broll_board',
       sessionId = activeChatId,
     ) => {
       if (pollingJobsRef.current.has(jobId)) return
       pollingJobsRef.current.add(jobId)
-      const patchMessage = (patch: Partial<ChatMessage>) => {
+      const patchMessage = (
+        patch:
+          | Partial<ChatMessage>
+          | ((current: ChatMessage | undefined) => Partial<ChatMessage>),
+      ) => {
+        const applyPatch = (
+          message: ChatMessage,
+          resolved: Partial<ChatMessage>,
+        ): ChatMessage => ({ ...message, ...resolved })
+
         if (!sessionId || sessionId === activeChatIdRef.current) {
-          updateMessage(assistantMsgId, patch)
+          setMessages((prev) =>
+            prev.map((message) => {
+              if (message.id !== assistantMsgId) return message
+              const resolved =
+                typeof patch === 'function' ? patch(message) : patch
+              return applyPatch(message, resolved)
+            }),
+          )
           return
         }
         setSessions((previous) => {
@@ -573,9 +903,12 @@ export default function CreativeStudioTab({
               ? {
                   ...session,
                   updatedAt: Date.now(),
-                  messages: session.messages.map((message) =>
-                    message.id === assistantMsgId ? { ...message, ...patch } : message,
-                  ),
+                  messages: session.messages.map((message) => {
+                    if (message.id !== assistantMsgId) return message
+                    const resolved =
+                      typeof patch === 'function' ? patch(message) : patch
+                    return applyPatch(message, resolved)
+                  }),
                 }
               : session,
           )
@@ -610,6 +943,17 @@ export default function CreativeStudioTab({
           const done = res.status === 'done' || res.status === 'mock'
           const failed = res.status === 'failed'
           const cancelled = res.status === 'cancelled'
+          if (failed && res.clone_mode && res.character_reference_url) {
+            void storeGeneratedImages(
+              [{
+                url: res.character_reference_url,
+                title: 'Reusable character identity',
+                role: 'character',
+              }],
+              jobId,
+            )
+            setCharacterReferenceUrl(res.character_reference_url)
+          }
           const board = (res.storyboard || [])
             .filter((f) => f && (f.url || f.title))
             .map((f, i) => ({
@@ -617,6 +961,7 @@ export default function CreativeStudioTab({
               index: f.index || i + 1,
               title: f.title || `Scene ${i + 1}`,
               url: f.url || undefined,
+              byteplusUrl: (f as { byteplus_url?: string }).byteplus_url || undefined,
               imagePrompt: f.image_prompt || undefined,
               overlays: f.overlays || [],
               status: f.status || undefined,
@@ -624,65 +969,118 @@ export default function CreativeStudioTab({
               discarded: false,
             }))
 
-          patchMessage({
-            status: (res.status as ChatMessage['status']) || 'running',
-            progress: res.progress || undefined,
-            mediaUrl: res.url || undefined,
-            seedImageUrl: res.seed_image_url || undefined,
-            model: res.model || undefined,
-            error: res.error || undefined,
-            durationSeconds: res.duration_seconds || undefined,
-            ...(done && mediaMode === 'video' && res.note
-              ? {
-                  content: `${res.audio_warning ? 'Video ready with audio issues.' : res.continuation_available ? 'Video part ready for review.' : res.partial ? 'Partial video ready.' : 'Video ready.'} ${res.note}`,
-                }
-              : {}),
-            storyboard: board.length ? board : undefined,
-            mediaMode:
-              mediaMode === 'storyboard' || res.media_mode === 'storyboard'
-                ? 'storyboard'
-                : mediaMode,
-            suggestedActions:
+          patchMessage((current) => {
+            const brollIndex =
+              typeof res.broll_index === 'number' ? res.broll_index : current?.brollIndex
+            const imageDone =
+              done &&
+              (mediaMode === 'image' || mediaMode === 'storyboard' || mediaMode === 'broll_board') &&
+              Boolean(res.url || board.some((b) => b.url))
+            const brollBoardReady =
+              done && mediaMode === 'broll_board' && board.some((b) => b.url)
+            const suggestedActions: PipelineAction[] =
               done && mediaMode === 'video' && res.retry_chapter_available
                 ? ['generate_video']
-                : done && mediaMode === 'video' && res.continuation_available
-                  ? ['continue_video']
-                : done &&
-              (mediaMode === 'image' || mediaMode === 'storyboard') &&
-              (res.url || board.some((b) => b.url))
-                ? ['regenerate_image', 'approve_next']
+                : done && mediaMode === 'video' && res.next_chapter_image_available
+                  ? ['approve_next']
+                  : done && mediaMode === 'video' && res.continuation_available
+                    ? ['continue_video']
+                    : brollBoardReady
+                      ? ['approve_all_broll']
+                      : imageDone
+                        ? brollIndex
+                          ? ['regenerate_image', 'approve_broll']
+                          : ['regenerate_image', 'approve_next']
+                        : failed || cancelled
+                          ? mediaMode === 'video'
+                            ? ['generate_video']
+                            : mediaMode === 'broll_board'
+                              ? ['generate_all_broll']
+                              : ['generate_image']
+                          : []
+            return {
+              status: (res.status as ChatMessage['status']) || 'running',
+              progress: res.progress || undefined,
+              mediaUrl: res.url || undefined,
+              byteplusUrl: res.byteplus_url || undefined,
+              seedImageUrl: res.seed_image_url || undefined,
+              model: res.model || undefined,
+              error: res.error || undefined,
+              durationSeconds: res.duration_seconds || undefined,
+              ...(done && mediaMode === 'video' && res.note
+                ? {
+                    content: `${
+                      res.next_chapter_image_available
+                        ? 'Chapter ready for review.'
+                        : res.audio_warning
+                          ? 'Video ready with audio issues.'
+                          : res.continuation_available
+                            ? 'Video part ready for review.'
+                            : res.partial
+                              ? 'Partial video ready.'
+                              : 'Video ready.'
+                    } ${res.note}`,
+                  }
+                : {}),
+              storyboard:
+                mediaMode === 'broll_board' || mediaMode === 'storyboard'
+                  ? mergeStoryboardFrames(current?.storyboard, board)
+                  : board.length
+                    ? board
+                    : current?.storyboard,
+              mediaMode:
+                mediaMode === 'broll_board' || res.media_mode === 'broll_board'
+                  ? 'broll_board'
+                  : mediaMode === 'storyboard' || res.media_mode === 'storyboard'
+                    ? 'storyboard'
+                    : mediaMode,
+              suggestedActions,
+              phase: done
+                ? mediaMode === 'video'
+                  ? res.next_chapter_image_available
+                    ? 'awaiting_chapter_image'
+                    : res.continuation_available
+                      ? 'awaiting_video_continuation'
+                      : 'done'
+                  : mediaMode === 'broll_board' || brollIndex
+                    ? 'awaiting_broll'
+                    : 'awaiting_video'
                 : failed || cancelled
-                  ? mediaMode === 'video'
-                    ? ['generate_video']
-                    : ['generate_image']
-                  : [],
-            phase: done
-              ? mediaMode === 'video'
-                ? res.continuation_available
-                  ? 'awaiting_video_continuation'
-                  : 'done'
-                : 'awaiting_video'
-              : failed || cancelled
-                ? cancelled
-                  ? 'cancelled'
-                  : 'failed'
-                : mediaMode === 'storyboard'
-                  ? 'storyboard_running'
-                  : mediaMode === 'image'
-                    ? 'image_running'
-                    : 'video_running',
-            ...(done && res.continuation_available && res.completed_segments && res.segment_count
-              ? {
-                  continuationMeta: {
-                    completed_segments: res.completed_segments,
-                    segment_count: res.segment_count,
-                    generated_duration_seconds: res.duration_seconds || undefined,
-                    requested_duration_seconds: res.requested_duration_seconds || undefined,
-                    continuity_frame_count: res.continuity_frame_count || undefined,
-                    production_id: res.production_id || undefined,
-                  },
-                }
-              : {}),
+                  ? cancelled
+                    ? 'cancelled'
+                    : 'failed'
+                  : mediaMode === 'broll_board'
+                    ? 'broll_board_running'
+                    : mediaMode === 'storyboard'
+                      ? 'storyboard_running'
+                      : mediaMode === 'image'
+                        ? 'image_running'
+                        : 'video_running',
+              ...(brollIndex ? { brollIndex } : {}),
+              ...(done &&
+              (res.continuation_available || res.next_chapter_image_available) &&
+              res.completed_segments &&
+              res.segment_count
+                ? {
+                    continuationMeta: {
+                      completed_segments: res.completed_segments,
+                      segment_count: res.segment_count,
+                      generated_duration_seconds: res.duration_seconds || undefined,
+                      requested_duration_seconds: res.requested_duration_seconds || undefined,
+                      continuity_frame_count: res.continuity_frame_count || undefined,
+                      production_id: res.production_id || undefined,
+                      continuity_video_reference_url: res.continuity_video_reference_url || undefined,
+                      continuity_reference_url: res.continuity_reference_url || undefined,
+                      staged_segment_paths: res.staged_segment_paths || undefined,
+                      chapter_index:
+                        typeof res.chapter_index === 'number'
+                          ? res.chapter_index
+                          : res.completed_segments,
+                      film_total_chapters: res.film_total_chapters || res.segment_count,
+                    },
+                  }
+                : {}),
+            }
           })
           if (cancelled) {
             toast('Generation stopped', { id: 'cs-stop' })
@@ -691,14 +1089,29 @@ export default function CreativeStudioTab({
           }
           if (done && (res.url || board.some((b) => b.url)) && mediaMode !== 'video') {
             const imagesToStore =
-              mediaMode === 'storyboard'
+              mediaMode === 'storyboard' || mediaMode === 'broll_board'
                 ? board
                     .filter((frame) => frame.url)
                     .map((frame) => ({
                       url: frame.url as string,
                       title: frame.title || `Scene ${frame.index}`,
-                      role: 'storyboard' as const,
+                      role: mediaMode === 'broll_board' ? ('still' as const) : ('storyboard' as const),
                     }))
+                : res.clone_mode && res.url
+                  ? [
+                      ...(res.character_reference_url && res.character_reference_url !== res.url
+                        ? [{
+                            url: res.character_reference_url,
+                            title: 'Reusable character identity',
+                            role: 'character' as const,
+                          }]
+                        : []),
+                      {
+                        url: res.url,
+                        title: 'Reusable character clone',
+                        role: 'character' as const,
+                      },
+                    ]
                 : res.url
                   ? [
                       {
@@ -709,6 +1122,17 @@ export default function CreativeStudioTab({
                     ]
                   : []
             void storeGeneratedImages(imagesToStore, jobId)
+            if (res.clone_mode && res.url) {
+              setCharacterReferenceUrl(res.character_reference_url || res.url)
+              setMediaLibrarySection('characters')
+            }
+            if (mediaMode === 'broll_board') {
+              setPhase('awaiting_broll')
+              toast.success(
+                `B-roll board ready — ${board.filter((b) => b.url).length} still(s). Regenerate any wrong dashboard, then Approve all.`,
+              )
+              return
+            }
             const hero =
               board.find((b) => /reveal|feature|close|product/i.test(b.title || ''))?.url ||
               board.find((b) => b.url)?.url ||
@@ -718,6 +1142,8 @@ export default function CreativeStudioTab({
             toast.success(
               mediaMode === 'storyboard'
                 ? `Storyboard ready — ${board.filter((b) => b.url).length} scenes. Approve & Next for video.`
+                : res.clone_mode
+                  ? 'Clone image ready and saved under Characters for reuse.'
                 : 'Still ready — Approve & Next, or Regenerate',
             )
             return
@@ -858,8 +1284,9 @@ export default function CreativeStudioTab({
         )
         const url = asset.file_url || ''
         if (!url) throw new Error('Upload returned no URL')
-        const role: ChatAttachment['role'] =
-          /logo|wordmark|brandmark/i.test(file.name)
+        const role: ChatAttachment['role'] = cloneMode
+          ? 'character'
+          : /logo|wordmark|brandmark/i.test(file.name)
             ? 'logo'
             : !productAssigned
               ? 'product'
@@ -884,12 +1311,21 @@ export default function CreativeStudioTab({
           productAssigned = true
         }
         if (role === 'logo') setLogoReferenceUrl(url)
+        if (role === 'character') {
+          setCharacterReferenceUrl(url)
+          void assetsApi.updateMetadata(asset.id, { role: 'character', reusable: true }).then(
+            (saved) => setImageLibrary((current) => [
+              saved,
+              ...current.filter((item) => item.id !== saved.id),
+            ]),
+          ).catch(() => undefined)
+        }
         if (role === 'reference') {
           setAdditionalReferenceUrls((prev) =>
             Array.from(new Set([...prev, url])).slice(0, 7),
           )
         }
-        toast.success(`${role === 'logo' ? 'Logo' : role === 'product' ? 'Product' : 'Reference'} image attached`)
+        toast.success(`${role === 'logo' ? 'Logo' : role === 'product' ? 'Product' : role === 'character' ? 'Character' : 'Reference'} image attached`)
       } catch (err) {
         toast.error(extractApiError(err, `Could not upload ${file.name}`))
       }
@@ -902,7 +1338,7 @@ export default function CreativeStudioTab({
       const demoted = prev.filter(
         (item) =>
           item.id !== attachment.id &&
-          (role === 'product' || role === 'logo' || role === 'character') &&
+          (role === 'product' || role === 'logo') &&
           item.role === role,
       )
       if (demoted.length) {
@@ -912,7 +1348,7 @@ export default function CreativeStudioTab({
       }
       return prev.map((item) => {
         if (item.id === attachment.id) return { ...item, role }
-        if ((role === 'product' || role === 'logo' || role === 'character') && item.role === role) {
+        if ((role === 'product' || role === 'logo') && item.role === role) {
           return { ...item, role: 'reference' as const }
         }
         return item
@@ -925,6 +1361,12 @@ export default function CreativeStudioTab({
     if (role === 'product') setProductReferenceUrl(attachment.url)
     if (role === 'logo') setLogoReferenceUrl(attachment.url)
     if (role === 'character') setCharacterReferenceUrl(attachment.url)
+    void assetsApi.updateMetadata(attachment.id, { role, reusable: true }).then(
+      (saved) => setImageLibrary((current) => [
+        saved,
+        ...current.filter((item) => item.id !== saved.id),
+      ]),
+    ).catch(() => undefined)
     if (role === 'reference') {
       setAdditionalReferenceUrls((prev) =>
         Array.from(new Set([...prev, attachment.url])).slice(0, 7),
@@ -933,10 +1375,15 @@ export default function CreativeStudioTab({
   }
 
   const removeAttachment = (attachment: ChatAttachment) => {
-    setAttachments((prev) => prev.filter((item) => item.id !== attachment.id))
+    setAttachments((prev) => {
+      const next = prev.filter((item) => item.id !== attachment.id)
+      if (characterReferenceUrl === attachment.url) {
+        setCharacterReferenceUrl(next.find((item) => item.role === 'character')?.url || '')
+      }
+      return next
+    })
     if (productReferenceUrl === attachment.url) setProductReferenceUrl('')
     if (logoReferenceUrl === attachment.url) setLogoReferenceUrl('')
-    if (characterReferenceUrl === attachment.url) setCharacterReferenceUrl('')
     setAdditionalReferenceUrls((prev) => prev.filter((url) => url !== attachment.url))
   }
 
@@ -963,7 +1410,7 @@ export default function CreativeStudioTab({
     setAttachments((current) => {
       const withoutUrl = current.filter((item) => item.url !== url)
       const withoutDuplicateRole = withoutUrl.map((item) =>
-        (role === 'product' || role === 'logo' || role === 'character') && item.role === role
+        (role === 'product' || role === 'logo') && item.role === role
           ? { ...item, role: 'reference' as const }
           : item,
       )
@@ -972,6 +1419,12 @@ export default function CreativeStudioTab({
     if (role === 'product') setProductReferenceUrl(url)
     if (role === 'logo') setLogoReferenceUrl(url)
     if (role === 'character') setCharacterReferenceUrl(url)
+    void assetsApi.updateMetadata(asset.id, { role, reusable: true }).then(
+      (saved) => setImageLibrary((current) => [
+        saved,
+        ...current.filter((item) => item.id !== saved.id),
+      ]),
+    ).catch(() => undefined)
     if (role === 'reference') {
       setAdditionalReferenceUrls((current) =>
         Array.from(new Set([...current, url])).slice(-7),
@@ -1018,7 +1471,7 @@ export default function CreativeStudioTab({
     try {
       const variant = await variantsApi.createFromMedia({
         media_url: msg.mediaUrl,
-        media_mode: msg.mediaMode || 'video',
+        media_mode: msg.mediaMode === 'broll_board' ? 'storyboard' : (msg.mediaMode || 'video'),
         aspect,
         model: msg.model || (msg.mediaMode === 'image' ? imageModel : videoModel),
         prompt: msg.videoPrompt || msg.imagePrompt || msg.content,
@@ -1047,6 +1500,14 @@ export default function CreativeStudioTab({
     approvedImageOverride?: string
     storyboardImageUrls?: string[]
     useStoredReferences?: boolean
+    chapterIndex?: number
+    continuityStyleUrl?: string
+    accumulatedSegmentPaths?: string[]
+    brollIndex?: number
+    approvedBrollOverride?: string
+    approvedBrollByteplusOverride?: string
+    brollBoardApprovals?: { index: number; url: string; byteplus_url?: string }[]
+    existingBoardMessageId?: string
   }) => {
     if (busy) return
     const action = opts.action || 'continue'
@@ -1102,6 +1563,7 @@ export default function CreativeStudioTab({
         asset.url === turnProductRef || asset.url === turnLogoRef || turnAdditionalRefs.includes(asset.url))
       .map((asset) => ({ url: asset.url, role: asset.role || 'reference' as const }))
       .slice(0, 9)
+    const cloneHasCharacterReference = referenceAssets.some((asset) => asset.role === 'character')
     const boardUrls = (
       opts.storyboardImageUrls ||
       storyboardFramesForVideo(messages.flatMap((m) => m.storyboard || []))
@@ -1123,8 +1585,8 @@ export default function CreativeStudioTab({
         content: (userText || `(${action.replace(/_/g, ' ')})`) +
           (isVideoAction && promptOnlyVideo
             ? '\nGenerate directly from this timed prompt using uploaded references as general visual guidance while generating a fictional character. Exclude GPT-generated storyboard images.'
-            : isVideoAction && !useStoryboardReferences
-              ? '\nUse original uploads for video references; exclude generated storyboard images.'
+            : isVideoAction && !promptOnlyVideo && !useStoryboardReferences
+              ? '\nUse the approved GPT Image 2 still as the Seedance opening frame. Keep original uploads as supplemental identity, product, scene and logo references.'
               : ''),
         attachments: userAttachments,
       }
@@ -1139,21 +1601,43 @@ export default function CreativeStudioTab({
     setModelMenuOpen(false)
     setModeMenuOpen(false)
 
-    const pendingId = uid()
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: pendingId,
-        role: 'assistant',
-        content:
-          action === 'generate_image' || action === 'regenerate_image'
-            ? 'Generating GPT Image 2 still…'
-            : action === 'approve_next' || action === 'generate_video'
-              ? `Starting ${videoModelLabel}…`
-              : 'Thinking…',
+    const pendingId = opts.existingBoardMessageId || uid()
+    if (opts.existingBoardMessageId) {
+      updateMessage(opts.existingBoardMessageId, {
         status: 'running',
-      },
-    ])
+        progress:
+          action === 'generate_all_broll'
+            ? 'Generating remaining B-roll stills…'
+            : 'Working…',
+        suggestedActions: [],
+        error: undefined,
+      })
+    } else {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: pendingId,
+          role: 'assistant',
+          content:
+            action === 'generate_image' ||
+            action === 'regenerate_image' ||
+            action === 'generate_next_chapter_image' ||
+            action === 'generate_broll_image' ||
+            action === 'regenerate_broll_image'
+              ? cloneMode
+                ? cloneHasCharacterReference
+                  ? `Generating a ${cloneCount}-copy character scene with GPT Image 2…`
+                  : `Creating a reusable character first, then generating the ${cloneCount}-copy scene…`
+                : 'Generating GPT Image 2 still…'
+              : action === 'generate_all_broll'
+                ? 'Generating all B-roll stills…'
+                : action === 'approve_next' || action === 'generate_video'
+                  ? `Starting ${videoModelLabel}…`
+                  : 'Thinking…',
+          status: 'running',
+        },
+      ])
+    }
 
     try {
       const res = await generationApi.creativeStudioChat({
@@ -1165,6 +1649,7 @@ export default function CreativeStudioTab({
         aspect,
         resolution,
         sound_on: soundOn,
+        speech_mode: speechMode,
         attachment_urls: turnProductRef
           ? [turnProductRef, ...userAttachments.map((a) => a.url).filter((u) => u !== turnProductRef)]
           : userAttachments.map((a) => a.url),
@@ -1173,17 +1658,28 @@ export default function CreativeStudioTab({
         action,
         image_prompt: imgP,
         video_prompt: vidP,
-        approved_image_url: promptOnlyVideo ? '' : isVideoAction && !useStoryboardReferences ? turnProductRef : approved,
+        approved_image_url: promptOnlyVideo ? '' : approved,
         product_reference_url: turnProductRef,
         logo_reference_url: turnLogoRef,
         additional_reference_urls: turnAdditionalRefs,
         reference_assets: referenceAssets,
         storyboard_image_urls: !promptOnlyVideo && useStoryboardReferences ? boardUrls : [],
         prompt_only_video: promptOnlyVideo,
+        preserve_image_text: !promptOnlyVideo,
         image_model: imageModel,
         video_model: videoModel,
         revision_notes: opts.revisionNotes || '',
         phase,
+        chapter_index: opts.chapterIndex,
+        continuity_style_url: opts.continuityStyleUrl || '',
+        accumulated_segment_paths: opts.accumulatedSegmentPaths || [],
+        broll_index: opts.brollIndex,
+        approved_broll_url: opts.approvedBrollOverride || '',
+        approved_broll_byteplus_url: opts.approvedBrollByteplusOverride || '',
+        broll_board_approvals: opts.brollBoardApprovals,
+        clone_mode: cloneMode,
+        clone_scene_id: cloneSceneId,
+        clone_count: cloneCount,
       })
 
       if (res.image_prompt) setImagePrompt(res.image_prompt)
@@ -1197,11 +1693,29 @@ export default function CreativeStudioTab({
       const mediaMode =
         res.media_mode === 'image' ||
         res.media_mode === 'video' ||
-        res.media_mode === 'storyboard'
+        res.media_mode === 'storyboard' ||
+        res.media_mode === 'broll_board'
           ? res.media_mode
           : undefined
 
       const suggested = (res.suggested_actions || []).filter(Boolean) as PipelineAction[]
+
+      const incomingBoard = Array.isArray(
+        (res as { storyboard_scenes?: unknown }).storyboard_scenes,
+      )
+        ? (
+            (res as { storyboard_scenes: Record<string, unknown>[] }).storyboard_scenes || []
+          ).map((s, i) => ({
+            id: String(s.id || `scene-${i + 1}`),
+            index: Number(s.index || i + 1),
+            title: String(s.title || `Scene ${i + 1}`),
+            imagePrompt: String(s.image_prompt || ''),
+            overlays: Array.isArray(s.overlays) ? (s.overlays as string[]) : [],
+          }))
+        : undefined
+      const existingBoard = opts.existingBoardMessageId
+        ? messages.find((m) => m.id === opts.existingBoardMessageId)?.storyboard
+        : undefined
 
       updateMessage(pendingId, {
         content: res.assistant_message || 'Done.',
@@ -1216,21 +1730,48 @@ export default function CreativeStudioTab({
         error: res.error || undefined,
         suggestedActions: suggested,
         phase: res.phase || undefined,
-        storyboard: Array.isArray((res as { storyboard_scenes?: unknown }).storyboard_scenes)
-          ? (
-              (res as { storyboard_scenes: Record<string, unknown>[] }).storyboard_scenes || []
-            ).map((s, i) => ({
-              id: String(s.id || `scene-${i + 1}`),
-              index: Number(s.index || i + 1),
-              title: String(s.title || `Scene ${i + 1}`),
-              imagePrompt: String(s.image_prompt || ''),
-              overlays: Array.isArray(s.overlays) ? (s.overlays as string[]) : [],
-            }))
-          : undefined,
+        chapterIndex:
+          typeof res.chapter_index === 'number'
+            ? res.chapter_index
+            : undefined,
+        filmTotalChapters:
+          typeof res.film_total_chapters === 'number'
+            ? res.film_total_chapters
+            : undefined,
+        brollIndex:
+          typeof res.broll_index === 'number'
+            ? res.broll_index
+            : undefined,
+        storyboard:
+          incomingBoard && existingBoard
+            ? mergeStoryboardFrames(existingBoard, incomingBoard)
+            : incomingBoard,
       })
 
+      if (
+        action === 'generate_all_broll' &&
+        !res.job_id &&
+        res.status !== 'queued'
+      ) {
+        toast.error(res.error || res.assistant_message || 'Could not start B-roll generation')
+      }
+
       if (res.job_id && mediaMode) {
-        void pollJobIntoMessage(res.job_id, pendingId, mediaMode)
+        if (opts.existingBoardMessageId && res.assistant_message) {
+          updateMessage(opts.existingBoardMessageId, {
+            content: res.assistant_message,
+          })
+        }
+        void pollJobIntoMessage(
+          res.job_id,
+          pendingId,
+          mediaMode as 'image' | 'video' | 'storyboard' | 'broll_board',
+        )
+      } else if (
+        !res.job_id &&
+        (action === 'approve_all_broll' || action === 'approve_broll')
+      ) {
+        toast.success(res.assistant_message || 'B-roll approved')
       }
     } catch (err) {
       const msg = extractApiError(err, 'Chat failed')
@@ -1254,11 +1795,12 @@ export default function CreativeStudioTab({
     await runTurn({
       userText: text,
       userAttachments: atts,
-      action: promptOnlyVideo ? 'generate_video' : 'continue',
+      action: cloneMode ? 'generate_image' : promptOnlyVideo ? 'generate_video' : 'generate_image',
       appendUser: true,
+      imagePromptOverride: promptOnlyVideo ? undefined : text,
       videoPromptOverride: promptOnlyVideo ? text : undefined,
       approvedImageOverride: promptOnlyVideo ? '' : undefined,
-      useStoredReferences: false,
+      useStoredReferences: cloneMode,
     })
   }
 
@@ -1286,6 +1828,93 @@ export default function CreativeStudioTab({
   }
 
   const handlePipelineAction = async (action: PipelineAction, fromMsg?: ChatMessage) => {
+    if (action === 'generate_all_broll') {
+      const boardMsg =
+        fromMsg?.mediaMode === 'broll_board'
+          ? fromMsg
+          : [...messages].reverse().find((m) => m.mediaMode === 'broll_board')
+      await runTurn({
+        userText: boardMsg
+          ? 'Generate remaining B-roll stills on the board'
+          : 'Generate all B-roll stills (dashboard / scene images)',
+        action: 'generate_all_broll',
+        appendUser: true,
+        userAttachments: [],
+        existingBoardMessageId: boardMsg?.id,
+      })
+      return
+    }
+    if (action === 'generate_broll_image') {
+      await runTurn({
+        userText: fromMsg?.brollIndex
+          ? `Generate B-roll IMAGE ${fromMsg.brollIndex}`
+          : 'Generate next B-roll still (dashboard / laptop scene)',
+        action: 'generate_broll_image',
+        appendUser: true,
+        userAttachments: [],
+        brollIndex: fromMsg?.brollIndex,
+      })
+      return
+    }
+    if (action === 'approve_all_broll') {
+      const frames = (fromMsg?.storyboard || []).filter(
+        (frame) => frame.url && frame.index,
+      )
+      if (!frames.length) {
+        toast.error('No B-roll stills ready to approve')
+        return
+      }
+      await runTurn({
+        userText: `Approve all ${frames.length} B-roll stills for Seedance`,
+        action: 'approve_all_broll',
+        appendUser: true,
+        userAttachments: [],
+        brollBoardApprovals: frames.map((frame) => ({
+          index: frame.index as number,
+          url: frame.url as string,
+          byteplus_url: frame.byteplusUrl,
+        })),
+      })
+      return
+    }
+    if (action === 'approve_broll') {
+      const brollUrl = fromMsg?.mediaUrl
+      if (!brollUrl || !fromMsg?.brollIndex) {
+        toast.error('B-roll still or index is missing')
+        return
+      }
+      await runTurn({
+        userText: `Approve B-roll IMAGE ${fromMsg.brollIndex} for Seedance`,
+        action: 'approve_broll',
+        appendUser: true,
+        userAttachments: [],
+        brollIndex: fromMsg.brollIndex,
+        approvedBrollOverride: brollUrl,
+        approvedBrollByteplusOverride: fromMsg.byteplusUrl,
+      })
+      return
+    }
+    if (action === 'generate_next_chapter_image') {
+      if (!fromMsg?.continuationMeta?.continuity_reference_url) {
+        toast.error('The previous chapter continuity frame is missing')
+        return
+      }
+      const nextChapterIndex =
+        fromMsg.continuationMeta.chapter_index ??
+        (fromMsg.continuationMeta.completed_segments || 0)
+      await runTurn({
+        userText: `Generate chapter ${nextChapterIndex + 1} still from the previous final frame`,
+        action: 'generate_next_chapter_image',
+        appendUser: true,
+        userAttachments: [],
+        imagePromptOverride: fromMsg.imagePrompt || imagePrompt,
+        videoPromptOverride: fromMsg.videoPrompt || videoPrompt,
+        chapterIndex: nextChapterIndex,
+        continuityStyleUrl: fromMsg.continuationMeta.continuity_reference_url,
+        accumulatedSegmentPaths: fromMsg.continuationMeta.staged_segment_paths,
+      })
+      return
+    }
     if (action === 'continue_video') {
       if (!fromMsg?.jobId) {
         toast.error('The reviewed video part is missing its continuation job')
@@ -1341,6 +1970,8 @@ export default function CreativeStudioTab({
               generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
               continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
               production_id: fromMsg.continuationMeta?.production_id,
+              continuity_video_reference_url:
+                fromMsg.continuationMeta?.continuity_video_reference_url,
               payload: buildContinuationRecoveryPayload({
                 sessionId: activeChatId,
                 videoModel,
@@ -1349,6 +1980,7 @@ export default function CreativeStudioTab({
                 aspect,
                 resolution,
                 soundOn,
+                speechMode,
                 promptOnlyVideo,
                 productName: productName || '',
                 brandName: effectiveBrandName,
@@ -1446,8 +2078,25 @@ export default function CreativeStudioTab({
       userAttachments: [],
       imagePromptOverride: nextImagePrompt,
       videoPromptOverride: nextVideoPrompt,
-      approvedImageOverride: nextApproved || undefined,
+      approvedImageOverride:
+        fromMsg?.phase === 'awaiting_video' &&
+        fromMsg?.suggestedActions?.includes('approve_next') &&
+        !fromMsg?.mediaUrl
+          ? ''
+          : nextApproved || undefined,
       storyboardImageUrls: storyboardFramesForVideo(fromMsg?.storyboard).slice(0, 9),
+      chapterIndex:
+        fromMsg?.continuationMeta?.chapter_index ??
+        (fromMsg &&
+        isChapterHandoffReady(
+          fromMsg,
+          fromMsg.continuationMeta?.requested_duration_seconds ?? projectDurationSeconds,
+          clipCap,
+        )
+          ? 1
+          : fromMsg?.chapterIndex),
+      continuityStyleUrl: fromMsg?.continuationMeta?.continuity_reference_url || '',
+      accumulatedSegmentPaths: fromMsg?.continuationMeta?.staged_segment_paths,
     })
   }
 
@@ -1463,6 +2112,14 @@ export default function CreativeStudioTab({
   }
 
   const hasMessages = messages.length > 0
+  const hadMessagesRef = useRef(false)
+
+  useEffect(() => {
+    if (hasMessages && !hadMessagesRef.current) {
+      setComposerSettingsOpen(false)
+    }
+    hadMessagesRef.current = hasMessages
+  }, [hasMessages])
   const activeJobMessage = useMemo(
     () =>
       [...messages]
@@ -1487,7 +2144,7 @@ export default function CreativeStudioTab({
                 : 'Plan'
 
   const composerCard = (
-    <div className="w-full max-w-3xl mx-auto">
+    <div className={hasMessages ? 'w-full' : 'w-full max-w-3xl mx-auto'}>
       {imageLibraryOpen && (
         <div
           className="fixed inset-0 z-[100] bg-black/75 backdrop-blur-sm p-3 sm:p-8 grid place-items-center"
@@ -1497,7 +2154,7 @@ export default function CreativeStudioTab({
         >
           <div className="w-full max-w-6xl h-[min(780px,90vh)] rounded-[28px] border border-white/10 bg-[#1d1f22] shadow-2xl overflow-hidden flex flex-col">
             <div className="flex items-center gap-1 px-4 sm:px-6 pt-4 border-b border-white/10">
-              {(['uploads', 'generations', 'liked'] as MediaLibrarySection[]).map((section) => (
+              {(['uploads', 'generations', 'characters', 'liked'] as MediaLibrarySection[]).map((section) => (
                 <button
                   key={section}
                   type="button"
@@ -1697,6 +2354,8 @@ export default function CreativeStudioTab({
                 <p className="py-12 text-center text-sm text-white/40">
                   {mediaLibrarySection === 'generations'
                     ? 'Generated images will appear here automatically.'
+                    : mediaLibrarySection === 'characters'
+                      ? 'Character references and approved clone images will appear here.'
                     : mediaLibrarySection === 'liked'
                       ? 'Like media with the heart button to keep it here.'
                       : mediaLibraryFilter === 'videos' || mediaLibraryFilter === 'audio'
@@ -1765,14 +2424,22 @@ export default function CreativeStudioTab({
         </div>
       )}
 
-      <div className="rounded-2xl border border-white/10 bg-[#1a1b1e] shadow-xl overflow-hidden">
+      <div
+        className={`overflow-hidden border border-white/10 bg-[#1a1b1e] ${
+          hasMessages ? 'rounded-xl' : 'rounded-2xl shadow-xl'
+        }`}
+      >
         <textarea
           value={composer}
           onChange={(e) => setComposer(e.target.value)}
           onKeyDown={onKeyDown}
-          rows={hasMessages ? 3 : 4}
+          rows={hasMessages ? 2 : 4}
           placeholder="Make a 10s UGC product video for my campaign…"
-          className="w-full resize-none overflow-y-auto cs-message-scroll bg-transparent px-4 pt-4 pb-2 text-[15px] text-white placeholder:text-white/35 focus:outline-none max-h-[min(9rem,22vh)]"
+          className={`w-full resize-none overflow-y-auto cs-message-scroll bg-transparent px-4 text-[15px] text-white placeholder:text-white/35 focus:outline-none ${
+            hasMessages
+              ? 'pt-3 pb-1 max-h-24'
+              : 'pt-4 pb-2 max-h-[min(9rem,22vh)]'
+          }`}
           disabled={busy}
         />
 
@@ -1908,10 +2575,54 @@ export default function CreativeStudioTab({
         </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2 justify-center text-[11px] text-white/50">
+      {hasMessages ? (
+        <button
+          type="button"
+          onClick={() => setComposerSettingsOpen((open) => !open)}
+          className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-[11px] text-white/55 hover:bg-white/[0.06]"
+        >
+          <span className="font-semibold text-white/75">
+            {composerSettingsOpen ? 'Hide generation settings' : 'Generation settings'}
+          </span>
+          <span className="text-white/40">
+            {' '}
+            · {videoModelLabel} · {aspect.replace('/', ':')} ·{' '}
+            {duration === 'auto' ? 'Auto length' : `${duration}s`}
+            {promptOnlyVideo ? ' · Direct Seedance' : ` · ${imageModelLabelText} → Seedance`}
+            {soundOn
+              ? speechMode === 'native_presenter'
+                ? ' · Native presenter speech'
+                : ' · Studio voiceover'
+              : ' · Silent'}
+          </span>
+        </button>
+      ) : null}
+
+      {(!hasMessages || composerSettingsOpen) && (
+      <div className={`flex flex-wrap items-center gap-2 text-[11px] text-white/50 ${hasMessages ? 'mt-2 max-h-40 overflow-y-auto cs-panel-scroll pr-1' : 'mt-3 justify-center'}`}>
         {!promptOnlyVideo ? (
+          <select
+            value={imageModel}
+            onChange={(e) => setImageModel(e.target.value)}
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[240px]"
+            title="Image model for B-roll stills"
+            aria-label="Image model for B-roll stills"
+          >
+            {(imageModels.length ? imageModels : [
+              { id: 'openai-gpt-image-2', label: 'GPT Image 2' },
+              { id: 'ark-seedream-5-0-lite', label: 'Seedream 5.0 Lite' },
+              { id: 'ark-seedream-5-0-pro', label: 'Seedream 5.0 Pro' },
+              { id: 'ark-seedream-5-0-flash', label: 'Seedream 5.0 Flash' },
+            ]).map((model) => (
+              <option key={model.id} value={model.id} className="bg-[#121316]">
+                Still · {model.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        {!promptOnlyVideo && cloneMode ? (
           <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
-            Still · GPT Image 2 storyboard
+            Clone Image · {cloneCount} copies
           </span>
         ) : null}
         <select
@@ -1957,12 +2668,114 @@ export default function CreativeStudioTab({
             Use selected storyboard frames in video
           </label>
         )}
-        <span
-          className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
-          title="The timed prompt and uploaded references go directly to Seedance. GPT image generation is disabled."
+        <div
+          className="inline-flex overflow-hidden rounded-full border border-[#b8f000]/30 bg-white/5"
+          role="group"
+          aria-label="Creative Studio generation workflow"
         >
-          Direct Seedance · GPT images disabled
-        </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setCloneMode(false)
+              setPromptOnlyVideo(true)
+            }}
+            className={`px-2.5 py-1 transition-colors ${
+              promptOnlyVideo && !cloneMode
+                ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
+                : 'text-white/55 hover:text-white/80'
+            }`}
+            title="Send the timed prompt and uploaded references directly to Seedance"
+          >
+            Direct Seedance
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setCloneMode(false)
+              setPromptOnlyVideo(false)
+            }}
+            className={`border-l border-[#b8f000]/20 px-2.5 py-1 transition-colors ${
+              !promptOnlyVideo && !cloneMode
+                ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
+                : 'text-white/55 hover:text-white/80'
+            }`}
+            title="Generate and review a GPT Image 2 starting scene, then animate the approved still with Seedance"
+          >
+            GPT Image 2 → Seedance
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setCloneMode(true)
+              setPromptOnlyVideo(false)
+              setImageModel('openai-gpt-image-2')
+              setMediaLibrarySection('characters')
+            }}
+            className={`border-l border-[#b8f000]/20 px-2.5 py-1 transition-colors ${
+              cloneMode
+                ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
+                : 'text-white/55 hover:text-white/80'
+            }`}
+            title="Create multiple copies of one person from reusable Character references"
+          >
+            Clone Image
+          </button>
+        </div>
+        {cloneMode ? (
+          <>
+            <select
+              value={cloneSceneId}
+              onChange={(event) => setCloneSceneId(event.target.value)}
+              className="rounded-full border border-[#b8f000]/30 bg-white/5 px-2.5 py-1 text-white/80 max-w-[230px]"
+              aria-label="Clone scene"
+              title="Choose a scene or leave Custom to describe it in the message"
+            >
+              <option value="" className="bg-[#121316]">Custom scene from prompt</option>
+              {(cloneCatalog?.categories || []).map((category) => (
+                <optgroup key={category.id} label={category.label} className="bg-[#121316]">
+                  {(cloneCatalog?.scenes || [])
+                    .filter((scene) => scene.category === category.id)
+                    .map((scene) => (
+                      <option key={scene.id} value={scene.id}>{scene.title}</option>
+                    ))}
+                </optgroup>
+              ))}
+            </select>
+            <select
+              value={cloneCount}
+              onChange={(event) => setCloneCount(Number(event.target.value))}
+              className="rounded-full border border-[#b8f000]/30 bg-white/5 px-2.5 py-1 text-white/80"
+              aria-label="Number of character copies"
+            >
+              {[2, 3, 4, 5, 6].map((count) => (
+                <option key={count} value={count} className="bg-[#121316]">{count} copies</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => {
+                setMediaLibrarySection('characters')
+                setMediaLibraryFilter('recent')
+                setImageLibraryOpen(true)
+              }}
+              className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
+              title="Optional: select 1–6 existing Character photos. With none selected, GPT Image 2 creates and saves a new identity first; this uses two image generations."
+            >
+              {Math.max(
+                attachments.filter((attachment) => attachment.role === 'character').length,
+                characterReferenceUrl ? 1 : 0,
+              ) > 0
+                ? `${Math.max(
+                    attachments.filter((attachment) => attachment.role === 'character').length,
+                    characterReferenceUrl ? 1 : 0,
+                  )} character refs · add/select`
+                : 'No character photo · auto-create first'}
+            </button>
+          </>
+        ) : null}
         <select
           value={duration}
           onChange={(e) => setDuration(e.target.value as DurationId)}
@@ -2041,20 +2854,41 @@ export default function CreativeStudioTab({
         >
           Sound {soundOn ? 'on' : 'off'}
         </button>
+        {soundOn ? (
+          <select
+            value={speechMode}
+            onChange={(e) => setSpeechMode(e.target.value as SpeechMode)}
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80"
+            title={
+              speechMode === 'native_presenter'
+                ? 'Seedance generates one voice together with the presenter mouth motion for natural lip-sync.'
+                : 'Creative Studio generates an exact separate voiceover; visible people must not lip-sync.'
+            }
+            aria-label="Speech generation mode"
+          >
+            <option value="native_presenter" className="bg-[#121316]">
+              Native presenter speech
+            </option>
+            <option value="external_voiceover" className="bg-[#121316]">
+              Studio voiceover
+            </option>
+          </select>
+        ) : null}
       </div>
+      )}
     </div>
   )
 
   return (
-    <div className="creative-studio-light w-full max-w-[1600px] mx-auto p-4 md:p-6">
-      <div className="rounded-2xl border border-[#2a2b30] bg-[#0c0d10] overflow-hidden min-h-[72vh] flex shadow-soft">
+    <div className="creative-studio-light w-full max-w-[1600px] mx-auto p-2 md:p-4">
+      <div className="rounded-2xl border border-[#2a2b30] bg-[#0c0d10] overflow-hidden h-[calc(100vh-7.5rem)] min-h-[520px] flex shadow-soft">
         {/* Chat history sidebar (ChatGPT-style) */}
         <aside
           className={`${
             sidebarOpen ? 'w-[240px] md:w-[260px]' : 'w-0'
-          } shrink-0 border-r border-white/10 bg-[#0a0b0e] transition-[width] overflow-hidden flex flex-col`}
+          } shrink-0 h-full min-h-0 border-r border-white/10 bg-[#0a0b0e] transition-[width] overflow-hidden flex flex-col`}
         >
-          <div className="p-3 border-b border-white/10 space-y-2">
+          <div className="shrink-0 p-3 border-b border-white/10 space-y-2">
             <button
               type="button"
               onClick={startNewChat}
@@ -2067,52 +2901,61 @@ export default function CreativeStudioTab({
               {sessions.length} {sessions.length === 1 ? 'chat' : 'chats'} · saved in this browser
             </p>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {sessions.map((s) => {
-              const active = s.id === activeChatId
-              return (
-                <div
-                  key={s.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => switchChat(s.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') switchChat(s.id)
-                  }}
-                  className={`group w-full text-left rounded-xl px-3 py-2.5 cursor-pointer ${
-                    active
-                      ? 'bg-white/10 border border-white/15'
-                      : 'hover:bg-white/5 border border-transparent'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-xs font-semibold text-white truncate flex-1">
-                      {s.title || 'New chat'}
-                    </p>
-                    <button
-                      type="button"
-                      title="Delete chat"
-                      onClick={(e) => deleteChat(s.id, e)}
-                      className="opacity-0 group-hover:opacity-100 text-white/40 hover:text-red-300 text-xs shrink-0"
+          <div className="flex-1 min-h-0 overflow-y-scroll cs-panel-scroll p-2 space-y-3">
+            {sessionGroups.map((group) => (
+              <div key={group.label} className="space-y-1">
+                <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-white/35 sticky top-0 bg-[#f8f9fb] py-1 z-[1]">
+                  {group.label}
+                </p>
+                {group.sessions.map((s) => {
+                  const active = s.id === activeChatId
+                  return (
+                    <div
+                      key={s.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => switchChat(s.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') switchChat(s.id)
+                      }}
+                      className={`group w-full text-left rounded-xl px-3 py-2.5 cursor-pointer ${
+                        active
+                          ? 'bg-white/10 border border-white/15'
+                          : 'hover:bg-white/5 border border-transparent'
+                      }`}
                     >
-                      ×
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-white/35 mt-0.5">
-                    {formatChatTime(s.updatedAt)}
-                    {s.messages?.length ? ` · ${s.messages.length} msgs` : ''}
-                  </p>
-                </div>
-              )
-            })}
+                      <div className="flex items-start justify-between gap-2 min-w-0">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold text-white truncate">
+                            {s.title || 'New chat'}
+                          </p>
+                          <p className="text-[10px] text-white/35 mt-0.5 truncate">
+                            {formatChatTime(s.updatedAt)}
+                            {s.messages?.length ? ` · ${s.messages.length} msgs` : ''}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          title="Delete chat"
+                          onClick={(e) => deleteChat(s.id, e)}
+                          className="opacity-0 group-hover:opacity-100 text-white/40 hover:text-red-300 text-xs shrink-0 leading-none pt-0.5"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ))}
             {!sessions.length && (
               <p className="text-[11px] text-white/35 px-2 py-4">No chats yet</p>
             )}
           </div>
         </aside>
 
-        <div className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-white/10">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+        <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-b border-white/10">
           <div className="flex items-center gap-2 min-w-0">
             <button
               type="button"
@@ -2175,48 +3018,65 @@ export default function CreativeStudioTab({
         )}
 
         {!hasMessages ? (
-          <div className="flex-1 flex flex-col items-center justify-center px-4 py-12 gap-8">
-            <div className="text-center space-y-3">
-              <div className="inline-flex items-center gap-2">
-                <span className="h-8 w-8 rounded-lg bg-[#b8f000] text-black font-black grid place-items-center">
-                  ~
-                </span>
-                <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white uppercase">
-                  What are we creating today?
-                </h2>
+          <>
+            <div className="flex-1 min-h-0 overflow-y-auto cs-panel-scroll flex flex-col items-center justify-center px-4 py-8">
+              <div className="text-center space-y-3 max-w-lg">
+                <div className="inline-flex items-center gap-2">
+                  <span className="h-8 w-8 rounded-lg bg-[#b8f000] text-black font-black grid place-items-center">
+                    ~
+                  </span>
+                  <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white uppercase">
+                    What are we creating today?
+                  </h2>
+                </div>
+                <p className="text-sm text-white/45">
+                  {promptOnlyVideo
+                    ? 'Send a timed prompt directly to Seedance. Product, scene and character references are optional.'
+                    : 'Generate a GPT Image 2 starting scene, review or regenerate it, then animate the approved still with Seedance.'}
+                </p>
               </div>
-              <p className="text-sm text-white/45 max-w-lg mx-auto">
-                Send a timed prompt directly to Seedance 2.0. Product, scene and character
-                references are optional and used only when you attach them.
-              </p>
             </div>
-            {composerCard}
-          </div>
+            <div className="shrink-0 border-t border-white/10 px-4 py-3 bg-[#0c0d10]">
+              {composerCard}
+            </div>
+          </>
         ) : (
           <>
-            <div ref={threadRef} className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-4">
+            <div
+              ref={threadRef}
+              className="flex-1 min-h-0 overflow-y-scroll cs-panel-scroll px-4 md:px-6 py-4 space-y-4"
+            >
               {messages.map((m) => {
                 const isUser = m.role === 'user'
                 const preview = assetUrl(m.mediaUrl || null)
+                const messageProjectDuration =
+                  m.continuationMeta?.requested_duration_seconds ?? projectDurationSeconds
                 const actions =
                   m.status === 'failed' && m.mediaMode === 'video'
                     ? (['generate_video'] as PipelineAction[])
                     : m.suggestedActions && m.suggestedActions.length
                     ? m.suggestedActions
+                    : isChapterHandoffReady(m, messageProjectDuration, clipCap)
+                      ? (['approve_next'] as PipelineAction[])
                     : m.mediaMode === 'image' && m.status === 'done' && m.mediaUrl
-                      ? (['regenerate_image', 'approve_next'] as PipelineAction[])
+                      ? m.brollIndex
+                        ? (['regenerate_image', 'approve_broll'] as PipelineAction[])
+                        : (['regenerate_image', 'approve_next'] as PipelineAction[])
                       : m.mediaMode === 'storyboard' &&
                           m.status === 'done' &&
                           m.storyboard?.some((f) => f.url)
                         ? (['regenerate_image', 'approve_next'] as PipelineAction[])
-                      : m.phase === 'awaiting_image' && (m.imagePrompt || imagePrompt)
-                        ? (['generate_image'] as PipelineAction[])
-                        : []
+                      : m.phase === 'awaiting_video' &&
+                          m.suggestedActions?.includes('approve_next')
+                        ? (['approve_next'] as PipelineAction[])
+                        : m.phase === 'awaiting_image' && (m.imagePrompt || imagePrompt)
+                          ? (['generate_image'] as PipelineAction[])
+                          : []
 
                 return (
                   <div key={m.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
                     <div
-                      className={`max-w-[min(100%,42rem)] rounded-2xl px-4 py-3 space-y-2 ${
+                      className={`w-full max-w-[min(100%,44rem)] rounded-2xl px-4 py-3 space-y-2 ${
                         isUser
                           ? 'bg-[#b8f000]/15 border border-[#b8f000]/25 text-white'
                           : 'bg-white/5 border border-white/10 text-white/90'
@@ -2297,6 +3157,95 @@ export default function CreativeStudioTab({
                       )}
 
                       {!isUser &&
+                        m.mediaMode === 'broll_board' &&
+                        m.storyboard &&
+                        m.storyboard.length > 0 &&
+                        (m.storyboard.some((f) => f.url) ||
+                          m.status === 'queued' ||
+                          m.status === 'running') && (
+                          <div className="pt-2 space-y-2">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                                B-roll board · {m.storyboard.length} images
+                              </p>
+                              <p className="text-[10px] text-white/45">
+                                {m.storyboard.filter((f) => f.url).length} ready
+                              </p>
+                            </div>
+                            <p className="text-[10px] text-white/40">
+                              Regenerate any dashboard with wrong text. Approve each or use Approve all when ready.
+                            </p>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                              {m.storyboard.map((frame) => {
+                                const src = assetUrl(frame.url || null)
+                                return (
+                                  <div
+                                    key={frame.id}
+                                    className="rounded-xl border border-white/10 overflow-hidden bg-black/40"
+                                  >
+                                    {src ? (
+                                      <button
+                                        type="button"
+                                        className="block w-full"
+                                        onClick={() =>
+                                          setPreviewFrame({
+                                            src,
+                                            title: frame.title || `IMAGE ${frame.index}`,
+                                          })
+                                        }
+                                      >
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img
+                                          src={src}
+                                          alt={frame.title || 'B-roll'}
+                                          className="w-full aspect-square object-cover bg-black"
+                                        />
+                                      </button>
+                                    ) : (
+                                      <div className="w-full aspect-square grid place-items-center text-[10px] text-white/35 animate-pulse">
+                                        {frame.status === 'running' ? 'Regenerating…' : 'Rendering…'}
+                                      </div>
+                                    )}
+                                    <div className="px-2 py-1.5 border-t border-white/10 space-y-1.5">
+                                      <p className="text-[10px] font-semibold text-[#b8f000] truncate">
+                                        {frame.title || `IMAGE ${frame.index}`}
+                                      </p>
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        <button
+                                          type="button"
+                                          disabled={busy}
+                                          className="text-[9px] px-2 py-0.5 rounded-full border border-white/15 text-white/75"
+                                          onClick={() => void regenerateBrollFrame(m, frame)}
+                                        >
+                                          Regenerate
+                                        </button>
+                                        {src ? (
+                                          <button
+                                            type="button"
+                                            disabled={busy}
+                                            className="text-[9px] px-2 py-0.5 rounded-full border border-[#b8f000]/45 text-[#b8f000]"
+                                            onClick={() =>
+                                              void handlePipelineAction('approve_broll', {
+                                                ...m,
+                                                mediaUrl: frame.url,
+                                                brollIndex: frame.index,
+                                              })
+                                            }
+                                          >
+                                            Approve
+                                          </button>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                      {!isUser &&
+                        m.mediaMode !== 'broll_board' &&
                         m.storyboard &&
                         m.storyboard.length > 0 &&
                         (m.storyboard.some((f) => f.url) ||
@@ -2439,20 +3388,21 @@ export default function CreativeStudioTab({
                           </div>
                         )}
 
-                      {preview && m.mediaMode !== 'storyboard' && (
+                      {preview && m.mediaMode !== 'storyboard' && m.mediaMode !== 'broll_board' && (
                         <div className="space-y-2 pt-1">
                           {m.mediaMode === 'video' ? (
                             <video
                               src={preview}
                               controls
-                              className="w-full max-h-80 rounded-xl bg-black border border-white/10"
+                              playsInline
+                              className="w-full max-w-full rounded-xl bg-black border border-white/10 aspect-video object-contain"
                             />
                           ) : (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img
                               src={preview}
                               alt="Generated still"
-                              className="w-full max-h-80 object-contain rounded-xl border border-white/10 bg-black"
+                              className="w-full max-w-full max-h-[28rem] object-contain rounded-xl border border-white/10 bg-black"
                             />
                           )}
                           <div className="flex flex-wrap gap-2">
@@ -2476,9 +3426,26 @@ export default function CreativeStudioTab({
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => {
-                                  setCharacterReferenceUrl(m.mediaUrl || '')
-                                  toast.success('Character anchor selected')
+                                onClick={async () => {
+                                  const url = m.mediaUrl || ''
+                                  setCharacterReferenceUrl(url)
+                                  if (url) {
+                                    try {
+                                      const saved = await assetsApi.registerGenerated({
+                                        file_url: url,
+                                        brand_id: brandId,
+                                        file_name: 'Reusable character reference',
+                                        metadata: { role: 'character', reusable: true },
+                                      })
+                                      setImageLibrary((current) => [
+                                        saved,
+                                        ...current.filter((asset) => asset.id !== saved.id),
+                                      ])
+                                    } catch {
+                                      // The visual remains usable in this chat even if persistence fails.
+                                    }
+                                  }
+                                  toast.success('Character reference saved for reuse')
                                 }}
                                 className={`text-[11px] font-semibold px-3 py-1.5 rounded-full border ${
                                   characterReferenceUrl === m.mediaUrl
@@ -2502,7 +3469,7 @@ export default function CreativeStudioTab({
                       )}
 
                       {!isUser && actions.length > 0 && !busy && (
-                        <div className="flex flex-wrap gap-2 pt-2 sticky bottom-0">
+                        <div className="flex flex-wrap gap-2 pt-2">
                           {actions.map((a) => (
                             <button
                               key={a}
@@ -2510,12 +3477,18 @@ export default function CreativeStudioTab({
                               disabled={busy}
                               onClick={() => void handlePipelineAction(a, m)}
                               className={`text-[12px] font-bold px-4 py-2 rounded-full ${
-                                a === 'approve_next' || a === 'generate_image'
+                                a === 'approve_next' ||
+                                a === 'approve_broll' ||
+                                a === 'approve_all_broll' ||
+                                a === 'generate_image' ||
+                                a === 'generate_all_broll'
                                   ? 'bg-[#b8f000] text-black hover:brightness-110'
                                   : 'bg-white/10 border border-white/20 text-white hover:bg-white/15'
                               }`}
                             >
-                              {ACTION_LABELS[a] || a}
+                              {a === 'approve_next'
+                                ? chapterHandoffLabel(m, clipCap, messageProjectDuration)
+                                : ACTION_LABELS[a] || a}
                             </button>
                           ))}
                         </div>
@@ -2539,8 +3512,11 @@ export default function CreativeStudioTab({
                   </div>
                 )
               })}
+              <div className="h-2 shrink-0" aria-hidden />
             </div>
-            <div className="border-t border-white/10 px-4 py-4 bg-[#0c0d10]">{composerCard}</div>
+            <div className="shrink-0 border-t border-white/10 px-3 md:px-4 py-2 bg-[#0c0d10]">
+              {composerCard}
+            </div>
           </>
         )}
         </div>

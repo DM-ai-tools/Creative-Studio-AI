@@ -86,9 +86,15 @@ class Settings(BaseSettings):
     # BytePlus ModelArk — Dreamina Seedance 2.0 video (Creative Studio)
     # Console key name example: api-key-20260907112046
     ARK_API_KEY: str = ""
+    # Optional separate ModelArk key for Seedance 2.5; falls back to ARK_API_KEY when empty.
+    ARK_API_KEY_25: str = ""
     ARK_BASE_URL: str = "https://ark.ap-southeast.bytepluses.com/api/v3"
     ARK_SEEDANCE_MODEL: str = "dreamina-seedance-2-0-260128"
     ARK_SEEDANCE_25_MODEL: str = "dreamina-seedance-2-5-260628"
+    # BytePlus ModelArk Seedream 5.0 stills (Creative Studio B-roll)
+    ARK_SEEDREAM_50_LITE_MODEL: str = "seedream-5-0-260128"
+    ARK_SEEDREAM_50_PRO_MODEL: str = "dola-seedream-5-0-pro-260628"
+    ARK_SEEDREAM_50_FLASH_MODEL: str = "dola-seedream-5-0-flash-260915"
     ARK_POLL_MAX_WAIT_SECONDS: int = 1800
 
     # Firecrawl — scrape website → brand colors, logo, industry
@@ -152,6 +158,7 @@ class Settings(BaseSettings):
         "OPENROUTER_MODEL_VISION",
         "OPENROUTER_MODEL_STRATEGY_PARSE",
         "ARK_API_KEY",
+        "ARK_API_KEY_25",
         "ARK_SEEDANCE_MODEL",
         "ARK_BASE_URL",
         mode="before",

@@ -201,6 +201,43 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["image_role"], "first_frame")
         self.assertEqual(request["image_data_uri_or_url"], "https://example.com/handoff.jpg")
 
+    async def test_prior_chapter_video_uses_combined_reference_mode(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        submit = AsyncMock(return_value="continuity-task")
+        continuity_brief = {
+            **self.brief,
+            "continuity_reference_url": "https://example.com/handoff.jpg",
+            "continuity_video_reference_url": "https://example.com/chapter-1.mp4",
+            "strict_continuity_reference": True,
+        }
+        with (
+            patch(module + ".ark_configured", return_value=True),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
+            patch(module + ".create_video_task", submit),
+            patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 15})),
+            patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
+            patch(module + "._download_asset", AsyncMock(return_value={"url": "fixture.mp4"})),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="Continue from the approved prior chapter.",
+                brief=continuity_brief,
+                copy={},
+                format_type="landscape",
+                model="ark-seedance-2-0",
+                tenant_id="test",
+                duration_seconds=15,
+            )
+        self.assertEqual(result["status"], "done", result.get("error"))
+        request = submit.call_args.kwargs
+        self.assertIsNone(request["image_data_uri_or_url"])
+        self.assertEqual(request["image_role"], "reference_image")
+        self.assertEqual(request["extra_video_refs"], [{
+            "url": "https://example.com/chapter-1.mp4",
+            "role": "reference_video",
+        }])
+        self.assertIn("APPROVED PREVIOUS CHAPTER", request["prompt"])
+
     async def test_strict_continuity_never_drops_the_previous_chapter_frame(self):
         module = "app.services.media.byteplus_seedance_provider"
         privacy_error = RuntimeError("InputImageSensitiveContentDetected.PrivacyInformation")

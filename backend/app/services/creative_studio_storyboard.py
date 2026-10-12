@@ -321,6 +321,92 @@ def opening_still_prompt(scenes: list[dict[str, Any]]) -> str:
     return str(scenes[0].get("image_prompt") or "")
 
 
+def chapter_still_prompt(
+    scenes: list[dict[str, Any]],
+    chapter_index: int,
+    *,
+    from_continuity: bool = False,
+) -> str:
+    """Visual still prompt for one film chapter (GPT Image 2 opening frame)."""
+    if not scenes:
+        return ""
+    index = max(0, min(int(chapter_index), len(scenes) - 1))
+    prompt = str(scenes[index].get("image_prompt") or scenes[0].get("image_prompt") or "")
+    if from_continuity:
+        prompt = (
+            f"{prompt} CAST CONTINUITY: Match the attached continuity frame's fictional "
+            "presenter, wardrobe, lighting, and environment. This still opens the next "
+            "chapter — preserve the same world, do not recast or restyle."
+        )
+    return prompt.strip()
+
+
+_CHAPTER_BLOCK = re.compile(
+    r"(?is)(?:CLIP|CHAPTER|PART|IMAGE\s+CHAPTER)\s*(\d+)\b[^\n]*\n(.*?)"
+    r"(?=(?:CLIP|CHAPTER|PART|IMAGE\s+CHAPTER)\s*\d+\b|\Z)"
+)
+_STILL_LABEL = re.compile(
+    r"(?is)(?:OPENING\s+(?:STILL|FRAME)|STILL\s+IMAGE|GPT\s+IMAGE|IMAGE\s+PROMPT|"
+    r"FIRST\s+FRAME)\s*:?\s*(.+?)(?:\n\n|\n(?:SCRIPT|VOICE|DIALOGUE|AUDIO|Use:|Do not)|\Z)"
+)
+
+
+def chapter_still_prompt_from_brief(
+    brief: str,
+    chapter_index: int,
+    *,
+    from_continuity: bool = False,
+) -> str:
+    """Pull the opening still direction for one chapter from a structured brief."""
+    text = str(brief or "").strip()
+    if not text:
+        return ""
+    blocks: dict[int, str] = {}
+    for match in _CHAPTER_BLOCK.finditer(text):
+        blocks[int(match.group(1))] = str(match.group(2) or "").strip()
+    block = blocks.get(int(chapter_index) + 1, "")
+    prompt = ""
+    if block:
+        still_match = _STILL_LABEL.search(block)
+        if still_match:
+            prompt = still_match.group(1).strip()
+        else:
+            visual_match = re.search(
+                r"(?is)VISUAL\s*(?:/\s*AUDIO)?\s*:?\s*(.+?)(?:\n\n|\n(?:SCRIPT|DIALOGUE|VOICE)|\Z)",
+                block,
+            )
+            prompt = (visual_match.group(1) if visual_match else "").strip()
+    if not prompt:
+        return ""
+    # Reject timeline-only fragments that GPT Image would turn into infographic junk.
+    if re.fullmatch(
+        r"(?is)[\d:.\s–—\-]+(?:presenter|uploaded|stat|proof|b-roll|image)?[\w\s–—\-:./]*",
+        prompt,
+    ) and not re.search(r"(?i)(?:presenter|strategist|woman|man|portrait|office|uploaded|stat)", prompt):
+        return ""
+    prompt = re.sub(r"\s+", " ", prompt).strip()
+    from app.services.creative_studio_broll import image_prompt_wants_readable_text
+
+    if image_prompt_wants_readable_text(prompt, brief=text):
+        prompt += (
+            " Single photoreal square 1:1 commercial still. Any requested on-screen words "
+            "must use correct English spelling and sharp legible typography. "
+            "Premium dark charcoal office, subtle blue/green accents, matte finish."
+        )
+    else:
+        prompt += (
+            " Single photoreal square 1:1 commercial still. No on-image text, captions or logos. "
+            "Premium dark charcoal office, subtle blue/green accents, matte finish."
+        )
+    if from_continuity:
+        prompt = (
+            f"{prompt} CAST CONTINUITY: Match the attached continuity frame's fictional "
+            "presenter, wardrobe, lighting, and environment. This still opens the next "
+            "chapter — preserve the same world, do not recast or restyle."
+        )
+    return prompt.strip()
+
+
 def product_hero_scene(scenes: list[dict[str, Any]]) -> dict[str, Any] | None:
     for s in scenes:
         blob = f"{s.get('title','')} {s.get('image_prompt','')}".lower()

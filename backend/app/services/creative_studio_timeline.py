@@ -7,7 +7,12 @@ import re
 MAX_VIDEO_PROMPT_CHARS = 32_000
 SHOT_HEADER = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:(?:CLIP|Scene)[ \t]*\d+|S\d+[A-Za-z]?)[^\n]*|"
-    r"\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:seconds?|s)\s*[—–-]\s*[^\n]+)"
+    r"\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:seconds?|s)\s*[—–-]\s*[^\n]+|"
+    # One-shot briefs commonly put a clock range on its own line, followed by
+    # DIALOGUE/VISUAL sections. The lookahead excludes timed caption rows.
+    r"\d{1,2}:\d{2}(?:\.\d+)?\s*[–—-]\s*\d{1,2}:\d{2}(?:\.\d+)?[ \t]*"
+    r"(?=\r?\n(?:(?:[ \t]*[-=_*]{3,}[ \t]*\r?\n)|(?:[ \t]*\r?\n)){0,3}"
+    r"[ \t]*(?:DIALOGUE|VISUAL)\s*:))"
 )
 _HEADER = SHOT_HEADER
 _TIME_VALUE = r"(?:\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)"

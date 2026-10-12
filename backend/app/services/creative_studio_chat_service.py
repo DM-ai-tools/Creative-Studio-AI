@@ -42,8 +42,35 @@ ACTIONS = frozenset(
         "approve_next",
         "generate_video",
         "generate_storyboard",
+        "generate_next_chapter_image",
+        "generate_broll_image",
+        "generate_all_broll",
+        "regenerate_broll_image",
+        "approve_broll",
+        "approve_all_broll",
     }
 )
+
+
+def _needs_chapter_image_staging(
+    *, prompt_only_video: bool, duration_seconds: int, clip_cap: int
+) -> bool:
+    """Image-first long films: one GPT still per chapter, approve between each."""
+    return not prompt_only_video and int(duration_seconds) > int(clip_cap)
+
+
+def _film_chapter_count(duration_seconds: int, clip_cap: int) -> int:
+    from app.services.creative_studio_job_service import _seedance_segment_durations
+
+    return len(_seedance_segment_durations(int(duration_seconds), int(clip_cap)))
+
+
+def _chapter_duration(duration_seconds: int, clip_cap: int, chapter_index: int) -> int:
+    from app.services.creative_studio_job_service import _seedance_segment_durations
+
+    durations = _seedance_segment_durations(int(duration_seconds), int(clip_cap))
+    index = max(0, min(int(chapter_index), len(durations) - 1))
+    return int(durations[index])
 
 _SYSTEM = """You are Creative Studio — a production agent (think Higgsfield Supercomputer / ChatGPT agent mode).
 
@@ -332,14 +359,25 @@ async def _ensure_rich_motion_prompt(
 
 def _default_image_model() -> str:
     from app.services.media.openai_image_catalog import openai_configured
+    from app.services.media.byteplus_seedream_client import seedream_configured
 
     if openai_configured():
         return DEFAULT_IMAGE_MODEL
+    if seedream_configured():
+        return "ark-seedream-5-0-lite"
     from app.services.media.higgsfield_models import higgsfield_configured
 
     if higgsfield_configured():
         return "hf-text2image-soul-v2"
     return DEFAULT_IMAGE_MODEL
+
+
+def _image_generation_configured() -> bool:
+    from app.services.media.byteplus_seedream_client import seedream_configured
+    from app.services.media.higgsfield_models import higgsfield_configured
+    from app.services.media.openai_image_catalog import openai_configured
+
+    return bool(openai_configured() or seedream_configured() or higgsfield_configured())
 
 
 async def _llm_plan(
@@ -384,8 +422,8 @@ async def _llm_plan(
         f"Current video_prompt: {(video_prompt or '—')[:800]}",
         f"Approved still URL: {approved_image_url or 'none'}",
         f"Revision notes: {revision_notes or 'none'}",
-        "Image model: GPT Image 2 (openai-gpt-image-2).",
-        "Video model: Seedance 2.0 (ark-seedance-2-0).",
+        "Image models: GPT Image 2 or BytePlus Seedream 5.0 (Lite / Pro / Flash).",
+        "Video model: Seedance 2.0 or 2.5 (ark-seedance-2-0 / ark-seedance-2-5).",
         "IMPORTANT: video_prompt must cover the FULL brief with timed CLIP beats — "
         "never only 'animate this still'. image_prompt is opening frame only.",
         "If attachments are present, the still MUST match that product photo exactly.",
@@ -462,6 +500,7 @@ async def _start_job(
     resolution: str,
     sound_on: bool,
     seed_image_url: str | None,
+    speech_mode: str = "external_voiceover",
     seed_image_role: str = "first_frame",
     product_name: str = "",
     brand_name: str = "",
@@ -472,8 +511,25 @@ async def _start_job(
     source_brief: str = "",
     storyboard_scenes: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
+    require_storyboard_coverage: bool = True,
     prompt_only_video: bool = False,
+    preserve_image_text: bool = False,
     session_id: str = "",
+    chapter_image_staging: bool = False,
+    film_chapter_index: int = 0,
+    film_total_chapters: int = 1,
+    full_film_duration: int | None = None,
+    accumulated_segment_paths: list[str] | None = None,
+    continuity_style_url: str | None = None,
+    broll_index: int | None = None,
+    broll_title: str = "",
+    broll_segments: list[dict[str, Any]] | None = None,
+    broll_plan: list[dict[str, Any]] | None = None,
+    clone_mode: bool = False,
+    clone_scene_id: str = "",
+    clone_count: int = 4,
+    clone_identity_prompt: str = "",
+    background_only_image: bool = False,
 ) -> str:
     import asyncio
 
@@ -495,6 +551,11 @@ async def _start_job(
             "aspect": aspect,
             "resolution": resolution or "1080p",
             "sound_on": bool(sound_on) if media_mode == "video" else False,
+            "speech_mode": (
+                speech_mode
+                if speech_mode in {"native_presenter", "external_voiceover"}
+                else "external_voiceover"
+            ),
             "product_name": product_name or "",
             "brand_name": brand_name or "",
             # Video overlays are intentional campaign copy; do not globally ban text.
@@ -508,10 +569,33 @@ async def _start_job(
             "source_brief": source_brief,
             "storyboard_scenes": storyboard_scenes or [],
             "storyboard_image_urls": storyboard_image_urls or [],
+            "require_storyboard_coverage": bool(require_storyboard_coverage),
             "prompt_only_video": bool(prompt_only_video),
+            "preserve_image_text": bool(preserve_image_text),
             # Long Creative Studio films are reviewed one provider-sized chapter
             # at a time. The next paid call starts only after user approval.
-            "interactive_staging": media_mode == "video" and duration_seconds > clip_cap,
+            "interactive_staging": (
+                media_mode == "video"
+                and duration_seconds > clip_cap
+                and not chapter_image_staging
+            ),
+            "chapter_image_staging": bool(chapter_image_staging),
+            "film_chapter_index": int(film_chapter_index),
+            "film_total_chapters": int(film_total_chapters),
+            "full_film_duration": int(full_film_duration or duration_seconds),
+            "accumulated_segment_paths": list(accumulated_segment_paths or []),
+            "continuity_style_url": str(continuity_style_url or "").strip() or None,
+            "broll_index": int(broll_index) if broll_index else None,
+            "broll_title": str(broll_title or "").strip() or None,
+            "broll_segments": list(broll_segments or []),
+            "broll_plan": list(broll_plan or []),
+            "clone_mode": bool(clone_mode),
+            "clone_scene_id": str(clone_scene_id or "").strip(),
+            "clone_count": max(2, min(6, int(clone_count or 4))),
+            "clone_identity_prompt": str(clone_identity_prompt or "").strip(),
+            # Keep a selected presenter available for Seedance without feeding
+            # that face into GPT Image 2 supporting-scene generation.
+            "background_only_image": bool(background_only_image),
             # Stable key for the immutable production bible and chapter ledger.
             "creative_studio_session_id": session_id,
         },
@@ -528,7 +612,7 @@ def _find_full_user_brief(messages: list[dict[str, Any]], last_user: str) -> str
             continue
         content = str(m.get("content") or "").strip()
         low = content.lower()
-        if low.startswith("approve") or low.startswith("generate image") or low.startswith("regenerate"):
+        if re.match(r"(?i)^(approve|generate|regenerate)\b", low) and len(content) < 320:
             continue
         if len(content) > len(best):
             best = content
@@ -617,6 +701,7 @@ async def run_creative_studio_chat_turn(
     aspect: str = "9/16",
     resolution: str = "1080p",
     sound_on: bool = True,
+    speech_mode: str = "native_presenter",
     attachment_urls: list[str] | None = None,
     brand_name: str = "",
     product_name: str = "",
@@ -633,20 +718,37 @@ async def run_creative_studio_chat_turn(
     reference_assets: list[dict[str, str]] | None = None,
     storyboard_image_urls: list[str] | None = None,
     prompt_only_video: bool = False,
+    preserve_image_text: bool = False,
     video_model: str | None = None,
+    chapter_index: int | None = None,
+    continuity_style_url: str = "",
+    accumulated_segment_paths: list[str] | None = None,
+    broll_index: int | None = None,
+    approved_broll_url: str = "",
+    approved_broll_byteplus_url: str = "",
+    broll_board_approvals: list[dict[str, Any]] | None = None,
+    clone_mode: bool = False,
+    clone_scene_id: str = "",
+    clone_count: int = 4,
 ) -> dict[str, Any]:
     """
-    Creative Studio direct video turn. GPT image/storyboard generation is
-    temporarily disabled; authored prompts and uploaded references go directly
-    to Seedance.
+    Creative Studio production turn. Direct Seedance is the default frontend
+    workflow; callers may opt into a reviewed GPT Image 2 start frame.
     """
-    from app.services.media.byteplus_seedance_client import ark_configured
+    from app.services.media.byteplus_seedance_client import (
+        ark_configured,
+        ark_configured_for_model,
+    )
     from app.services.media.higgsfield_models import higgsfield_configured
     from app.services.media.openai_image_catalog import openai_configured
 
     mode_norm = (mode or "auto").strip().lower()
     if mode_norm not in {"auto", "ask", "generate"}:
         mode_norm = "auto"
+
+    speech_mode = (speech_mode or "native_presenter").strip().lower()
+    if speech_mode not in {"native_presenter", "external_voiceover"}:
+        speech_mode = "native_presenter"
 
     action_norm = (action or "continue").strip().lower()
     if action_norm not in ACTIONS:
@@ -655,11 +757,13 @@ async def run_creative_studio_chat_turn(
     active_video_model = _resolve_video_model(video_model)
     video_model_label = _seedance_model_label(active_video_model)
 
-    # Authoritative server-side guard for old browser bundles and Fast Refresh
-    # state. Creative Studio currently has one path: uploads + authored prompt
-    # directly to Seedance. Never spend an image-generation call here.
-    prompt_only_video = True
-    if action_norm in {
+    # Old direct-video clients may still submit a stale image action. Preserve
+    # that behaviour only when direct mode is explicitly requested. Image-first
+    # mode is opt-in and must be allowed to reach GPT Image 2.
+    clone_mode = bool(clone_mode)
+    clone_count = max(2, min(6, int(clone_count or 4)))
+    prompt_only_video = bool(prompt_only_video) and not clone_mode
+    if prompt_only_video and action_norm in {
         "continue",
         "generate_image",
         "regenerate_image",
@@ -678,12 +782,47 @@ async def run_creative_studio_chat_turn(
         for u in (additional_reference_urls or [])
         if (u or "").strip() and u.strip() not in {product_ref, logo_ref}
     ][:7]
+    selected_character_url = next(
+        (
+            str(asset.get("url") or "").strip()
+            for asset in (reference_assets or [])
+            if isinstance(asset, dict)
+            and str(asset.get("role") or "").strip().lower() == "character"
+            and str(asset.get("url") or "").strip()
+        ),
+        "",
+    )
+
+    def _seedance_presenter_note() -> str:
+        if selected_character_url:
+            return (
+                "Your selected Character remains locked as the presenter identity reference "
+                "for Seedance. Click Approve & Next → Seedance video."
+            )
+        return (
+            "No Character photo is selected, so Seedance will create a fictional presenter "
+            "from your script. Click Approve & Next → Seedance video."
+        )
+
+    def _proof_still_url() -> str | None:
+        """Uploaded stat/dashboard proof — usually tagged Reference, not Product."""
+        for asset in reference_assets or []:
+            if not isinstance(asset, dict):
+                continue
+            role = str(asset.get("role") or "").strip().lower()
+            url = str(asset.get("url") or "").strip()
+            if role in {"reference", "product", "scene"} and url:
+                return url
+        for url in extra_refs:
+            if url:
+                return url
+        return product_ref or None
     model_slug = (
         resolve_prompt_llm_model(chat_model)
         if chat_model and chat_model != "auto"
         else default_prompt_llm_model()
     )
-    img_model = (image_model or "").strip() or _default_image_model()
+    img_model = "openai-gpt-image-2" if clone_mode else ((image_model or "").strip() or _default_image_model())
     last_user = ""
     for m in reversed(messages):
         if str(m.get("role") or "") == "user" and str(m.get("content") or "").strip():
@@ -697,11 +836,471 @@ async def run_creative_studio_chat_turn(
     )
     out_duration = requested_duration
     out_aspect = _normalize_aspect(aspect, "9/16")
+    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
+
+    clip_cap = seedance_clip_cap_seconds(active_video_model)
+    chapter_staging = _needs_chapter_image_staging(
+        prompt_only_video=bool(prompt_only_video),
+        duration_seconds=out_duration,
+        clip_cap=clip_cap,
+    )
+    film_chapters = _film_chapter_count(out_duration, clip_cap) if chapter_staging else 1
+    active_chapter_index = max(0, int(chapter_index or 0))
+    next_chapter_image = action_norm == "generate_next_chapter_image"
+    if next_chapter_image:
+        action_norm = "generate_image"
+
+    def _ensure_broll_memory() -> dict[str, Any]:
+        from app.services.creative_studio_broll import parse_broll_images
+        from app.services.creative_studio_production_memory import (
+            ensure_broll_plan,
+            ensure_production_memory,
+            load_production_memory,
+            normalized_reference_lock,
+            save_production_memory,
+        )
+        from app.services.creative_studio_video_finishing import extract_voiceover_events
+
+        existing = load_production_memory(tenant_id, session_id)
+        plan = parse_broll_images(full_brief)
+        if existing:
+            if plan and not existing.get("broll_plan"):
+                ensure_broll_plan(existing, plan)
+                save_production_memory(tenant_id, existing)
+            elif (
+                plan
+                and not existing.get("approved_broll")
+                and list(existing.get("broll_plan") or []) != plan
+            ):
+                # Parser improvements or prompt corrections may change an
+                # unapproved board. Refresh it safely before any still is
+                # locked; approved B-roll remains immutable.
+                existing["broll_plan"] = plan
+                save_production_memory(tenant_id, existing)
+            if existing.get("broll_plan") or existing.get("approved_broll"):
+                return existing
+        voice_events = extract_voiceover_events(full_brief, duration_seconds=out_duration)
+        refs = normalized_reference_lock(
+            list(reference_assets or []),
+            product_reference_url=product_ref or None,
+            logo_reference_url=logo_ref or None,
+        )
+        memory = ensure_production_memory(
+            tenant_id=tenant_id,
+            session_id=session_id or "draft",
+            prompt=full_brief,
+            duration_seconds=out_duration,
+            clip_cap=clip_cap,
+            aspect=out_aspect,
+            resolution=resolution or "1080p",
+            model=active_video_model,
+            brand_name=brand_name,
+            product_name=product_name,
+            voice_events=voice_events,
+            references=refs,
+        )
+        ensure_broll_plan(memory, plan)
+        if plan and not (existing and existing.get("broll_plan")):
+            save_production_memory(tenant_id, memory)
+        return memory
+
+    # A master brief with explicit supporting-image blocks should enter the
+    # B-roll board workflow immediately. Otherwise the full presenter brief can
+    # be mistaken for one opening-still prompt and GPT Image 2 may draw the
+    # selected presenter into the background asset.
+    if action_norm == "generate_image" and not clone_mode:
+        from app.services.creative_studio_broll import parse_broll_images
+
+        if parse_broll_images(full_brief):
+            action_norm = "generate_all_broll"
 
     # ── Explicit pipeline actions (no LLM required) ──────────────────────────
+    if action_norm == "approve_broll":
+        from app.services.creative_studio_production_memory import (
+            approve_broll_still,
+            pending_broll_indices,
+        )
+
+        url = (approved_broll_url or approved_image_url or "").strip()
+        idx = int(broll_index or 0)
+        if not url or idx < 1:
+            return {
+                "assistant_message": "Approve a B-roll still first (Generate B-roll image, then Approve B-roll).",
+                "intent": "reply",
+                "phase": "awaiting_broll",
+                "suggested_actions": ["generate_broll_image"],
+                "chat_model": model_slug,
+                "image_model": img_model,
+                "video_model": active_video_model,
+                "status": "failed",
+                "error": "broll_not_approved",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        memory = _ensure_broll_memory()
+        item = next(
+            (row for row in (memory.get("broll_plan") or []) if int(row.get("index") or 0) == idx),
+            {"title": f"B-roll {idx}"},
+        )
+        approve_broll_still(
+            tenant_id,
+            memory,
+            index=idx,
+            url=url,
+            title=str(item.get("title") or f"B-roll {idx}"),
+            byteplus_url=(approved_broll_byteplus_url or "").strip() or None,
+        )
+        pending = pending_broll_indices(memory)
+        if pending:
+            next_actions = ["generate_all_broll", "generate_broll_image"]
+        else:
+            next_actions = ["approve_next"]
+        return {
+            "assistant_message": (
+                f"Approved B-roll IMAGE {idx}: {item.get('title')}. "
+                + (
+                    f"{len(pending)} B-roll still(s) remaining — generate all at once or one at a time."
+                    if pending
+                    else f"All B-roll stills approved. {_seedance_presenter_note()}"
+                )
+            ),
+            "intent": "reply",
+            "phase": "awaiting_broll" if pending else "awaiting_video",
+            "suggested_actions": next_actions,
+            "chat_model": model_slug,
+            "image_model": img_model,
+            "video_model": active_video_model,
+            "broll_index": pending[0] if pending else None,
+            "status": "ok",
+            "job_id": None,
+            "media_mode": None,
+            "model": None,
+            "duration_seconds": out_duration,
+            "aspect": out_aspect,
+            "error": None,
+        }
+
+    if action_norm == "approve_all_broll":
+        from app.services.creative_studio_production_memory import (
+            approve_broll_still,
+            pending_broll_indices,
+        )
+
+        memory = _ensure_broll_memory()
+        plan = list(memory.get("broll_plan") or [])
+        rows = [
+            row
+            for row in (broll_board_approvals or [])
+            if isinstance(row, dict)
+            and int(row.get("index") or 0) >= 1
+            and str(row.get("url") or "").strip()
+        ]
+        if not rows:
+            return {
+                "assistant_message": (
+                    "No B-roll stills to approve. Generate the B-roll board first, "
+                    "then approve each image or use Approve all."
+                ),
+                "intent": "reply",
+                "phase": "awaiting_broll",
+                "suggested_actions": ["generate_all_broll", "generate_broll_image"],
+                "status": "failed",
+                "error": "broll_board_empty",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        approved_count = 0
+        for row in rows:
+            idx = int(row["index"])
+            url = str(row["url"]).strip()
+            item = next(
+                (p for p in plan if int(p.get("index") or 0) == idx),
+                {"title": f"B-roll {idx}"},
+            )
+            approve_broll_still(
+                tenant_id,
+                memory,
+                index=idx,
+                url=url,
+                title=str(item.get("title") or f"B-roll {idx}"),
+                byteplus_url=str(row.get("byteplus_url") or "").strip() or None,
+            )
+            approved_count += 1
+        pending = pending_broll_indices(memory)
+        if pending:
+            next_actions = ["generate_all_broll", "generate_broll_image"]
+            msg = (
+                f"Approved {approved_count} B-roll still(s). "
+                f"{len(pending)} still(s) left — regenerate or generate the missing IMAGE(s)."
+            )
+            phase = "awaiting_broll"
+        else:
+            next_actions = ["approve_next"]
+            msg = (
+                f"All {approved_count} B-roll stills approved and locked for Seedance. "
+                f"{_seedance_presenter_note()}"
+            )
+            phase = "awaiting_video"
+        return {
+            "assistant_message": msg,
+            "intent": "reply",
+            "phase": phase,
+            "suggested_actions": next_actions,
+            "chat_model": model_slug,
+            "image_model": img_model,
+            "video_model": active_video_model,
+            "broll_index": pending[0] if pending else None,
+            "status": "ok",
+            "job_id": None,
+            "media_mode": None,
+            "model": None,
+            "duration_seconds": out_duration,
+            "aspect": out_aspect,
+            "error": None,
+        }
+
+    if action_norm == "generate_all_broll":
+        from app.services.creative_studio_production_memory import pending_broll_indices
+
+        if not _image_generation_configured():
+            return {
+                "assistant_message": "Image generation isn't configured for B-roll stills.",
+                "intent": "reply",
+                "phase": "awaiting_broll",
+                "suggested_actions": [],
+                "status": "failed",
+                "error": "image_not_configured",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        memory = _ensure_broll_memory()
+        plan = list(memory.get("broll_plan") or [])
+        if not plan:
+            return {
+                "assistant_message": (
+                    "No IMAGE 1 / IMAGE 2 / … blocks found in your brief. "
+                    "Add B-roll image sections with timing and prompts, then retry."
+                ),
+                "intent": "reply",
+                "phase": "planning",
+                "suggested_actions": ["generate_image"],
+                "status": "failed",
+                "error": "broll_plan_missing",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        pending = pending_broll_indices(memory)
+        if pending:
+            targets = [
+                item for item in plan if int(item["index"]) in pending
+            ]
+        else:
+            targets = list(plan)
+        if not targets:
+            return {
+                "assistant_message": (
+                    "All B-roll stills are already approved. "
+                    "Generate the chapter opening presenter still next."
+                ),
+                "intent": "reply",
+                "phase": "awaiting_image",
+                "suggested_actions": ["generate_image"],
+                "chat_model": model_slug,
+                "image_model": img_model,
+                "video_model": active_video_model,
+                "status": "ok",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+                "error": None,
+            }
+        scenes = [
+            {
+                "id": f"broll-{int(item['index'])}",
+                "index": int(item["index"]),
+                "title": f"IMAGE {item['index']} — {item.get('title')}",
+                "image_prompt": str(item.get("image_prompt") or ""),
+                "wants_readable_text": bool(item.get("wants_readable_text", True)),
+            }
+            for item in targets
+        ]
+        job_id = await _start_job(
+            tenant_id=tenant_id,
+            media_mode="broll_board",
+            model=img_model,
+            prompt=str(targets[0].get("image_prompt") or "B-roll still"),
+            duration_seconds=out_duration,
+            aspect=out_aspect,
+            resolution=resolution,
+            sound_on=False,
+            seed_image_url=None,
+            product_name=product_name,
+            brand_name=brand_name,
+            product_reference_url=None,
+            logo_reference_url=logo_ref or None,
+            additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
+            preserve_image_text=True,
+            session_id=session_id,
+            broll_plan=targets,
+            storyboard_scenes=scenes,
+        )
+        titles = ", ".join(str(s.get("title") or "")[:36] for s in scenes[:5])
+        extra = f" (+{len(scenes) - 5} more)" if len(scenes) > 5 else ""
+        remaining = len(targets) < len(plan)
+        return {
+            "assistant_message": (
+                f"Generating {'remaining ' if remaining else 'all '}{len(scenes)} B-roll still(s) "
+                f"({titles}{extra}). Review each dashboard — Regenerate any wrong text, "
+                "then Approve all B-roll or approve individually. Seedance uses these exact PNGs."
+            ),
+            "intent": "generate_image",
+            "phase": "broll_board_running",
+            "suggested_actions": [],
+            "chat_model": model_slug,
+            "image_model": img_model,
+            "video_model": active_video_model,
+            "image_prompt": str(targets[0].get("image_prompt") or ""),
+            "storyboard_scenes": scenes,
+            "status": "queued",
+            "job_id": job_id,
+            "media_mode": "broll_board",
+            "model": img_model,
+            "duration_seconds": out_duration,
+            "aspect": out_aspect,
+            "error": None,
+        }
+
+    if action_norm in {"generate_broll_image", "regenerate_broll_image"}:
+        from app.services.creative_studio_production_memory import pending_broll_indices
+
+        if not _image_generation_configured():
+            return {
+                "assistant_message": "Image generation isn't configured for B-roll stills.",
+                "intent": "reply",
+                "phase": "awaiting_broll",
+                "suggested_actions": [],
+                "status": "failed",
+                "error": "image_not_configured",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        memory = _ensure_broll_memory()
+        plan = list(memory.get("broll_plan") or [])
+        if not plan:
+            return {
+                "assistant_message": (
+                    "No IMAGE 1 / IMAGE 2 / … blocks found in your brief. "
+                    "Add B-roll image sections with timing and prompts, then retry."
+                ),
+                "intent": "reply",
+                "phase": "planning",
+                "suggested_actions": ["generate_image"],
+                "status": "failed",
+                "error": "broll_plan_missing",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        pending = pending_broll_indices(memory)
+        idx = int(broll_index or 0) or (pending[0] if pending else int(plan[0]["index"]))
+        item = next((row for row in plan if int(row["index"]) == idx), None)
+        if not item:
+            return {
+                "assistant_message": f"B-roll IMAGE {idx} is not defined in the brief.",
+                "intent": "reply",
+                "phase": "awaiting_broll",
+                "suggested_actions": ["generate_broll_image"],
+                "status": "failed",
+                "error": "broll_not_found",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+        broll_prompt = str(item.get("image_prompt") or "").strip()
+        job_id = await _start_job(
+            tenant_id=tenant_id,
+            media_mode="image",
+            model=img_model,
+            prompt=broll_prompt,
+            duration_seconds=out_duration,
+            aspect=out_aspect,
+            resolution=resolution,
+            sound_on=False,
+            seed_image_url=None,
+            product_name=product_name,
+            brand_name=brand_name,
+            product_reference_url=None,
+            logo_reference_url=logo_ref or None,
+            additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
+            preserve_image_text=bool(item.get("wants_readable_text", True)),
+            session_id=session_id,
+            broll_index=idx,
+            broll_title=str(item.get("title") or f"B-roll {idx}"),
+        )
+        readable = bool(item.get("wants_readable_text", True))
+        regen = action_norm == "regenerate_broll_image"
+        return {
+            "assistant_message": (
+                f"{'Regenerating' if regen else 'Generating'} B-roll IMAGE {idx}: {item.get('title')}. "
+                + (
+                    "Review that every label, number and headline is spelled correctly and sharp — "
+                    "then Approve B-roll. Seedance will animate this exact PNG without redrawing text."
+                    if readable
+                    else "Review for clean visuals and no gibberish, then Approve B-roll. "
+                    "Seedance will animate this exact PNG without redrawing the scene."
+                )
+            ),
+            "intent": "generate_image",
+            "phase": "broll_running",
+            "suggested_actions": [],
+            "chat_model": model_slug,
+            "image_model": img_model,
+            "video_model": active_video_model,
+            "image_prompt": broll_prompt,
+            "broll_index": idx,
+            "status": "queued",
+            "job_id": job_id,
+            "media_mode": "image",
+            "model": img_model,
+            "duration_seconds": out_duration,
+            "aspect": out_aspect,
+            "error": None,
+        }
+
     if action_norm in {"generate_image", "regenerate_image", "generate_storyboard"}:
         prompt = (image_prompt or "").strip()
         notes = (revision_notes or last_user or "").strip()
+        clone_character_urls = [
+            str(asset.get("url") or "").strip()
+            for asset in (reference_assets or [])
+            if isinstance(asset, dict)
+            and str(asset.get("role") or "").strip().lower() == "character"
+            and str(asset.get("url") or "").strip()
+        ]
+        clone_character_urls = list(dict.fromkeys(clone_character_urls))[:8]
         if action_norm == "regenerate_image" and notes:
             # Light refine via LLM when notes provided
             parsed = await _llm_plan(
@@ -735,6 +1334,17 @@ async def run_creative_studio_chat_turn(
 
         if not prompt:
             prompt = last_user[:2000]
+        if clone_mode:
+            from app.services.creative_studio_clone import compile_clone_prompt
+
+            clone_direction = prompt or last_user
+            if re.fullmatch(r"\((?:generate|regenerate)[ _]image\)", clone_direction, re.I):
+                clone_direction = ""
+            prompt = compile_clone_prompt(
+                user_prompt=clone_direction,
+                scene_id=clone_scene_id,
+                clone_count=clone_count,
+            )
         prompt = _with_product_fidelity(prompt, product_ref or None)
         if not prompt:
             return {
@@ -758,7 +1368,7 @@ async def run_creative_studio_chat_turn(
                 "error": None,
             }
 
-        if not openai_configured() and not higgsfield_configured():
+        if not _image_generation_configured():
             return {
                 "assistant_message": (
                     "Image generation isn’t configured. Set OPENAI_API_KEY for GPT Image 2 "
@@ -785,15 +1395,193 @@ async def run_creative_studio_chat_turn(
 
         from app.services.creative_studio_storyboard import (
             build_storyboard_video_prompt,
+            chapter_still_prompt,
+            chapter_still_prompt_from_brief,
             looks_like_multi_scene_brief,
             opening_still_prompt,
         )
 
         brief = full_brief
-        scenes = _scenes_from_llm_or_brief(None, brief, product_name=product_name or "product")
+        scenes = [] if clone_mode else _scenes_from_llm_or_brief(None, brief, product_name=product_name or "product")
         # Also try parsing image_prompt if it embeds Scene markers
-        if len(scenes) < 2 and looks_like_multi_scene_brief(prompt):
+        if not clone_mode and len(scenes) < 2 and looks_like_multi_scene_brief(prompt):
             scenes = _scenes_from_llm_or_brief(None, prompt, product_name=product_name or "product")
+
+        continuity_url = (continuity_style_url or "").strip()
+        if chapter_staging:
+            from app.services.creative_studio_broll import broll_items_for_chapter
+            from app.services.creative_studio_production_memory import (
+                approved_broll_urls,
+                pending_broll_indices,
+            )
+
+            memory = _ensure_broll_memory()
+            plan = list(memory.get("broll_plan") or [])
+            shots = list(memory.get("shot_list") or [])
+            if (
+                plan
+                and shots
+                and active_chapter_index < len(shots)
+                and action_norm == "generate_image"
+                and not next_chapter_image
+            ):
+                shot = shots[active_chapter_index]
+                chapter_brolls = broll_items_for_chapter(
+                    plan,
+                    chapter_start=float(shot["start"]),
+                    chapter_end=float(shot["end"]),
+                )
+                approved = approved_broll_urls(memory)
+                missing = [
+                    int(item["index"])
+                    for item in chapter_brolls
+                    if int(item["index"]) not in approved
+                ]
+                if missing:
+                    return {
+                        "assistant_message": (
+                            f"Generate and approve B-roll stills for this chapter first "
+                            f"(IMAGE {missing[0]}…{missing[-1]}). GPT Image 2 renders readable "
+                            "text correctly; Seedance animates the approved PNG without redrawing it."
+                        ),
+                        "intent": "reply",
+                        "phase": "awaiting_broll",
+                        "suggested_actions": ["generate_all_broll", "generate_broll_image"],
+                        "chat_model": model_slug,
+                        "image_model": img_model,
+                        "video_model": active_video_model,
+                        "broll_index": missing[0],
+                        "status": "ok",
+                        "job_id": None,
+                        "media_mode": None,
+                        "model": None,
+                        "duration_seconds": out_duration,
+                        "aspect": out_aspect,
+                        "error": None,
+                    }
+                if chapter_brolls and action_norm == "generate_image" and not next_chapter_image:
+                    return {
+                        "assistant_message": (
+                            f"Chapter {active_chapter_index + 1} B-roll stills are approved. "
+                            f"{_seedance_presenter_note()}"
+                        ),
+                        "intent": "reply",
+                        "phase": "awaiting_video",
+                        "suggested_actions": ["approve_next"],
+                        "chat_model": model_slug,
+                        "image_model": img_model,
+                        "video_model": active_video_model,
+                        "video_prompt": video_prompt or None,
+                        "status": "ok",
+                        "job_id": None,
+                        "media_mode": None,
+                        "model": None,
+                        "duration_seconds": out_duration,
+                        "aspect": out_aspect,
+                        "error": None,
+                    }
+            if next_chapter_image and not continuity_url:
+                return {
+                    "assistant_message": (
+                        "The previous chapter's continuity frame is missing. "
+                        "Review the last video part first, then generate the next chapter still."
+                    ),
+                    "intent": "reply",
+                    "phase": "awaiting_chapter_image",
+                    "suggested_actions": [],
+                    "chat_model": model_slug,
+                    "image_model": img_model,
+                    "video_model": active_video_model,
+                    "image_prompt": image_prompt or None,
+                    "video_prompt": video_prompt or None,
+                    "approved_image_url": approved_image_url or None,
+                    "product_reference_url": product_ref or None,
+                    "status": "failed",
+                    "error": "continuity_frame_missing",
+                    "job_id": None,
+                    "media_mode": None,
+                    "model": None,
+                    "duration_seconds": out_duration,
+                    "aspect": out_aspect,
+                    "chapter_index": active_chapter_index,
+                    "film_total_chapters": film_chapters,
+                }
+            chapter_prompt = (
+                chapter_still_prompt_from_brief(
+                    brief,
+                    active_chapter_index,
+                    from_continuity=bool(continuity_url),
+                )
+                or chapter_still_prompt(
+                    scenes,
+                    active_chapter_index,
+                    from_continuity=bool(continuity_url),
+                )
+                or prompt
+            )
+            chapter_prompt = _with_product_fidelity(chapter_prompt, product_ref or None)
+            vid = (video_prompt or "").strip() or build_storyboard_video_prompt(
+                scenes,
+                duration_seconds=out_duration,
+                sound_on=sound_on,
+                product_name=product_name or "",
+            )
+            job_id = await _start_job(
+                tenant_id=tenant_id,
+                media_mode="image",
+                model=img_model,
+                prompt=chapter_prompt,
+                duration_seconds=out_duration,
+                aspect=out_aspect,
+                resolution=resolution,
+                sound_on=False,
+                seed_image_url=None,
+                product_name=product_name,
+                brand_name=brand_name,
+                product_reference_url=product_ref or None,
+                logo_reference_url=logo_ref or None,
+                additional_reference_urls=extra_refs,
+                reference_assets=reference_assets,
+                preserve_image_text=preserve_image_text,
+                session_id=session_id,
+                chapter_image_staging=True,
+                film_chapter_index=active_chapter_index,
+                film_total_chapters=film_chapters,
+                full_film_duration=out_duration,
+                continuity_style_url=continuity_url or None,
+            )
+            chapter_num = active_chapter_index + 1
+            return {
+                "assistant_message": (
+                    f"Generating GPT Image 2 opening still for chapter {chapter_num}/{film_chapters}. "
+                    + (
+                        "Using the previous chapter's final frame for cast and scene continuity. "
+                        if continuity_url
+                        else ""
+                    )
+                    + "Review it, then Approve & Next — that exact PNG becomes Seedance first_frame "
+                    "for this 15s chapter (nothing else is used as the opening)."
+                ),
+                "intent": "generate_image",
+                "phase": "image_running",
+                "suggested_actions": [],
+                "chat_model": model_slug,
+                "image_model": img_model,
+                "video_model": active_video_model,
+                "image_prompt": chapter_prompt,
+                "video_prompt": vid,
+                "approved_image_url": None,
+                "product_reference_url": product_ref or None,
+                "status": "queued",
+                "job_id": job_id,
+                "media_mode": "image",
+                "model": img_model,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+                "chapter_index": active_chapter_index,
+                "film_total_chapters": film_chapters,
+                "error": None,
+            }
 
         # Higgsfield-style: multi-scene brief → full storyboard of stills
         if len(scenes) >= 2 and action_norm in {"generate_image", "generate_storyboard", "regenerate_image"}:
@@ -822,6 +1610,7 @@ async def run_creative_studio_chat_turn(
                 logo_reference_url=logo_ref or None,
                 reference_assets=reference_assets,
                 storyboard_scenes=scenes,
+                preserve_image_text=preserve_image_text,
             )
             titles = ", ".join(str(s.get("title") or f"Scene {i+1}") for i, s in enumerate(scenes[:5]))
             return {
@@ -863,17 +1652,40 @@ async def run_creative_studio_chat_turn(
             product_name=product_name,
             brand_name=brand_name,
             product_reference_url=product_ref or None,
+            logo_reference_url=logo_ref or None,
+            additional_reference_urls=extra_refs,
+            reference_assets=reference_assets,
+            preserve_image_text=preserve_image_text,
+            clone_mode=clone_mode,
+            clone_scene_id=clone_scene_id,
+            clone_count=clone_count,
+            clone_identity_prompt=clone_direction if clone_mode else "",
+            background_only_image=bool(
+                not clone_mode
+                and clone_character_urls
+                and re.search(
+                    r"(?i)\b(?:b-?roll|supporting background|background image)\b",
+                    full_brief,
+                )
+            ),
         )
         verb = "Regenerating" if action_norm == "regenerate_image" else "Generating"
         ref_note = (
+            f" Creating {clone_count} copies of the character in one scene."
+            if clone_mode
+            else
             " Matching your attached product photo."
             if product_ref
             else ""
         )
         return {
             "assistant_message": (
-                f"{verb} background still with GPT Image 2.{ref_note} "
-                "When it lands, review it — Regenerate with notes, or Approve & Next to animate with Seedance 2.0."
+                f"{verb} {'clone image' if clone_mode else 'background still'} with GPT Image 2.{ref_note} "
+                + (
+                    "If no Character photo is selected, GPT Image 2 will first create and save one reusable identity portrait, then use it for the clone scene."
+                    if clone_mode
+                    else "When it lands, review it — Regenerate with notes, or Approve & Next to animate with Seedance 2.0."
+                )
             ),
             "intent": "generate_image",
             "phase": "image_running",
@@ -926,7 +1738,29 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
                 "error": None,
             }
-        if not seed and not prompt_only_video:
+        broll_video_ready = False
+        approved_broll_for_video: list[str] = []
+        if session_id:
+            from app.services.creative_studio_production_memory import (
+                approved_broll_urls,
+                pending_broll_indices,
+            )
+
+            try:
+                broll_memory = _ensure_broll_memory()
+                approved_map = approved_broll_urls(broll_memory)
+                approved_broll_for_video = [
+                    approved_map[index] for index in sorted(approved_map)
+                ][:9]
+                broll_video_ready = (
+                    bool(broll_memory.get("broll_plan"))
+                    and bool(approved_broll_for_video)
+                    and not pending_broll_indices(broll_memory)
+                )
+            except Exception:
+                broll_video_ready = False
+
+        if not seed and not prompt_only_video and not broll_video_ready:
             return {
                 "assistant_message": (
                     "Approve a generated still first (or Generate image with your product photo attached). "
@@ -950,9 +1784,12 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
                 "error": None,
             }
-        if not ark_configured():
+        if not ark_configured_for_model(active_video_model):
             return {
-                "assistant_message": "Seedance isn’t configured — set ARK_API_KEY for BytePlus Seedance 2.0.",
+                "assistant_message": (
+                    "Seedance isn’t configured — set ARK_API_KEY (2.0) and/or "
+                    "ARK_API_KEY_25 (2.5) in backend .env."
+                ),
                 "intent": "reply",
                 "phase": "awaiting_video",
                 "suggested_actions": ["approve_next"],
@@ -1038,6 +1875,12 @@ async def run_creative_studio_chat_turn(
         if len(brief_for_motion) < 80:
             brief_for_motion = f"{image_prompt}\n{video_prompt}\n{last_user}".strip()
 
+        # A generated B-roll still prompt describes only one supporting image.
+        # It must never replace the original full-film brief when the user
+        # approves the B-roll board for video generation.
+        if broll_video_ready and brief_for_motion:
+            motion = brief_for_motion
+
         if prompt_only_video:
             # Direct mode preserves the user's authored timed prompt verbatim.
             # It deliberately bypasses GPT image planning and LLM prompt rewrites.
@@ -1055,19 +1898,170 @@ async def run_creative_studio_chat_turn(
             )
             motion = _with_product_fidelity(motion, product_ref or None)
 
+        continuity_for_job = (continuity_style_url or "").strip()
+        staged_paths = list(accumulated_segment_paths or [])
+        if chapter_staging and session_id and action_norm in {"approve_next", "generate_video"}:
+            from app.services.creative_studio_production_memory import load_production_memory
+
+            memory = load_production_memory(tenant_id, session_id) or {}
+            chapter_log = list(memory.get("chapter_log") or [])
+            if chapter_log:
+                if active_chapter_index < len(chapter_log):
+                    active_chapter_index = len(chapter_log)
+                if not continuity_for_job:
+                    continuity_for_job = str(
+                        chapter_log[-1].get("continuity_frame_url") or ""
+                    ).strip()
+                if not staged_paths:
+                    staged_paths = [
+                        str(item.get("video_path") or "").strip()
+                        for item in chapter_log
+                        if str(item.get("video_path") or "").strip()
+                    ]
+
         multi_beat = bool(
             re.search(r"(?i)\bCLIP\s*2\b|\bHOOK\b|\bBODY\b|\bScene\s*2\b", motion)
         ) or looks_like_multi_scene_brief(motion)
+        chapter_video_duration = out_duration
+        chapter_motion = motion
+        if chapter_staging:
+            from app.services.creative_studio_production_memory import (
+                compile_locked_chapter_prompt,
+                ensure_production_memory,
+                normalized_reference_lock,
+            )
+            from app.services.creative_studio_video_finishing import extract_voiceover_events
+
+            chapter_video_duration = _chapter_duration(
+                out_duration, clip_cap, active_chapter_index
+            )
+            voice_events = extract_voiceover_events(motion or full_brief)
+            refs = normalized_reference_lock(
+                list(reference_assets or []),
+                product_reference_url=product_ref or None,
+                logo_reference_url=logo_ref or None,
+            )
+            memory = ensure_production_memory(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                prompt=motion,
+                duration_seconds=out_duration,
+                clip_cap=clip_cap,
+                aspect=out_aspect,
+                resolution=resolution or "1080p",
+                model=active_video_model,
+                brand_name=brand_name,
+                product_name=product_name,
+                voice_events=voice_events,
+                references=refs,
+                storyboard_count=1,
+            )
+            chapter_motion = compile_locked_chapter_prompt(
+                memory, chapter_index=active_chapter_index
+            )
+        broll_segments: list[dict[str, Any]] = []
+        if chapter_staging and session_id:
+            from app.services.creative_studio_broll import (
+                broll_items_for_chapter,
+                build_chapter_broll_segments,
+            )
+            from app.services.creative_studio_production_memory import (
+                approved_broll_seedance_urls,
+                approved_broll_urls,
+                ensure_broll_plan,
+            )
+
+            memory = _ensure_broll_memory()
+            ensure_broll_plan(memory, list(memory.get("broll_plan") or []))
+            plan = list(memory.get("broll_plan") or [])
+            shots = list(memory.get("shot_list") or [])
+            if active_chapter_index < len(shots):
+                shot = shots[active_chapter_index]
+                chapter_start = float(shot["start"])
+                chapter_end = float(shot["end"])
+                chapter_brolls = broll_items_for_chapter(
+                    plan, chapter_start=chapter_start, chapter_end=chapter_end
+                )
+                approved = approved_broll_urls(memory)
+                approved_for_seedance = approved_broll_seedance_urls(memory)
+                missing = [
+                    int(item["index"])
+                    for item in chapter_brolls
+                    if int(item["index"]) not in approved
+                ]
+                if missing:
+                    return {
+                        "assistant_message": (
+                            f"Chapter {active_chapter_index + 1} still needs approved B-roll "
+                            f"still(s) IMAGE {missing[0]}"
+                            + (f"–{missing[-1]}" if len(missing) > 1 else "")
+                            + " before Seedance video. Generate and Approve B-roll for each."
+                        ),
+                        "intent": "reply",
+                        "phase": "awaiting_broll",
+                        "suggested_actions": ["generate_all_broll", "generate_broll_image"],
+                        "broll_index": missing[0],
+                        "status": "failed",
+                        "error": "chapter_broll_missing",
+                        "job_id": None,
+                        "media_mode": None,
+                        "model": None,
+                        "duration_seconds": out_duration,
+                        "aspect": out_aspect,
+                    }
+                proof_url = _proof_still_url()
+                built = build_chapter_broll_segments(
+                    chapter_index=active_chapter_index,
+                    chapter_start=chapter_start,
+                    chapter_end=chapter_end,
+                    # Presenter briefs intentionally leave this empty so Seedance
+                    # creates the fictional presenter. Product-only briefs use the
+                    # uploaded authoritative product/approved still for every gap.
+                    opening_still_url=(product_ref or seed or ""),
+                    proof_still_url=proof_url,
+                    broll_plan=plan,
+                    approved_broll=approved_for_seedance,
+                    chapter_motion_prompt=chapter_motion,
+                )
+                if chapter_brolls and not any(
+                    str(seg.get("kind") or "") == "broll" for seg in built
+                ):
+                    return {
+                        "assistant_message": (
+                            "Approved B-roll stills were not found in production memory. "
+                            "Re-approve each IMAGE still (Approve B-roll), then try Seedance again."
+                        ),
+                        "intent": "reply",
+                        "phase": "awaiting_broll",
+                        "suggested_actions": ["generate_all_broll", "generate_broll_image"],
+                        "status": "failed",
+                        "error": "approved_broll_lost",
+                        "job_id": None,
+                        "media_mode": None,
+                        "model": None,
+                        "duration_seconds": out_duration,
+                        "aspect": out_aspect,
+                    }
+                if any(
+                    str(seg.get("kind") or "") in {"broll", "product"}
+                    for seg in built
+                ):
+                    broll_segments = built
         job_id = await _start_job(
             tenant_id=tenant_id,
             media_mode="video",
             model=active_video_model,
-            prompt=motion,
-            duration_seconds=out_duration,
+            prompt=chapter_motion,
+            duration_seconds=chapter_video_duration if chapter_staging else out_duration,
             aspect=out_aspect,
             resolution=resolution,
             sound_on=sound_on,
-            seed_image_url=None if prompt_only_video else seed or None,
+            speech_mode=speech_mode,
+            seed_image_url=(
+                None
+                if prompt_only_video or broll_segments
+                else seed or None
+            ),
             # The image the user approved is the exact opening composition for
             # every video, including multi-scene stories. Later storyboard
             # frames remain references; they must not demote the approved still.
@@ -1079,24 +2073,77 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             source_brief=full_brief,
-            storyboard_image_urls=[] if prompt_only_video else [
-                u for u in (storyboard_image_urls or []) if (u or "").strip()
-            ][:9],
+            storyboard_image_urls=(
+                []
+                if prompt_only_video or broll_segments
+                else approved_broll_for_video
+                if broll_video_ready
+                else [u for u in (storyboard_image_urls or []) if (u or "").strip()][:9]
+                if not chapter_staging
+                else ([seed] if seed and not broll_segments else [])
+            ),
+            require_storyboard_coverage=not broll_video_ready,
             prompt_only_video=prompt_only_video,
             session_id=session_id,
+            chapter_image_staging=chapter_staging,
+            film_chapter_index=active_chapter_index,
+            film_total_chapters=film_chapters,
+            full_film_duration=out_duration,
+            accumulated_segment_paths=staged_paths,
+            broll_segments=broll_segments,
+            continuity_style_url=continuity_for_job or None,
         )
-        audio_note = "with native audio" if sound_on else "silent"
+        audio_note = (
+            "with native presenter speech"
+            if sound_on and speech_mode == "native_presenter"
+            else "with exact studio voiceover"
+            if sound_on
+            else "silent"
+        )
+        chapter_note = ""
+        if chapter_staging:
+            broll_note = (
+                f" {len(broll_segments)} segment(s): B-roll dashboards use approved stills; "
+                "presenter beats are text-to-video (no photoreal face still)."
+                if broll_segments
+                else ""
+            )
+            chapter_note = (
+                f" Chapter {active_chapter_index + 1}/{film_chapters} "
+                f"({chapter_video_duration}s).{broll_note} After review, continue to the next chapter."
+            )
+            if active_chapter_index > 0 and continuity_for_job:
+                chapter_note += (
+                    " Presenter continuity uses chapter "
+                    f"{active_chapter_index}'s final frame."
+                )
         return {
             "assistant_message": (
-                f"Approved. Queuing {video_model_label} · {out_duration}s · "
+                f"Approved. Queuing {video_model_label} · "
+                f"{chapter_video_duration if chapter_staging else out_duration}s · "
                 f"{out_aspect.replace('/', ':')} · {audio_note}. "
-                "Driving the FULL timed story from your brief"
                 + (
-                    " as direct Seedance chapters using uploaded references as general visual "
-                    "guidance while generating a fictional character; no GPT-generated storyboard images."
-                    if prompt_only_video
-                    else " (approved still as opening frame, then progressing through each beat)."
+                    f"Driving chapter {active_chapter_index + 1}/{film_chapters} from your "
+                    + (
+                        "approved B-roll stills + script-driven presenter (text-to-video)."
+                        if broll_segments
+                        else "approved still."
+                    )
+                    if chapter_staging
+                    else "Driving the FULL timed story from your brief"
+                    + (
+                        " as direct Seedance chapters using uploaded references as general visual "
+                        "guidance while generating a fictional character; no GPT-generated storyboard images."
+                        if prompt_only_video
+                        else (
+                            " using the approved B-roll references and selected Character in one "
+                            "Seedance 2.5 call."
+                            if broll_video_ready and not seed
+                            else " (approved still as opening frame, then progressing through each beat)."
+                        )
+                    )
                 )
+                + chapter_note
                 + (
                     " Product photo fidelity kept in the motion brief."
                     if product_ref else ""
@@ -1220,6 +2267,7 @@ async def run_creative_studio_chat_turn(
             aspect=out_aspect,
             resolution=resolution,
             sound_on=sound_on,
+            speech_mode=speech_mode,
             attachment_urls=attachments,
             brand_name=brand_name,
             product_name=product_name,
@@ -1235,6 +2283,8 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             storyboard_image_urls=storyboard_image_urls,
+            prompt_only_video=prompt_only_video,
+            preserve_image_text=preserve_image_text,
             video_model=active_video_model,
         )
 
@@ -1248,6 +2298,7 @@ async def run_creative_studio_chat_turn(
             aspect=out_aspect,
             resolution=resolution,
             sound_on=sound_on,
+            speech_mode=speech_mode,
             attachment_urls=attachments,
             brand_name=brand_name,
             product_name=product_name,
@@ -1263,6 +2314,8 @@ async def run_creative_studio_chat_turn(
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
             storyboard_image_urls=storyboard_image_urls,
+            prompt_only_video=prompt_only_video,
+            preserve_image_text=preserve_image_text,
             video_model=active_video_model,
         )
 
@@ -1298,6 +2351,7 @@ async def run_creative_studio_chat_turn(
                 aspect=out_aspect,
                 resolution=resolution,
                 sound_on=sound_on,
+                speech_mode=speech_mode,
                 attachment_urls=attachments,
                 brand_name=brand_name,
                 product_name=product_name,
@@ -1313,6 +2367,8 @@ async def run_creative_studio_chat_turn(
                 additional_reference_urls=extra_refs,
                 reference_assets=reference_assets,
                 storyboard_image_urls=storyboard_image_urls,
+                prompt_only_video=prompt_only_video,
+                preserve_image_text=preserve_image_text,
                 video_model=active_video_model,
             )
             plan_lead = (assistant_message or "").strip()

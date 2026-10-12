@@ -20,7 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           toastOptions={{
             duration: 4000,
             style: {
-              fontFamily: 'var(--font-inter), Inter, sans-serif',
+              fontFamily: 'var(--font-inter, Inter), Arial, Helvetica, sans-serif',
               fontSize: '13px',
               borderRadius: '14px',
               border: '1px solid #E2E3E8',

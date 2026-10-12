@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.services.media.base import VideoGenerationProvider
 from app.services.media.byteplus_seedance_client import (
     ark_configured,
+    ark_configured_for_model,
     clamp_seedance_duration,
     create_video_task,
     extract_video_url,
@@ -96,6 +97,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         image_ref: str | None,
         send_role: str,
         extra_refs: list[dict[str, str]],
+        extra_video_refs: list[dict[str, str]],
         tenant_id: str,
         cs_job_id: str | None,
         cancel_check,
@@ -111,6 +113,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             image_data_uri_or_url=image_ref,
             image_role=send_role,
             extra_image_refs=extra_refs or None,
+            extra_video_refs=extra_video_refs or None,
         )
 
         if cs_job_id:
@@ -125,7 +128,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         if cancel_check():
             from app.services.media.byteplus_seedance_client import delete_video_task
 
-            await delete_video_task(task_id, client=client)
+            await delete_video_task(task_id, client=client, model=api_model)
             return {
                 "status": "cancelled",
                 "model": api_model,
@@ -142,6 +145,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 client,
                 task_id,
                 label=f"BytePlus Seedance ({api_model})",
+                model=api_model,
                 cancel_check=cancel_check,
             )
         except Exception as exc:
@@ -221,7 +225,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             "catalog_model": model,
             "prompt": motion_prompt,
             "url": final_url,
-            "remote_url": saved.get("remote_url"),
+            "remote_url": saved.get("remote_url") or remote_url,
             "duration_seconds": reported,
             "storyboard": [motion_prompt],
             "provider": "byteplus",
@@ -234,6 +238,10 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             "task_id": task_id,
             "reference_bindings": [
                 {"image": i, "role": asset["role"]} for i, asset in enumerate(bound_assets, 1)
+            ],
+            "video_reference_bindings": [
+                {"video": i, "role": asset.get("role", "reference_video")}
+                for i, asset in enumerate(extra_video_refs, 1)
             ],
         }
         if download_warning:
@@ -253,7 +261,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         duration_seconds: int | None = None,
     ) -> dict:
         api_model = resolve_byteplus_api_model(model)
-        if not ark_configured():
+        if not ark_configured_for_model(api_model):
             return {
                 "status": "mock",
                 "model": api_model,
@@ -261,7 +269,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "prompt": prompt,
                 "url": None,
                 "provider": "byteplus",
-                "error": "ARK_API_KEY not set",
+                "error": "BytePlus ModelArk API key not set for this Seedance model",
             }
 
         requested = requested_video_duration_seconds(brief, override=duration_seconds)
@@ -277,12 +285,16 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         if image_role not in {"first_frame", "last_frame", "reference_image"}:
             image_role = "first_frame"
         continuity_url = str(brief.get("continuity_reference_url") or "").strip()
-        # Chapter handoffs submit the previous final frame as first_frame even when
-        # source_image_url is empty — Seedance 2.5 then requires ratio=adaptive.
+        continuity_video_url = str(
+            brief.get("continuity_video_reference_url") or ""
+        ).strip()
+        # A prior approved video uses multimodal reference mode. First/last frame
+        # conditioning cannot be mixed with reference video media.
         uses_first_frame_task = bool(
-            continuity_url
+            (continuity_url and not continuity_video_url)
             or (
                 source_image_url
+                and not continuity_video_url
                 and image_role in {"first_frame", "last_frame"}
             )
         )
@@ -323,13 +335,15 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         strict_continuity_reference = bool(brief.get("strict_continuity_reference")) and any(
             asset.get("role") == "continuity" for asset in manifest
         )
+        strict_video_reference = bool(continuity_video_url)
         strict_opening_reference = bool(brief.get("strict_opening_reference")) and primary_opening_supplied
         strict_reference_lock = (
             strict_character_reference
             or strict_continuity_reference
+            or strict_video_reference
             or strict_opening_reference
         )
-        use_multimodal = image_role == "reference_image" or len(manifest) > 1 or any(
+        use_multimodal = bool(continuity_video_url) or image_role == "reference_image" or len(manifest) > 1 or any(
             asset["role"] != "storyboard" for asset in manifest
         )
         from app.services.creative_studio_prompt_service import soften_character_reference_prompt
@@ -350,9 +364,11 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             multimodal: bool,
             pin_primary: bool,
             prompt_suffix: str = "",
-        ) -> tuple[str, str | None, str, list[dict[str, str]], list[dict[str, str]]]:
+        ) -> tuple[str, str | None, str, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
             primary_url: str | None = None
-            if pin_primary:
+            # Combined image+video reference mode is required when the previous
+            # approved chapter is attached. Do not submit any image as first_frame.
+            if pin_primary and not continuity_video_url:
                 primary_url = str(brief.get("continuity_reference_url") or "").strip() or None
                 if not primary_url and image_role in {"first_frame", "last_frame"}:
                     primary_url = str(source_image_url or "").strip() or None
@@ -374,7 +390,22 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             # continuation frame is present, submit that image alone. Its scene
             # already contains the approved character/product/location state.
             submitted_assets = ordered_assets[:1] if primary_url else ordered_assets
-            motion = base_prompt + prompt_suffix + reference_instructions(submitted_assets)
+            video_refs: list[dict[str, str]] = []
+            video_instruction = ""
+            if continuity_video_url:
+                video_refs.append({"url": continuity_video_url, "role": "reference_video"})
+                video_instruction = (
+                    "\n\nREFERENCE VIDEO 1 — APPROVED PREVIOUS CHAPTER: Use this exact "
+                    "video as the authoritative continuity reference for the same fictional "
+                    "cast identity, face, hair, age, wardrobe, voice character, accent, "
+                    "location, props, lighting, camera language and colour grade. Continue "
+                    "with the newly authored action only. Do not replay, loop or summarize "
+                    "the reference footage."
+                )
+            motion = (
+                base_prompt + prompt_suffix + video_instruction
+                + reference_instructions(submitted_assets)
+            )
             if multimodal and assets:
                 image_ref = _resolve_img(primary_url) if primary_url else None
                 if primary_url and not image_ref:
@@ -395,13 +426,14 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                     "first_frame" if primary_url else "reference_image",
                     extra_refs,
                     submitted_assets,
+                    video_refs,
                 )
             if source_image_url and not multimodal:
                 image_ref = _resolve_img(source_image_url)
                 if not image_ref:
                     raise ValueError("Cannot load the approved still. Reattach it before generation.")
-                return motion, image_ref, image_role, [], []
-            return motion, None, "first_frame", [], []
+                return motion, image_ref, image_role, [], [], video_refs
+            return motion, None, "first_frame", [], [], video_refs
 
         anchor_assets = filter_manifest_for_privacy_retry(manifest)
         attempt_plan: list[tuple[str, list[dict[str, str]], bool, str, str | None]] = [
@@ -440,7 +472,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 for tier_index, (tier, assets, multimodal, suffix, warning) in enumerate(attempt_plan):
                     if tier == "anchors" and not assets:
                         continue
-                    motion_prompt, image_ref, send_role, extra_refs, bound_assets = _build_submission(
+                    motion_prompt, image_ref, send_role, extra_refs, bound_assets, video_refs = _build_submission(
                         assets,
                         multimodal=multimodal,
                         pin_primary=tier == "full",
@@ -470,6 +502,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                             image_ref=image_ref,
                             send_role=send_role,
                             extra_refs=extra_refs,
+                            extra_video_refs=video_refs,
                             tenant_id=tenant_id,
                             cs_job_id=cs_job_id,
                             cancel_check=_cancel_check,
@@ -554,7 +587,13 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                     "error_code": "ProviderConnectionError",
                 }
             if is_seedance_person_privacy_block(exc):
-                if strict_continuity_reference:
+                if strict_video_reference:
+                    err = (
+                        "Seedance rejected the approved previous chapter video reference. The "
+                        "continuation was stopped instead of generating a replacement presenter "
+                        "or voice. Reopen the accepted chapter and try the continuation again."
+                    )
+                elif strict_continuity_reference:
                     err = (
                         "Seedance blocked the previous chapter's continuity frame. The long video "
                         "was stopped instead of inventing a different person or scene. Use a "
@@ -618,6 +657,7 @@ async def recover_byteplus_seedance_task(
                 client,
                 tid,
                 label=f"BytePlus Seedance recovery ({api_model})",
+                model=api_model,
                 cancel_check=cancel,
             )
         except Exception as exc:

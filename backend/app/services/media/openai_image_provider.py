@@ -133,6 +133,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
         reference_image_url: str | None = None,
+        reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
     ) -> dict:
         api_model = resolve_openai_image_model(model)
@@ -156,7 +157,13 @@ class OpenAIImageProvider(ImageGenerationProvider):
         )
 
         # Product / style reference → GPT Image edits endpoint (image + text)
-        ref_url = (reference_image_url or "").strip() or None
+        ref_urls: list[str] = []
+        for value in [reference_image_url, *(reference_image_urls or [])]:
+            url = str(value or "").strip()
+            if url and url not in ref_urls:
+                ref_urls.append(url)
+        ref_urls = ref_urls[:8]
+        ref_url = ref_urls[0] if ref_urls else None
         purpose = (reference_purpose or "product").strip().lower()
         if ref_url and api_model.startswith("gpt-image"):
             if purpose in {"character", "cast", "person"}:
@@ -184,7 +191,8 @@ class OpenAIImageProvider(ImageGenerationProvider):
                 format_type=format_type,
                 logo_url=logo_url,
                 logo_on_light_url=logo_on_light_url,
-                reference_image_url=ref_url,
+                reference_image_urls=ref_urls,
+                reference_purpose=purpose,
                 original_prompt=prompt,
             )
             if edited.get("status") in {"done", "mock"} or edited.get("url"):
@@ -265,27 +273,32 @@ class OpenAIImageProvider(ImageGenerationProvider):
         format_type: str,
         logo_url: str | None,
         logo_on_light_url: str | None,
-        reference_image_url: str,
+        reference_image_urls: list[str],
+        reference_purpose: str,
         original_prompt: str,
     ) -> dict:
-        loaded = _load_reference_image_bytes(reference_image_url)
-        if not loaded:
+        loaded_refs = [
+            loaded
+            for url in reference_image_urls[:8]
+            if (loaded := _load_reference_image_bytes(url))
+        ]
+        if not loaded_refs:
             return {
                 "status": "failed",
                 "model": api_model,
                 "prompt": original_prompt,
                 "url": None,
                 "provider": "openai",
-                "error": "Could not load product reference image for GPT Image edit",
+                "error": "Could not load the reference image for GPT Image edit",
             }
-        content, filename, mime = loaded
         base = (settings.OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
         headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY.strip()}"}
         url = f"{base}/images/edits"
 
         # Multipart: image[] + prompt — gpt-image-* product reference path
         files = [
-            ("image[]", (filename, content, mime)),
+            ("image[]", (filename, content, mime))
+            for content, filename, mime in loaded_refs
         ]
         form: dict[str, str] = {
             "model": api_model,
@@ -322,7 +335,11 @@ class OpenAIImageProvider(ImageGenerationProvider):
                     format_type=format_type,
                     logo_url=logo_url,
                     logo_on_light_url=logo_on_light_url,
-                    note="Generated from attached product photo (GPT Image edit).",
+                    note=(
+                        "Generated from attached character references with high input fidelity."
+                        if reference_purpose in {"character", "cast", "person"}
+                        else "Generated from attached product photo (GPT Image edit)."
+                    ),
                 )
         except ImagePersistenceError as exc:
             logger.exception("OpenAI image edit completed but could not be saved")

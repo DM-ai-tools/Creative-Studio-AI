@@ -59,7 +59,7 @@
 html { scroll-behavior: smooth; font-size: 16px; }
 
 html, body {
-  font-family: var(--font-inter), 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-inter, 'Inter'), Arial, Helvetica, system-ui, -apple-system, sans-serif;
   background: var(--surface);
   color: var(--charcoal);
   -webkit-font-smoothing: antialiased;
@@ -400,6 +400,38 @@ input:focus, textarea:focus, select:focus {
   box-shadow: var(--shadow-card);
 }
 
+/* Creative Studio chat panels — visible scrollbars */
+.cs-panel-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.72) rgba(148, 163, 184, 0.14);
+}
+
+.cs-panel-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.cs-panel-scroll::-webkit-scrollbar-track {
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: 999px;
+}
+
+.cs-panel-scroll::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.55);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.cs-panel-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.75);
+  background-clip: padding-box;
+}
+
+.creative-studio-light .cs-panel-scroll::-webkit-scrollbar-track {
+  background: rgba(148, 163, 184, 0.18);
+}
+
 /* Page loader */
 .page-loader-spinner { width: 2rem; height: 2rem; flex-shrink: 0; }
 
@@ -451,7 +483,7 @@ input:focus, textarea:focus, select:focus {
   min-height: 100vh;
   background: var(--hf-bg);
   color: #fff;
-  font-family: var(--font-lp-body), var(--font-inter), system-ui, sans-serif;
+  font-family: var(--font-lp-body, var(--font-inter, 'Inter')), Arial, Helvetica, system-ui, sans-serif;
 }
 
 .hf-nav {
@@ -475,7 +507,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .hf-logo {
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-weight: 800;
   font-size: 1.05rem;
   letter-spacing: -0.03em;
@@ -613,7 +645,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .hf-hero-brand {
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: clamp(2rem, 5vw, 3.4rem);
   font-weight: 800;
   letter-spacing: -0.04em;
@@ -636,7 +668,7 @@ input:focus, textarea:focus, select:focus {
 .hf-hero-title {
   margin-top: 0.65rem;
   max-width: 16ch;
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: clamp(1.8rem, 5.5vw, 3.6rem);
   font-weight: 700;
   letter-spacing: -0.035em;
@@ -736,7 +768,7 @@ input:focus, textarea:focus, select:focus {
 
 .hf-display {
   margin-top: 0.7rem;
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: clamp(1.85rem, 4.4vw, 3.2rem);
   font-weight: 700;
   letter-spacing: -0.04em;
@@ -786,7 +818,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .hf-feature-title {
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: clamp(1.45rem, 2.8vw, 2.1rem);
   font-weight: 700;
   letter-spacing: -0.03em;
@@ -893,7 +925,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .hf-preset-label {
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: 1rem;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -922,7 +954,7 @@ input:focus, textarea:focus, select:focus {
   min-height: 120px;
 }
 .hf-angle-label {
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-weight: 700;
   font-size: 1.05rem;
   letter-spacing: -0.02em;
@@ -989,7 +1021,7 @@ input:focus, textarea:focus, select:focus {
 }
 .hf-community-title {
   margin-top: 0.4rem;
-  font-family: var(--font-lp-display), sans-serif;
+  font-family: var(--font-lp-display, var(--font-inter, 'Inter')), Arial, Helvetica, sans-serif;
   font-size: 1.2rem;
   font-weight: 700;
   letter-spacing: -0.025em;

@@ -25,6 +25,10 @@ class RegisterGeneratedAssetRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class UpdateAssetMetadataRequest(BaseModel):
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.post("/upload", response_model=AssetResponse, status_code=201)
 async def upload_asset(
     file: UploadFile = File(...),
@@ -109,6 +113,14 @@ async def register_generated_asset(
     )
     existing = existing_result.scalar_one_or_none()
     if existing:
+        merged = dict(existing.asset_metadata or {})
+        merged.update(data.metadata or {})
+        merged.update({"source": "creative_studio_generated", "reusable": True})
+        existing.asset_metadata = merged
+        if data.brand_id and not existing.brand_id:
+            existing.brand_id = data.brand_id
+        await db.flush()
+        await db.refresh(existing)
         return existing
 
     content_type = mimetypes.guess_type(local_path.name)[0] or "image/png"
@@ -141,6 +153,32 @@ async def register_generated_asset(
         asset_metadata=metadata,
     )
     db.add(asset)
+    await db.flush()
+    await db.refresh(asset)
+    return asset
+
+
+@router.patch("/{asset_id}/metadata", response_model=AssetResponse)
+async def update_asset_metadata(
+    asset_id: UUID,
+    data: UpdateAssetMetadataRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist Creative Studio roles such as Character on reusable assets."""
+    result = await db.execute(
+        select(Asset).where(
+            Asset.id == asset_id,
+            Asset.tenant_id == current_user.tenant_id,
+        )
+    )
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    merged = dict(asset.asset_metadata or {})
+    merged.update(data.metadata or {})
+    merged["reusable"] = True
+    asset.asset_metadata = merged
     await db.flush()
     await db.refresh(asset)
     return asset

@@ -38,7 +38,20 @@ SEEDANCE_25_RATIO_FALLBACKS = SEEDANCE_RATIO_FALLBACKS
 
 
 def ark_configured() -> bool:
-    return bool((settings.ARK_API_KEY or "").strip())
+    return bool((settings.ARK_API_KEY or "").strip() or (settings.ARK_API_KEY_25 or "").strip())
+
+
+def ark_api_key_for_model(model: str | None = None) -> str:
+    """Pick the ModelArk API key — 2.5 uses ARK_API_KEY_25 when set, else ARK_API_KEY."""
+    if is_seedance_25_model(model):
+        key_25 = (settings.ARK_API_KEY_25 or "").strip()
+        if key_25:
+            return key_25
+    return (settings.ARK_API_KEY or "").strip()
+
+
+def ark_configured_for_model(model: str | None = None) -> bool:
+    return bool(ark_api_key_for_model(model))
 
 
 def ark_base_url() -> str:
@@ -77,9 +90,12 @@ def resolve_seedance_api_model(model: str | None) -> str:
     return ark_seedance_model()
 
 
-def ark_headers() -> dict[str, str]:
+def ark_headers(model: str | None = None) -> dict[str, str]:
+    key = ark_api_key_for_model(model)
+    if not key:
+        raise RuntimeError("BytePlus ModelArk API key is not configured for this Seedance model.")
     return {
-        "Authorization": f"Bearer {settings.ARK_API_KEY.strip()}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
 
@@ -150,6 +166,11 @@ def seedance_reference_data_uri(file_url: str | None) -> str | None:
     url = str(file_url).strip()
     if not url:
         return None
+
+    from app.services.media.byteplus_seedream_client import is_byteplus_ark_media_url
+
+    if is_byteplus_ark_media_url(url):
+        return url
 
     def _encode(image_bytes: bytes) -> str:
         padded = pad_image_bytes_for_seedance_reference(image_bytes)
@@ -251,12 +272,14 @@ async def create_video_task(
     image_data_uri_or_url: str | None = None,
     image_role: str = "first_frame",
     extra_image_refs: list[dict[str, str]] | None = None,
+    extra_video_refs: list[dict[str, str]] | None = None,
 ) -> str:
     """
     Create a Seedance task.
 
-    Seedance 2.0 accepts multiple reference images (up to ~9) in one unified pass —
-    pass storyboard frames via extra_image_refs: [{url, role}].
+    Seedance 2.0 accepts multimodal image/video references. Pass storyboard
+    frames via extra_image_refs and approved prior chapters via
+    extra_video_refs: [{url, role}].
     """
     from app.services.creative_studio_timeline import validate_video_prompt
 
@@ -276,6 +299,7 @@ async def create_video_task(
     # final safeguard even if an upstream caller accidentally supplies both.
     frame_locked = bool(image_data_uri_or_url) and image_role in {"first_frame", "last_frame"}
     safe_extra_refs = [] if frame_locked else (extra_image_refs or [])
+    safe_video_refs = [] if frame_locked else (extra_video_refs or [])
     for ref in safe_extra_refs[:9 - int(bool(image_data_uri_or_url))]:
         url = str(ref.get("url") or "").strip()
         if not url:
@@ -288,8 +312,20 @@ async def create_video_task(
                 "role": role,
             }
         )
+    for ref in safe_video_refs[:3]:
+        url = str(ref.get("url") or "").strip()
+        if not url:
+            continue
+        role = str(ref.get("role") or "reference_video").strip() or "reference_video"
+        content.append(
+            {
+                "type": "video_url",
+                "video_url": {"url": url},
+                "role": role,
+            }
+        )
 
-    api_model = (model or ark_seedance_model()).strip()
+    api_model = resolve_seedance_api_model(model)
     task_ratio = ratio
     if (
         image_data_uri_or_url
@@ -316,7 +352,7 @@ async def create_video_task(
         "POST",
         url,
         json=payload,
-        headers=ark_headers(),
+        headers=ark_headers(api_model),
         timeout=120.0,
         label="BytePlus Seedance create",
         max_attempts=6,
@@ -347,6 +383,7 @@ async def poll_video_task(
     task_id: str,
     *,
     label: str = "BytePlus Seedance",
+    model: str | None = None,
     cancel_check: Any | None = None,
 ) -> dict[str, Any]:
     max_wait = max(60, int(settings.ARK_POLL_MAX_WAIT_SECONDS or 1800))
@@ -358,7 +395,7 @@ async def poll_video_task(
     while elapsed < max_wait:
         if cancel_check and cancel_check():
             try:
-                await delete_video_task(task_id, client=client)
+                await delete_video_task(task_id, client=client, model=model)
             except Exception as exc:
                 logger.warning("Delete Seedance task on cancel failed: %s", exc)
             raise RuntimeError(f"{label} cancelled by user")
@@ -366,7 +403,7 @@ async def poll_video_task(
             client,
             "GET",
             url,
-            headers=ark_headers(),
+            headers=ark_headers(model),
             timeout=60.0,
             label=f"{label} poll",
             max_attempts=5,
@@ -398,16 +435,17 @@ async def delete_video_task(
     task_id: str,
     *,
     client: httpx.AsyncClient | None = None,
+    model: str | None = None,
 ) -> None:
     """Cancel/delete a Seedance task (BytePlus DELETE /contents/generations/tasks/{id})."""
     tid = (task_id or "").strip()
-    if not tid or not ark_configured():
+    if not tid or not ark_configured_for_model(model):
         return
     url = f"{ark_base_url()}/contents/generations/tasks/{tid}"
     owns = client is None
     http = client or httpx.AsyncClient(timeout=60.0)
     try:
-        response = await http.delete(url, headers=ark_headers())
+        response = await http.delete(url, headers=ark_headers(model))
         if response.status_code >= 400 and response.status_code != 404:
             logger.warning(
                 "BytePlus delete task %s → %s %s",

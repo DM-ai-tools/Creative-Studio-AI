@@ -54,6 +54,37 @@ class CreativeStudioPreflightTests(unittest.TestCase):
                 logo_reference_url=None,
             )
 
+    def test_one_shot_clock_headers_are_a_valid_30_second_scene_plan(self):
+        prompt = """SCENE-BY-SCENE ONE-SHOT FLOW
+0:00-0:07
+DIALOGUE: "Opening line."
+VISUAL: Presenter opens the story.
+0:07-0:11
+DIALOGUE: "Problem line."
+VISUAL: Display changes to B-roll one.
+0:11-0:18
+DIALOGUE: "Proof line."
+VISUAL: Display changes to the proof image.
+0:18-0:27
+DIALOGUE: "Audit line."
+VISUAL: Display changes to B-roll two.
+0:27-0:30
+DIALOGUE: "Call to action."
+VISUAL: Presenter finishes the film.
+"""
+        report = validate_video_preflight(
+            prompt=prompt, duration_seconds=30,
+            storyboard_image_urls=["/files/broll-1.png", "/files/broll-2.png"],
+            seed_image_url=None, sound_on=True,
+            voice_events=[(0, 7, "Opening line."), (27, 30, "Call to action.")],
+            reference_assets=[{"url": "/files/person.png", "role": "character"}],
+            product_reference_url=None, logo_reference_url=None,
+            speech_mode="native_presenter", require_storyboard_coverage=False,
+        )
+        self.assertEqual(report["scene_count"], 5)
+        self.assertEqual(report["shot_windows"][-1], {"start": 27.0, "end": 30.0})
+        self.assertEqual(report["provider_image_mode"], "approved B-roll references")
+
     def test_picture_prompt_replaces_glossy_ai_words_with_capture_physics(self):
         prompt = compile_picture_prompt(
             "Scene 1 - OPENING | 0-5 seconds\nA stunning photorealistic person holds a box.\n"

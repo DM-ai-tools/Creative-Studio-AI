@@ -110,7 +110,7 @@ async def _probe_model_billing(
     }
     url = f"{ark_base_url()}/contents/generations/tasks"
     try:
-        response = await client.post(url, json=payload, headers=ark_headers(), timeout=60.0)
+        response = await client.post(url, json=payload, headers=ark_headers(api_model), timeout=60.0)
     except httpx.RequestError as exc:
         return {
             "catalog_id": catalog_id,
@@ -150,7 +150,7 @@ async def _probe_model_billing(
     task_id = str(data.get("id") or data.get("task_id") or "").strip()
     if task_id:
         try:
-            await delete_video_task(task_id, client=client)
+            await delete_video_task(task_id, client=client, model=api_model)
         except Exception:
             pass
     return {
@@ -171,7 +171,7 @@ async def check_seedance_credits(*, probe_billing: bool = True) -> dict[str, Any
             "checked_at": checked_at.isoformat(),
             "configured": False,
             "status": "not_configured",
-            "message": "ARK_API_KEY is not set — add your BytePlus ModelArk key in backend .env.",
+            "message": "ARK_API_KEY / ARK_API_KEY_25 is not set — add BytePlus ModelArk keys in backend .env.",
             "task_history": None,
             "models": [],
         }

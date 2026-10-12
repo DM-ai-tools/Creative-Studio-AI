@@ -12,6 +12,8 @@ from app.services.media.higgsfield_providers import (
     HiggsfieldImageProvider,
     HiggsfieldVideoProvider,
 )
+from app.services.media.byteplus_seedream_client import is_byteplus_seedream_model
+from app.services.media.byteplus_seedream_provider import BytePlusSeedreamProvider
 from app.services.media.openai_image_catalog import is_openai_image_model
 from app.services.media.openai_image_provider import OpenAIImageProvider
 from app.services.media.runway_providers import RunwayImageProvider, RunwayVideoProvider
@@ -21,6 +23,10 @@ _video_providers: dict[str, VideoGenerationProvider] = {}
 
 
 def get_image_provider(model: str | None = None) -> ImageGenerationProvider:
+    if is_byteplus_seedream_model(model):
+        if "byteplus_seedream" not in _image_providers:
+            _image_providers["byteplus_seedream"] = BytePlusSeedreamProvider()
+        return _image_providers["byteplus_seedream"]
     if is_openai_image_model(model):
         if "openai" not in _image_providers:
             _image_providers["openai"] = OpenAIImageProvider()

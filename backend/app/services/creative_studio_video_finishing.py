@@ -24,6 +24,14 @@ _RANGE = r"(\d+(?:\.\d+)?)\s*[–—-]\s*(\d+(?:\.\d+)?)"
 _QUOTED = r"[“\"]([^”\"]+)[”\"]"
 
 
+def _overlay_clock_seconds(value: str) -> float:
+    raw = str(value or "").strip()
+    if ":" not in raw:
+        return float(raw)
+    minutes, seconds = raw.split(":", 1)
+    return float(minutes) * 60.0 + float(seconds)
+
+
 def voiceover_requested(brief: str) -> bool:
     label = r"(?:voice[ -]?over|narrat(?:ion|or))"
     # An explicit silence/no-narration instruction takes precedence over a mention.
@@ -115,6 +123,43 @@ def extract_overlay_events(prompt: str) -> list[tuple[float, float, str]]:
     if events:
         return events[:12]
 
+    # Full production briefs may keep exact editor copy in one dedicated
+    # POST-PRODUCTION TEXT / CTA block using clock timings on their own lines.
+    post = re.search(
+        r"(?is)^\s*POST[- ]PRODUCTION\s+TEXT(?:\s+AND\s+CTA)?\s*$"
+        r"(.*?)(?=^\s*(?:MUSIC|AUDIO|FINAL\s+VERIFICATION|QUALITY\s+CONTROL)\s*$|\Z)",
+        text,
+        re.M,
+    )
+    if post:
+        block = post.group(1)
+        clock = r"(\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)"
+        rows = list(
+            re.finditer(
+                rf"(?ims)^\s*{clock}\s*[–—-]\s*{clock}\s*(?:seconds?)?\s*$"
+                rf"(.*?)(?=^\s*{clock}\s*[–—-]\s*{clock}\s*(?:seconds?)?\s*$|\Z)",
+                block,
+            )
+        )
+        for row in rows:
+            start = _overlay_clock_seconds(row.group(1))
+            end = _overlay_clock_seconds(row.group(2))
+            lines = [
+                line.strip().strip('"“”')
+                for line in row.group(3).splitlines()
+                if line.strip()
+                and not re.fullmatch(r"[-=_*\s]+", line.strip())
+                and not re.search(
+                    r"(?i)^(?:use |add |do not |keep |place |position |font |colour |color )",
+                    line.strip(),
+                )
+                and len(line.strip()) <= 100
+            ][:4]
+            if end > start and lines:
+                events.append((start, end, r"\N".join(lines)))
+    if events:
+        return events[:12]
+
     # Generic timed-scene briefs often place copy in a dedicated section inside
     # each scene instead of repeating the timing on every text line.
     from app.services.creative_studio_timeline import SHOT_HEADER
@@ -188,6 +233,12 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
         r'(?:"([^"\n]+)"|“([^”\n]+)”|\x27([^\x27\n]+)\x27|([^\n]+))'
     )
     untimed: list[str] = []
+    chapter_untimed: dict[tuple[float, float], list[str]] = {}
+    clock = r"(\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)"
+    chapter_headers = list(re.finditer(
+        rf"(?im)^\s*(?:[#=*_-]+\s*)?CHAPTER\s+\d+[^\n]*?{clock}\s*[–—-]\s*{clock}[^\n]*$",
+        text,
+    ))
     for match in label.finditer(text):
         line = next((g.strip() for g in match.groups()[2:] if g), "")
         if not line:
@@ -208,8 +259,30 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
                 timing = re.search(_RANGE, heading)
         if timing:
             events.append((float(timing.group(1)), float(timing.group(2)), line))
-        elif line not in untimed:
-            untimed.append(line)
+        else:
+            enclosing = next(
+                (header for header in reversed(chapter_headers) if header.start() < match.start()),
+                None,
+            )
+            if enclosing:
+                chapter_start = _overlay_clock_seconds(enclosing.group(1))
+                chapter_end = _overlay_clock_seconds(enclosing.group(2))
+                bucket = chapter_untimed.setdefault((chapter_start, chapter_end), [])
+                if line not in bucket:
+                    bucket.append(line)
+            elif line not in untimed:
+                untimed.append(line)
+    # Distribute narration independently inside each authored chapter. This keeps
+    # complete sentences out of the 15-second handoff and prevents Chapter 2 from
+    # inheriting Chapter 1's 00:00 timing.
+    for (chapter_start, chapter_end), lines in chapter_untimed.items():
+        cursor = chapter_start
+        available = max(0.0, min(float(duration_seconds), chapter_end) - chapter_start)
+        words = sum(max(1, len(line.split())) for line in lines)
+        for line in lines:
+            end = cursor + available * max(1, len(line.split())) / words
+            events.append((cursor, end, line))
+            cursor = end
     # Untimed script uses the remaining runtime, with word-weighted windows.
     cursor = max((end for _, end, _ in events), default=0.0)
     available = max(0.0, float(duration_seconds) - cursor)

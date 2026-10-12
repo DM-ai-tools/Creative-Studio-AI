@@ -62,7 +62,7 @@ class FinishingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, events[0][2])
         self.assertGreaterEqual(end - start, len(text.split()) * 0.42)
 
-    async def test_seedance_speech_failure_still_generates_video(self):
+    async def test_seedance_speech_failure_stops_before_paid_video(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
         provider = Mock()
         provider.generate = AsyncMock(return_value={
@@ -83,10 +83,9 @@ class FinishingTests(unittest.IsolatedAsyncioTestCase):
         ):
             await run_creative_studio_job(job)
         result = await get_job(job)
-        self.assertEqual(result['status'], 'done', result.get('error'))
-        self.assertFalse(result.get('audio_warning'))
-        self.assertEqual((result.get('voiceover') or {}).get('status'), 'native')
-        provider.generate.assert_awaited()
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('locked master narration could not be prepared', result.get('error', ''))
+        provider.generate.assert_not_awaited()
 
     async def test_prepared_narration_disables_per_clip_seedance_speech(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job

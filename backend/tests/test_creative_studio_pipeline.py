@@ -20,16 +20,24 @@ from app.services.creative_studio_timeline import (
     select_complete_timeline_prompt,
     validate_video_prompt,
 )
-from app.services.creative_studio_storyboard import parse_storyboard_scenes, build_storyboard_video_prompt
+from app.services.creative_studio_storyboard import (
+    chapter_still_prompt_from_brief,
+    parse_storyboard_scenes,
+    build_storyboard_video_prompt,
+)
 from app.services.creative_studio_video_finishing import (
     extract_voiceover_events, apply_timed_voiceover, plan_requested_voiceover, voiceover_requested,
 )
 from app.services.creative_studio_prompt_service import build_spoken_voiceover
+from app.services.creative_studio_broll import parse_broll_images
 from app.services.creative_studio_chat_service import (
     _explicit_duration_from_text,
+    _film_chapter_count,
+    _needs_chapter_image_staging,
     _normalize_duration,
     run_creative_studio_chat_turn,
 )
+from app.services.creative_studio_storyboard import chapter_still_prompt
 from app.services.ffmpeg_util import require_ffmpeg, probe_has_audio, probe_video_duration
 from app.services.media.seedance_multiscene import (
     build_continuity_contract,
@@ -107,6 +115,36 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(_explicit_duration_from_text("Make this 2 minutes"), 120)
         self.assertEqual(_explicit_duration_from_text("Make this 5 minutes"), 120)
         self.assertEqual(_normalize_duration(600, 15), 120)
+
+    def test_chapter_image_staging_helpers(self):
+        self.assertTrue(_needs_chapter_image_staging(
+            prompt_only_video=False, duration_seconds=60, clip_cap=15,
+        ))
+        self.assertFalse(_needs_chapter_image_staging(
+            prompt_only_video=True, duration_seconds=60, clip_cap=15,
+        ))
+        self.assertFalse(_needs_chapter_image_staging(
+            prompt_only_video=False, duration_seconds=15, clip_cap=15,
+        ))
+        self.assertEqual(_film_chapter_count(60, 15), 4)
+        scenes = [
+            {"image_prompt": "Opening hook still."},
+            {"image_prompt": "Product reveal still."},
+        ]
+        self.assertIn("Opening hook", chapter_still_prompt(scenes, 0))
+        self.assertIn("continuity frame", chapter_still_prompt(scenes, 1, from_continuity=True).lower())
+
+    def test_chapter_still_prompt_from_brief_reads_clip_blocks(self):
+        brief = (
+            "CLIP 1 — 0:00-0:15\n"
+            "OPENING STILL: Female strategist age 28-32, medium-close, dark charcoal office.\n"
+            "SCRIPT: Hook line for Google Ads brands.\n\n"
+            "CLIP 2 — 0:15-0:30\n"
+            "OPENING STILL: Same presenter, uploaded Traffic Radius stat screenshot dominant.\n"
+            "SCRIPT: Audit offer and CTA.\n"
+        )
+        self.assertIn("Female strategist", chapter_still_prompt_from_brief(brief, 0))
+        self.assertIn("stat screenshot", chapter_still_prompt_from_brief(brief, 1))
 
     def test_short_authored_shots_are_packed_into_fifteen_second_chapters(self):
         windows = [(float(i), float(i + 5)) for i in range(0, 30, 5)]
@@ -300,7 +338,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["product_reference_url"])
         self.assertIsNone(result["job_id"])
 
-    async def test_old_generate_image_action_becomes_prompt_only_seedance(self):
+    async def test_prompt_only_generate_image_action_becomes_seedance(self):
         with (
             patch(
                 "app.services.media.byteplus_seedance_client.ark_configured",
@@ -316,6 +354,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 messages=[{"role": "user", "content": "Create a 30s two-session service ad."}],
                 action="generate_image",
                 duration_seconds=30,
+                prompt_only_video=True,
             )
         self.assertEqual(result["intent"], "generate_video")
         self.assertEqual(result["phase"], "video_running")
@@ -324,6 +363,215 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["product_reference_url"])
         self.assertTrue(start_job.await_args.kwargs["prompt_only_video"])
         self.assertIsNone(start_job.await_args.kwargs["seed_image_url"])
+
+    async def test_image_first_mode_queues_reviewable_gpt_still(self):
+        with (
+            patch(
+                "app.services.media.openai_image_catalog.openai_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._start_job",
+                new=AsyncMock(return_value="image-first-job"),
+            ) as start_job,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                messages=[{"role": "user", "content": "Create a man beside a laptop showing CAMPAIGN PERFORMANCE."}],
+                action="generate_image",
+                image_prompt="Create a man beside a laptop showing CAMPAIGN PERFORMANCE.",
+                prompt_only_video=False,
+                preserve_image_text=True,
+                reference_assets=[{"url": "/files/test/person.png", "role": "character"}],
+            )
+        self.assertEqual(result["intent"], "generate_image")
+        self.assertEqual(result["media_mode"], "image")
+        self.assertEqual(result["job_id"], "image-first-job")
+        self.assertTrue(start_job.await_args.kwargs["preserve_image_text"])
+        self.assertEqual(
+            start_job.await_args.kwargs["reference_assets"],
+            [{"url": "/files/test/person.png", "role": "character"}],
+        )
+        self.assertFalse(start_job.await_args.kwargs["background_only_image"])
+
+    async def test_background_image_brief_routes_to_broll_without_presenter_still(self):
+        brief = """
+Create one presenter in Seedance using the selected Character reference.
+
+GENERATED BACKGROUND IMAGE 1
+NAME:
+CAMPAIGN BUDGET CLARITY
+USE DURING:
+Approximately 0:07-0:11
+IMAGE GENERATION PROMPT:
+Create abstract campaign budget bars. No readable text and no presenter.
+VIDEO MOTION:
+Gentle parallax.
+
+GENERATED BACKGROUND IMAGE 2
+NAME:
+AUDIT ROADMAP
+USE DURING:
+Approximately 0:18-0:27
+IMAGE GENERATION PROMPT:
+Create an abstract four-stage roadmap. No readable text and no presenter.
+VIDEO MOTION:
+Slow left-to-right flow.
+"""
+        memory = {
+            "broll_plan": parse_broll_images(brief),
+            "approved_broll": {},
+            "shot_list": [],
+        }
+        with (
+            patch(
+                "app.services.media.openai_image_catalog.openai_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.creative_studio_production_memory.load_production_memory",
+                return_value=memory,
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._start_job",
+                new=AsyncMock(return_value="broll-board-job"),
+            ) as start_job,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                session_id="background-board",
+                messages=[{"role": "user", "content": brief}],
+                action="generate_image",
+                duration_seconds=30,
+                prompt_only_video=False,
+                speech_mode="native_presenter",
+                reference_assets=[
+                    {"url": "/files/test/woman.png", "role": "character"}
+                ],
+            )
+        self.assertEqual(result["phase"], "broll_board_running")
+        self.assertEqual(result["media_mode"], "broll_board")
+        self.assertEqual(result["job_id"], "broll-board-job")
+        self.assertEqual(start_job.await_args.kwargs["media_mode"], "broll_board")
+        prompts = [
+            str(scene.get("image_prompt") or "")
+            for scene in start_job.await_args.kwargs["storyboard_scenes"]
+        ]
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(all("presenter in seedance" not in prompt.lower() for prompt in prompts))
+
+    async def test_seedance_25_approved_broll_does_not_require_opening_still(self):
+        brief = """
+Create one continuous 30-second presenter video.
+GENERATED BACKGROUND IMAGE 1
+NAME:
+CAMPAIGN BUDGET CLARITY
+USE DURING:
+Approximately 0:07-0:11
+IMAGE GENERATION PROMPT:
+Create abstract campaign budget bars. No readable text and no presenter.
+VIDEO MOTION:
+Gentle parallax.
+"""
+        memory = {
+            "broll_plan": parse_broll_images(brief),
+            "approved_broll": {
+                "1": {
+                    "index": 1,
+                    "title": "CAMPAIGN BUDGET CLARITY",
+                    "url": "/files/test/broll-1.png",
+                }
+            },
+            "shot_list": [{"start": 0.0, "end": 30.0}],
+        }
+        with (
+            patch(
+                "app.services.media.byteplus_seedance_client.ark_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.creative_studio_production_memory.load_production_memory",
+                return_value=memory,
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._ensure_rich_motion_prompt",
+                new=AsyncMock(return_value=brief),
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._start_job",
+                new=AsyncMock(return_value="seedance-25-job"),
+            ) as start_job,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                session_id="seedance-25-broll",
+                messages=[{"role": "user", "content": brief}],
+                action="approve_next",
+                duration_seconds=30,
+                video_model="ark-seedance-2-5",
+                video_prompt=brief,
+                approved_image_url="",
+                prompt_only_video=False,
+                speech_mode="native_presenter",
+                reference_assets=[
+                    {"url": "/files/test/woman.png", "role": "character"}
+                ],
+                # Browser state may be empty after a refresh; approved B-roll
+                # must be recovered from production memory.
+                storyboard_image_urls=[],
+            )
+        self.assertEqual(result["intent"], "generate_video")
+        self.assertEqual(result["job_id"], "seedance-25-job")
+        self.assertEqual(result["video_model"], "ark-seedance-2-5")
+        self.assertIsNone(start_job.await_args.kwargs["seed_image_url"])
+        self.assertEqual(
+            start_job.await_args.kwargs["storyboard_image_urls"],
+            ["/files/test/broll-1.png"],
+        )
+        self.assertFalse(start_job.await_args.kwargs["require_storyboard_coverage"])
+        self.assertEqual(start_job.await_args.kwargs["prompt"], brief.strip())
+        self.assertIn("one Seedance 2.5 call", result["assistant_message"])
+
+    async def test_long_image_first_mode_generates_one_chapter_still_at_a_time(self):
+        with (
+            patch(
+                "app.services.media.openai_image_catalog.openai_configured",
+                return_value=True,
+            ),
+            patch(
+                "app.services.creative_studio_chat_service._start_job",
+                new=AsyncMock(return_value="chapter-image-job"),
+            ) as start_job,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                messages=[{"role": "user", "content": "Create a 60 second multi-scene ad."}],
+                action="generate_image",
+                duration_seconds=60,
+                image_prompt="Scene 1 opening still.",
+                prompt_only_video=False,
+            )
+        self.assertEqual(result["intent"], "generate_image")
+        self.assertEqual(result["job_id"], "chapter-image-job")
+        self.assertEqual(result["film_total_chapters"], 4)
+        self.assertTrue(start_job.await_args.kwargs["chapter_image_staging"])
+        self.assertEqual(start_job.await_args.kwargs["film_total_chapters"], 4)
+
+    async def test_generate_next_chapter_image_requires_continuity_frame(self):
+        with patch(
+            "app.services.media.openai_image_catalog.openai_configured",
+            return_value=True,
+        ):
+            result = await run_creative_studio_chat_turn(
+                tenant_id="test",
+                messages=[{"role": "user", "content": "Create a 60 second ad."}],
+                action="generate_next_chapter_image",
+                duration_seconds=60,
+                chapter_index=1,
+                prompt_only_video=False,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("continuity frame", result["assistant_message"].lower())
 
     async def test_completed_reference_image_save_failure_is_not_regenerated(self):
         from app.services.media.openai_image_provider import OpenAIImageProvider
@@ -416,6 +664,32 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(image_content), 1)
         self.assertEqual(image_content[0]["role"], "first_frame")
         self.assertEqual(image_content[0]["image_url"]["url"], "https://example.com/approved.png")
+
+    async def test_multimodal_request_attaches_approved_video_reference(self):
+        captured = {}
+        def respond(request):
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "test-task"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            await create_video_task(
+                client,
+                prompt="Continue the approved film.",
+                extra_image_refs=[{"url": "https://example.com/handoff.png"}],
+                extra_video_refs=[{
+                    "url": "https://example.com/chapter-1.mp4",
+                    "role": "reference_video",
+                }],
+            )
+        video_content = [item for item in captured["content"] if item["type"] == "video_url"]
+        self.assertEqual(video_content, [{
+            "type": "video_url",
+            "video_url": {"url": "https://example.com/chapter-1.mp4"},
+            "role": "reference_video",
+        }])
+        self.assertEqual(
+            [item["role"] for item in captured["content"] if item["type"] == "image_url"],
+            ["reference_image"],
+        )
 
     async def test_seedance_25_first_frame_coerces_adaptive_ratio(self):
         captured = {}
@@ -886,6 +1160,46 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(provider.generate.call_args.kwargs["brief"]["skip_voiceover"])
         self.assertTrue(provider.generate.call_args.kwargs["brief"]["creative_studio_generate_audio"])
 
+    async def test_native_presenter_speech_keeps_dialogue_in_seedance_and_skips_external_tts(self):
+        from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
+        from app.services.file_service import file_service
+
+        provider = Mock()
+        provider.generate = AsyncMock(return_value={
+            "status": "done", "url": "fixture.mp4", "provider": "byteplus",
+            "model": "ark-seedance-2-0", "duration_seconds": 5,
+        })
+        prompt = (
+            "Scene 1 - PRESENTER | 0-5 seconds\n"
+            "The presenter looks into camera and speaks naturally.\n"
+            'Voiceover, 0-5 seconds: "Hello from our Australian team."'
+        )
+        with (
+            patch.object(file_service, "upload_dir", self.work),
+            patch("app.services.creative_studio_job_service.settings.UPLOAD_DIR", str(self.work)),
+            patch("app.services.file_service.file_service.assert_writable"),
+            patch("app.services.media.registry.get_video_provider", return_value=provider),
+            patch("app.services.creative_studio_speech.prepare_narration", new_callable=AsyncMock) as prepare,
+            patch("app.services.video_subtitles._ensure_local_video", return_value=self.audible),
+        ):
+            job_id = await create_job(tenant_id="test", payload={
+                "media_mode": "video", "model": "ark-seedance-2-0",
+                "prompt": prompt, "source_brief": prompt,
+                "duration_seconds": 5, "sound_on": True,
+                "speech_mode": "native_presenter",
+            })
+            await run_creative_studio_job(job_id)
+            result = await get_job(job_id)
+        self.assertEqual(result["status"], "done", result.get("error"))
+        prepare.assert_not_awaited()
+        call = provider.generate.call_args.kwargs
+        self.assertIn("Hello from our Australian team.", call["prompt"])
+        self.assertNotIn("[Narration supplied in post-production]", call["prompt"])
+        self.assertFalse(call["brief"]["skip_voiceover"])
+        self.assertTrue(call["brief"]["creative_studio_generate_audio"])
+        self.assertEqual(call["brief"]["creative_studio_speech_mode"], "native_presenter")
+        self.assertEqual(result["voiceover"]["status"], "native_requested")
+
     async def test_six_shot_short_ad_stays_in_one_generation_context(self):
         from app.services.creative_studio_job_service import create_job, run_creative_studio_job, get_job
         fixture = self.make_clip("provider-fifteen-seconds", True, duration=15)
@@ -959,6 +1273,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         provider = Mock()
         provider.generate = AsyncMock(return_value={
             "status": "done", "url": "fixture.mp4", "provider": "byteplus",
+            "remote_url": "https://example.com/approved-chapter.mp4",
             "model": "ark-seedance-2-0", "duration_seconds": 15,
         })
         job_id = await create_job(tenant_id="test", payload={
@@ -1006,6 +1321,10 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 second_call.kwargs["brief"]["continuity_reference_url"],
                 "/files/test/final-frame.jpg",
+            )
+            self.assertEqual(
+                second_call.kwargs["brief"]["continuity_video_reference_url"],
+                "https://example.com/approved-chapter.mp4",
             )
             self.assertIn("15", second_call.kwargs["prompt"])
             self.assertIn("30", second_call.kwargs["prompt"])

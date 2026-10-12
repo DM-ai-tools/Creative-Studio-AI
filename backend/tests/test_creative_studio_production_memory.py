@@ -9,9 +9,12 @@ from unittest.mock import patch
 
 from app.services.creative_studio_preflight import validate_video_preflight
 from app.services.creative_studio_production_memory import (
+    _digest,
     append_chapter_log,
+    approve_broll_still,
     compile_locked_chapter_prompt,
     create_production_memory,
+    ensure_broll_plan,
     ensure_production_memory,
     load_production_memory,
     normalized_reference_lock,
@@ -134,6 +137,113 @@ class ProductionMemoryTests(unittest.TestCase):
                 start=15.0,
                 end=30.0,
             )
+
+    def test_supplemental_references_allowed_after_broll_lock(self):
+        memory = self._memory()
+        initial = normalized_reference_lock(
+            [{"url": "/uploads/stat-proof.png", "role": "reference"}],
+            product_reference_url=None,
+            logo_reference_url="/uploads/logo.png",
+        )
+        memory["reference_lock"] = initial
+        memory["reference_lock_sha256"] = _digest(initial)
+        ensure_broll_plan(
+            memory,
+            [
+                {
+                    "index": 1,
+                    "title": "Dashboard",
+                    "start": 8.0,
+                    "end": 9.5,
+                    "duration": 1.5,
+                    "image_prompt": "Dashboard still",
+                    "wants_readable_text": True,
+                }
+            ],
+        )
+        approve_broll_still(
+            "tenant",
+            memory,
+            index=1,
+            url="/uploads/broll1.png",
+            title="Dashboard",
+        )
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "app.services.creative_studio_production_memory.settings.UPLOAD_DIR", folder
+        ):
+            save_production_memory("tenant", memory)
+            expanded = normalized_reference_lock(
+                [
+                    {"url": "/uploads/stat-proof.png", "role": "reference"},
+                    {"url": "/uploads/presenter-still.png", "role": "character"},
+                ],
+                product_reference_url=None,
+                logo_reference_url="/uploads/logo.png",
+            )
+            refreshed = ensure_production_memory(
+                tenant_id="tenant",
+                session_id="chat-1",
+                prompt=PROMPT,
+                duration_seconds=30,
+                clip_cap=15,
+                aspect="1/1",
+                resolution="1080p",
+                model="ark-seedance-2-0",
+                brand_name="Traffic Radius",
+                product_name="Marketing service",
+                voice_events=[],
+                references=expanded,
+            )
+            urls = {item["url"] for item in refreshed["reference_lock"]}
+            self.assertIn("/uploads/logo.png", urls)
+            self.assertIn("/uploads/presenter-still.png", urls)
+
+    def test_ensure_production_memory_preserves_approved_broll_before_first_chapter(self):
+        memory = self._memory()
+        ensure_broll_plan(
+            memory,
+            [
+                {
+                    "index": 1,
+                    "title": "Dashboard",
+                    "start": 8.0,
+                    "end": 9.5,
+                    "duration": 1.5,
+                    "image_prompt": "Dashboard still",
+                    "wants_readable_text": True,
+                }
+            ],
+        )
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "app.services.creative_studio_production_memory.settings.UPLOAD_DIR", folder
+        ):
+            save_production_memory("tenant", memory)
+            approve_broll_still(
+                "tenant",
+                memory,
+                index=1,
+                url="/uploads/broll1.png",
+                title="Dashboard",
+            )
+            refreshed = ensure_production_memory(
+                tenant_id="tenant",
+                session_id="chat-1",
+                prompt="Approve & Next → Seedance video",
+                duration_seconds=30,
+                clip_cap=15,
+                aspect="1/1",
+                resolution="1080p",
+                model="ark-seedance-2-0",
+                brand_name="Traffic Radius",
+                product_name="Marketing service",
+                voice_events=[],
+                references=memory["reference_lock"],
+            )
+            self.assertEqual(
+                refreshed["approved_broll"]["1"]["url"],
+                "/uploads/broll1.png",
+            )
+            self.assertEqual(len(refreshed.get("broll_plan") or []), 1)
 
     def test_preflight_blocks_unnatural_voice_speed_before_video_call(self):
         with self.assertRaisesRegex(ValueError, "cannot sound natural"):

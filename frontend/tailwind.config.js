@@ -33,7 +33,7 @@ module.exports = {
         lt: '#BFC0C5',
       },
       fontFamily: {
-        sans: ['var(--font-inter)', 'Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        sans: ['var(--font-inter, Inter)', 'Arial', 'Helvetica', 'system-ui', '-apple-system', 'sans-serif'],
       },
       fontSize: {
         'display-2xl': ['3rem',   { lineHeight: '1.05', letterSpacing: '-0.04em', fontWeight: '900' }],

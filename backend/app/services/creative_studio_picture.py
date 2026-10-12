@@ -307,11 +307,23 @@ def compose_campaign_graphics(video_url: str, events: list[tuple[float, float, s
             canvas = Image.new('RGBA', (width, height))
             draw = ImageDraw.Draw(canvas)
             lines = text.split(r'\N')
-            final = len(lines) > 1
-            # End-card wordmark is replaced by the official logo, never duplicated.
-            use_logo = bool(final and logo_path)
-            if use_logo:
-                lines = lines[1:]
+            # Multi-line proof copy is not automatically an end card. The logo is
+            # reserved for the final scheduled graphic only, so it cannot leak into
+            # a mid-film two-line metric overlay.
+            use_logo = bool(logo_path and index == len(events))
+            final = use_logo
+            # Replace an explicit wordmark line only when its words are also present
+            # in the supplied logo filename. Otherwise keep CTA copy such as
+            # "BOOK YOUR STRATEGY CALL" intact.
+            if use_logo and lines:
+                ignored = {'logo', 'white', 'black', 'transparent', 'final', 'official'}
+                logo_tokens = {
+                    token for token in re.findall(r'[a-z0-9]+', logo_path.stem.lower())
+                    if token not in ignored and len(token) > 1
+                }
+                first_tokens = set(re.findall(r'[a-z0-9]+', lines[0].lower()))
+                if logo_tokens and logo_tokens.issubset(first_tokens):
+                    lines = lines[1:]
             font_size = max(16, round(height * (0.030 if final else 0.040)))
             while True:
                 font = ImageFont.truetype(str(font_path), font_size)
