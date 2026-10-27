@@ -773,15 +773,22 @@ export const generationApi = {
   creativeStudioContinueJob: (
     jobId: string,
     recovery?: {
-      part_video_url: string
-      completed_segments: number
-      segment_count: number
-      payload: Record<string, unknown>
+      part_video_url?: string
+      completed_segments?: number
+      segment_count?: number
+      payload?: Record<string, unknown>
       generated_duration_seconds?: number
       continuity_frame_count?: number
       cast_reference_url?: string
       continuity_video_reference_url?: string
       production_id?: string
+      next_prompt?: string
+      next_reference_assets?: {
+        url: string
+        role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof'
+      }[]
+      next_reference_mode?: 'continuity' | 'first_frame'
+      next_seed_image_url?: string
     },
   ) =>
     api
@@ -871,7 +878,7 @@ export const generationApi = {
     product_reference_url?: string
     logo_reference_url?: string
     additional_reference_urls?: string[]
-    reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' }[]
+    reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' }[]
     storyboard_image_urls?: string[]
     prompt_only_video?: boolean
     preserve_image_text?: boolean

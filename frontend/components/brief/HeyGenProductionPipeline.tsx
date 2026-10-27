@@ -29,6 +29,7 @@ type ExportSnapshot = {
 
 export default function HeyGenProductionPipeline({
   pdfScriptOnly = false,
+  simplifiedMode = false,
   durationSeconds,
   avatarLabel,
   voiceLabel,
@@ -55,6 +56,8 @@ export default function HeyGenProductionPipeline({
   exportFileName,
 }: {
   pdfScriptOnly?: boolean
+  /** PDF or paste-script briefs — skip stepper and B-roll approve flow. */
+  simplifiedMode?: boolean
   durationSeconds: number
   avatarLabel: string
   voiceLabel: string
@@ -82,6 +85,7 @@ export default function HeyGenProductionPipeline({
   /** Brief/campaign name for master script Excel export filename. */
   exportFileName?: string
 }) {
+  const compact = simplifiedMode || pdfScriptOnly
   const brollRef = useRef<HTMLDivElement>(null)
   const [exportSnap, setExportSnap] = useState<ExportSnapshot | null>(null)
   const [autoBrollBusy, setAutoBrollBusy] = useState(false)
@@ -149,7 +153,7 @@ export default function HeyGenProductionPipeline({
 
   const runAutoBroll = useCallback(
     async (script: string) => {
-      if (pdfScriptOnly || settings.sceneBrollDirections?.trim()) return
+      if (compact || settings.sceneBrollDirections?.trim()) return
       setAutoBrollBusy(true)
       try {
         const directions = await generateSceneBrollDirections({
@@ -179,7 +183,7 @@ export default function HeyGenProductionPipeline({
       }
     },
     [
-      pdfScriptOnly,
+      compact,
       settings,
       campaignContext,
       durationSeconds,
@@ -200,12 +204,12 @@ export default function HeyGenProductionPipeline({
           toast.error('Could not save script to brief')
         }
       }
-      if (!pdfScriptOnly) {
+      if (!compact) {
         await runAutoBroll(script)
       }
       onAfterScriptApproved?.(script)
     },
-    [onPersistScript, pdfScriptOnly, runAutoBroll, onAfterScriptApproved]
+    [onPersistScript, compact, runAutoBroll, onAfterScriptApproved]
   )
 
   const handleMasterScriptEdit = useCallback(
@@ -221,7 +225,7 @@ export default function HeyGenProductionPipeline({
 
   return (
     <div className="space-y-4">
-      {!pdfScriptOnly && (
+      {!compact && (
         <VideoProductionStepper
           activeStep={activeStep}
           scriptApproved={scriptApproved}
@@ -230,7 +234,7 @@ export default function HeyGenProductionPipeline({
         />
       )}
 
-      {!pdfScriptOnly && (
+      {!compact && (
         <div className="relative" ref={scriptPanelRef}>
           <span className="absolute top-4 right-4 z-10 flex h-7 w-7 items-center justify-center rounded-xl bg-accent-gradient text-[11px] font-bold text-white shadow-glow">
             1
@@ -250,7 +254,7 @@ export default function HeyGenProductionPipeline({
         </div>
       )}
 
-      {!pdfScriptOnly && scriptForPreview && (
+      {!compact && scriptForPreview && (
         <MasterScriptPreview
           avatarScript={scriptForPreview}
           sceneBrollDirections={settings.sceneBrollDirections}
@@ -268,7 +272,7 @@ export default function HeyGenProductionPipeline({
         />
       )}
 
-      {!pdfScriptOnly && scriptForPreview && approveState && (
+      {!compact && scriptForPreview && approveState && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-indigo-200 bg-white px-4 py-3">
           <div className="flex items-center gap-2">
             {scriptApproved ? (
@@ -296,7 +300,7 @@ export default function HeyGenProductionPipeline({
         </div>
       )}
 
-      {!pdfScriptOnly && (
+      {!compact && (
         <div ref={brollRef}>
           <HeyGenVideoSettingsCard
             section="broll"
@@ -327,9 +331,10 @@ export default function HeyGenProductionPipeline({
       )}
 
       <HeyGenVideoSettingsCard
-        section={pdfScriptOnly ? 'all' : 'avatar'}
-        stepNumber={pdfScriptOnly ? 7 : 3}
-        pdfScriptOnly={pdfScriptOnly}
+        section={compact ? 'all' : 'avatar'}
+        stepNumber={compact ? 2 : 3}
+        simplifiedMode={compact}
+        pdfScriptOnly={compact}
         durationSeconds={durationSeconds}
         avatarLabel={avatarLabel}
         voiceLabel={voiceLabel}
@@ -348,7 +353,7 @@ export default function HeyGenProductionPipeline({
         campaignContext={campaignWithScript}
       />
 
-      {!pdfScriptOnly && scriptApproved && brollReady && masterWarnings.length > 0 && (
+      {!compact && scriptApproved && brollReady && masterWarnings.length > 0 && (
         <div className="rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-950">
           <p className="font-bold">Fix stat / voice alignment before Generate</p>
           <p className="text-xs mt-1">
@@ -359,7 +364,7 @@ export default function HeyGenProductionPipeline({
         </div>
       )}
 
-      {!pdfScriptOnly && scriptApproved && brollReady && avatarReady && masterWarnings.length === 0 && (
+      {!compact && scriptApproved && brollReady && avatarReady && masterWarnings.length === 0 && (
         <div className="rounded-xl border-2 border-teal-400 bg-teal-50 px-4 py-3 text-sm text-teal-900">
           <p className="font-bold">✓ Step 4 — Ready to generate</p>
           <p className="text-xs mt-1 text-teal-800">

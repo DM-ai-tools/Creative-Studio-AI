@@ -12,6 +12,12 @@ import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi } from '@/lib/api'
 import { agencyIndustryLabel } from '@/lib/industries'
 import { cn } from '@/lib/utils'
+import {
+  cs25DefaultRedirect,
+  isCsSeedance25WorkspaceUser,
+  isPathAllowedForCs25,
+  shouldBlockContextMenuForUser,
+} from '@/lib/productScope'
 
 function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter()
@@ -30,8 +36,26 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
   }, [user, isLoading, router])
 
   useEffect(() => {
+    if (!user || isLoading) return
+    if (!isCsSeedance25WorkspaceUser(user)) return
+    if (isPathAllowedForCs25(pathname)) return
+    router.replace(cs25DefaultRedirect(pathname))
+  }, [user, isLoading, pathname, router])
+
+  useEffect(() => {
     document.body.style.overflow = ''
   }, [pathname])
+
+  useEffect(() => {
+    const blockContextMenu = (event: MouseEvent) => {
+      event.preventDefault()
+    }
+    if (!shouldBlockContextMenuForUser(user, pathname)) {
+      return
+    }
+    document.addEventListener('contextmenu', blockContextMenu)
+    return () => document.removeEventListener('contextmenu', blockContextMenu)
+  }, [user, pathname])
 
   useEffect(() => {
     try {

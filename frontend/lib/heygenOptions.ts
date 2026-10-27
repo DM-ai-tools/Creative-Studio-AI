@@ -20,6 +20,7 @@ export interface HeyGenVideoSettings {
   brandStyledOverlay: boolean
   visualCues: string
   sceneBrollDirections: string
+  seedance2Enabled: boolean
 }
 
 export const DEFAULT_HEYGEN_SETTINGS: HeyGenVideoSettings = {
@@ -40,6 +41,7 @@ export const DEFAULT_HEYGEN_SETTINGS: HeyGenVideoSettings = {
   brandStyledOverlay: true,
   visualCues: '',
   sceneBrollDirections: '',
+  seedance2Enabled: false,
 }
 
 export const HEYGEN_ASPECT_OPTIONS: CatalogOption[] = [
@@ -154,6 +156,7 @@ export function heygenSettingsForApi(settings: HeyGenVideoSettings) {
     brand_styled_overlay: settings.brandStyledOverlay,
     visual_cues: settings.visualCues,
     scene_broll_directions: settings.sceneBrollDirections,
+    seedance_2_enabled: settings.seedance2Enabled,
   }
 }
 
@@ -215,6 +218,7 @@ export function heygenSettingsFromApi(raw: Record<string, unknown> | undefined):
     brandStyledOverlay: raw.brand_styled_overlay !== false,
     visualCues: String(raw.visual_cues ?? ''),
     sceneBrollDirections: String(raw.scene_broll_directions ?? ''),
+    seedance2Enabled: raw.seedance_2_enabled === true,
   }
 }
 

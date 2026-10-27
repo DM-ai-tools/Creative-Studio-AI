@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
+import subprocess
+import tempfile
 import time
+from pathlib import Path
 
 import httpx
 
@@ -65,6 +70,175 @@ def _heygen_settings(brief: dict) -> dict:
     if isinstance(kb, dict) and isinstance(kb.get("heygen_settings"), dict):
         return kb["heygen_settings"]
     return {}
+
+
+def heygen_seedance2_enabled(brief: dict) -> bool:
+    return _heygen_settings(brief).get("seedance_2_enabled") is True
+
+
+def _timecode_seconds(value: str) -> float:
+    raw = re.sub(
+        r"\s*(?:s|sec|secs|second|seconds)\s*$",
+        "",
+        value.strip(),
+        flags=re.IGNORECASE,
+    )
+    parts = [float(part) for part in raw.split(":")]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    raise ValueError(f"Invalid B-roll timecode: {value}")
+
+
+_TIME_VALUE = r"(?:\d{1,2}(?::\d{2}){1,2}(?:\.\d+)?|\d+(?:\.\d+)?)"
+_TIME_RANGE_RE = re.compile(
+    rf"(?<![\d:])(?P<start>{_TIME_VALUE})\s*"
+    rf"(?:s|sec|secs|second|seconds)?\s*(?:[-–—]|to)\s*"
+    rf"(?P<end>{_TIME_VALUE})\s*(?:s|sec|secs|second|seconds)?",
+    re.IGNORECASE,
+)
+_BROLL_MARKER_RE = re.compile(
+    r"\b(?:b[\s-]?roll|cutaway|cinematic(?:\s+avatar)?\s+(?:shot|scene)|"
+    r"visual[-\s]?only|silent\s+visual)\b",
+    re.IGNORECASE,
+)
+_SPEAKING_MARKER_RE = re.compile(
+    r"(?:\b(?:presenter|avatar|host)\b.{0,24}\b(?:speak(?:s|ing)?|talk(?:s|ing)?|"
+    r"on[-\s]?camera)\b|\btalking[-\s]?head\b)",
+    re.IGNORECASE,
+)
+_VISUAL_MARKER_RE = re.compile(
+    r"\b(?:visual\s+direction|scene\s+direction|cut\s+to|show\s+footage|"
+    r"supporting\s+footage)\b",
+    re.IGNORECASE,
+)
+
+
+def _timed_scene_blocks(raw: str) -> list[tuple[re.Match[str], str]]:
+    """Return timed scene blocks while retaining labels placed before the time range."""
+    matches = list(_TIME_RANGE_RE.finditer(raw))
+    blocks: list[tuple[re.Match[str], str]] = []
+    for index, match in enumerate(matches):
+        line_start = raw.rfind("\n", 0, match.start()) + 1
+        if index + 1 < len(matches):
+            next_match = matches[index + 1]
+            next_line_start = raw.rfind("\n", 0, next_match.start()) + 1
+            block_end = next_line_start if next_line_start > line_start else next_match.start()
+        else:
+            block_end = len(raw)
+        blocks.append((match, raw[line_start:block_end].strip()))
+    return blocks
+
+
+def _broll_direction(block: str) -> str | None:
+    """Classify one timed block and return its visual direction when it is B-roll."""
+    explicit_marker = _BROLL_MARKER_RE.search(block)
+    visual_marker = _VISUAL_MARKER_RE.search(block)
+    speaking_marker = _SPEAKING_MARKER_RE.search(block)
+    marker = explicit_marker or (visual_marker if not speaking_marker else None)
+    if marker is None:
+        return None
+
+    untimed = _TIME_RANGE_RE.sub(" ", block, count=1)
+    marker = _BROLL_MARKER_RE.search(untimed) or _VISUAL_MARKER_RE.search(untimed)
+    direction = untimed[marker.end() :] if marker else untimed
+    direction = re.split(
+        r"\b(?:voice[ -]?over|vo|narration|presenter|avatar)\s*(?:speaks?)?\s*:",
+        direction,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    direction = re.sub(r"^[\s|:;,.—–\-()\[\]]+", "", direction)
+    direction = re.sub(r"\s+", " ", direction).strip()
+    return direction
+
+
+def _seedance_broll_segments(brief: dict, *, target_duration: int) -> list[dict]:
+    '''Read flexibly formatted timed visual scenes and split them into <=15s API shots.'''
+    kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
+    avatar_script = str(brief.get("avatar_script") or kb.get("avatar_script") or "").strip()
+    production_plan = str(
+        brief.get("video_script_skeleton") or kb.get("video_script_skeleton") or ""
+    ).strip()
+    legacy_scene_map = str(
+        _heygen_settings(brief).get("scene_broll_directions") or ""
+    ).strip()
+    # Prefer the user's one prompt, then the normalized production plan. The
+    # final fallback keeps previously saved projects working without migration.
+    candidates = list(dict.fromkeys(filter(None, [avatar_script, production_plan, legacy_scene_map])))
+    segments: list[dict] = []
+    for raw in candidates:
+        parsed: list[dict] = []
+        for match, block in _timed_scene_blocks(raw):
+            direction = _broll_direction(block)
+            if direction is None:
+                continue
+            start = max(0.0, _timecode_seconds(match.group("start")))
+            end = min(float(target_duration), _timecode_seconds(match.group("end")))
+            if end <= start:
+                raise ValueError(
+                    f"Invalid B-roll interval [{match.group('start')}-{match.group('end')}]"
+                )
+            if not direction:
+                raise ValueError(
+                    f"B-roll interval [{match.group('start')}-{match.group('end')}] "
+                    "needs a scene description"
+                )
+            total = end - start
+            shot_count = max(1, math.ceil(total / 15.0))
+            shot_span = total / shot_count
+            for index in range(shot_count):
+                shot_start = start + index * shot_span
+                shot_end = end if index == shot_count - 1 else start + (index + 1) * shot_span
+                parsed.append(
+                    {
+                        "start": shot_start,
+                        "end": shot_end,
+                        "duration": max(4, min(15, math.ceil(shot_end - shot_start))),
+                        "direction": direction,
+                    }
+                )
+        if parsed:
+            segments = parsed
+            break
+    segments.sort(key=lambda item: item["start"])
+    for previous, current in zip(segments, segments[1:]):
+        if current["start"] < previous["end"] - 0.05:
+            raise ValueError("Seedance 2.0 B-roll time ranges overlap; use consecutive, non-overlapping times")
+    return segments
+
+
+def _cinematic_aspect_ratio(format_type: str, brief: dict) -> str:
+    dims = _video_dimensions(format_type, brief)
+    if dims["width"] == dims["height"]:
+        return "1:1"
+    return "9:16" if dims["height"] > dims["width"] else "16:9"
+
+
+def _cinematic_avatar_payload(
+    *,
+    avatar_id: str,
+    direction: str,
+    duration_seconds: int,
+    aspect_ratio: str,
+) -> dict:
+    prompt = (
+        "Cinematic advertising B-roll featuring the exact selected avatar identity. "
+        f"{direction.strip()} "
+        "Natural body movement and realistic camera motion. The character does not speak; "
+        "no dialogue, no lip movement, no captions, no readable text, no logos, no watermark."
+    )
+    return {
+        "type": "cinematic_avatar",
+        "prompt": prompt,
+        "avatar_id": [avatar_id],
+        "aspect_ratio": aspect_ratio,
+        "resolution": "1080p",
+        "duration": max(4, min(15, int(duration_seconds))),
+    }
 
 
 def heygen_captions_enabled(brief: dict) -> bool:
@@ -237,6 +411,23 @@ class HeyGenVideoProvider(VideoGenerationProvider):
 
         model_key = (model or HEYGEN_MODEL_ID).strip().lower()
         force_v2 = model_key in (HEYGEN_V2_MODEL_ID, "heygen-v2", "heygen_avatar_v2")
+        seedance2_enabled = heygen_seedance2_enabled(brief)
+        seedance2_segments: list[dict] = []
+        if seedance2_enabled:
+            seedance2_segments = _seedance_broll_segments(
+                brief,
+                target_duration=target_duration,
+            )
+            if not seedance2_segments:
+                return _fail(
+                    "Seedance 2.0 is On, but the main video prompt has no timed B-ROLL scenes. "
+                    "Add a line such as [00:07-00:13] B-ROLL — SAME AVATAR walks through the office."
+                )
+            if not _is_public_heygen_look_id(avatar_id):
+                return _fail(
+                    "Seedance 2.0 character B-roll requires a HeyGen avatar Look ID. "
+                    "Choose a HeyGen avatar look in the Video tab and try again."
+                )
 
         try:
             async with heygen_async_client() as client:
@@ -307,6 +498,52 @@ class HeyGenVideoProvider(VideoGenerationProvider):
                     saved["url"] = trim_url
                     actual_duration = trim_dur or float(target_duration)
                     trimmed = True
+
+                cinematic_video_ids: list[str] = []
+                cinematic_segments_meta: list[dict] = []
+                if seedance2_enabled:
+                    cinematic_assets: list[tuple[dict, Path]] = []
+                    for segment in seedance2_segments:
+                        cinematic_url, cinematic_id = await self._generate_cinematic_avatar(
+                            client,
+                            base,
+                            headers,
+                            avatar_id=avatar_id,
+                            direction=str(segment["direction"]),
+                            duration_seconds=int(segment["duration"]),
+                            aspect_ratio=_cinematic_aspect_ratio(format_type, brief),
+                        )
+                        cinematic_saved = await _download_asset(
+                            client,
+                            cinematic_url,
+                            tenant_id=tenant_id,
+                            kind="video",
+                        )
+                        from app.services.logo_overlay import file_url_to_local_path
+
+                        cinematic_path = file_url_to_local_path(cinematic_saved["url"])
+                        if not cinematic_path:
+                            raise ValueError("Downloaded Cinematic Avatar B-roll is unavailable locally")
+                        cinematic_assets.append((segment, cinematic_path))
+                        cinematic_video_ids.append(cinematic_id)
+                        cinematic_segments_meta.append(
+                            {
+                                "start": round(float(segment["start"]), 3),
+                                "end": round(float(segment["end"]), 3),
+                                "video_id": cinematic_id,
+                            }
+                        )
+                    final_url = await asyncio.to_thread(
+                        self._composite_cinematic_broll,
+                        final_url,
+                        cinematic_assets,
+                        tenant_id=tenant_id,
+                        format_type=format_type,
+                        brief=brief,
+                        target_duration=float(actual_duration or target_duration),
+                    )
+                    mode = f"{mode}+cinematic_avatar"
+
                 # Frame normalize runs once after finalize in ai_service (not here)
                 fitted: str | None = None
                 kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
@@ -336,6 +573,10 @@ class HeyGenVideoProvider(VideoGenerationProvider):
                     "subtitle_source": (
                         "heygen_srt" if poll_meta.get("subtitle_url") else "script_aligned"
                     ),
+                    "seedance_2_enabled": seedance2_enabled,
+                    "seedance_2_broll_count": len(cinematic_video_ids),
+                    "seedance_2_video_ids": cinematic_video_ids,
+                    "seedance_2_broll_segments": cinematic_segments_meta,
                 }
         except httpx.HTTPStatusError as exc:
             return _fail(_parse_heygen_error(exc))
@@ -437,6 +678,25 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             spoken_script=script,
             production_skeleton=production_skeleton,
         )
+        stats_urls = resolve_stats_image_urls(brief)
+        stats_files: list[dict] = []
+        if stats_urls:
+            from app.services.heygen_assets import build_heygen_file_attachments
+
+            stats_files = await build_heygen_file_attachments(
+                client,
+                base,
+                headers,
+                stats_urls[:20],
+            )
+            if stats_files:
+                agent_prompt += (
+                    "\n\nATTACHED STAT IMAGES: The attached dashboard images correspond in order to "
+                    "[INSERT STAT IMAGE 1], [INSERT STAT IMAGE 2], and so on. Use them only as "
+                    "visual context. Do not redraw, rewrite, crop, animate, or alter their text or "
+                    "numbers; the application will insert the original files full-screen during "
+                    "post-production at their exact marked times."
+                )
         agent_prompt = clamp_heygen_v3_prompt(agent_prompt)
         if len(agent_prompt) > HEYGEN_V3_PROMPT_MAX:
             raise ValueError(
@@ -456,10 +716,16 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             "voice_id": voice_id,
             "orientation": orientation,
         }
-        stats_urls = resolve_stats_image_urls(brief)
-        if stats_urls:
+        if stats_files:
+            payload["files"] = stats_files
             logger.info(
-                "HeyGen v3: %s stats image(s) — post-process ffmpeg overlay (not attached to agent)",
+                "HeyGen v3: %s/%s stats image(s) attached; original files will be inserted full-screen",
+                len(stats_files),
+                len(stats_urls),
+            )
+        elif stats_urls:
+            logger.warning(
+                "HeyGen v3: %s stats image(s) could not be attached; post-production insertion remains enabled",
                 len(stats_urls),
             )
         # NOTE: HeyGen v3 Video Agent (/v3/video-agents) does NOT accept a
@@ -491,6 +757,130 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             max_wait_seconds=settings.HEYGEN_V3_POLL_MAX_WAIT_SECONDS,
         )
         return url, duration, video_id, "v3_video_agent", poll_meta
+
+    async def _generate_cinematic_avatar(
+        self,
+        client: httpx.AsyncClient,
+        base: str,
+        headers: dict[str, str],
+        *,
+        avatar_id: str,
+        direction: str,
+        duration_seconds: int,
+        aspect_ratio: str,
+    ) -> tuple[str, str]:
+        '''Create one silent visual replacement through HeyGen Cinematic Avatar.'''
+        payload = _cinematic_avatar_payload(
+            avatar_id=avatar_id,
+            direction=direction,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+        )
+        create_resp = await self._heygen_request(
+            client,
+            "POST",
+            f"{base}/v3/videos",
+            headers=headers,
+            json=payload,
+            label="HeyGen Cinematic Avatar create",
+        )
+        create_resp.raise_for_status()
+        body = create_resp.json()
+        created = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(created, dict):
+            created = body if isinstance(body, dict) else {}
+        video_id = created.get("video_id") or created.get("id")
+        if not video_id:
+            raise ValueError(f"HeyGen Cinematic Avatar did not return video_id: {created}")
+        url, _duration, _meta = await self._poll_v3_status(
+            client,
+            base,
+            headers,
+            str(video_id),
+            max_wait_seconds=settings.HEYGEN_V3_POLL_MAX_WAIT_SECONDS,
+        )
+        return url, str(video_id)
+
+    @staticmethod
+    def _composite_cinematic_broll(
+        master_url: str,
+        cinematic_assets: list[tuple[dict, Path]],
+        *,
+        tenant_id: str,
+        format_type: str,
+        brief: dict,
+        target_duration: float,
+    ) -> str:
+        '''Replace selected picture intervals while retaining the master presenter audio.'''
+        from app.services.ffmpeg_util import require_ffmpeg
+        from app.services.file_service import file_service
+        from app.services.logo_overlay import file_url_to_local_path
+
+        master_path = file_url_to_local_path(master_url)
+        if not master_path:
+            raise ValueError("HeyGen presenter master is unavailable for B-roll finishing")
+        dims = _video_dimensions(format_type, brief)
+        width, height = dims["width"], dims["height"]
+        with tempfile.TemporaryDirectory(prefix="heygen_cinematic_broll_") as tmp:
+            output = Path(tmp) / "finished.mp4"
+            command = [require_ffmpeg(), "-v", "error", "-y", "-i", str(master_path)]
+            for _segment, path in cinematic_assets:
+                command += ["-i", str(path)]
+            filters = [
+                f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},setsar=1,setpts=PTS-STARTPTS[base]"
+            ]
+            previous = "base"
+            for index, (segment, _path) in enumerate(cinematic_assets, 1):
+                start = float(segment["start"])
+                end = float(segment["end"])
+                span = max(0.05, end - start)
+                clip = f"cinematic{index}"
+                output_label = f"mix{index}"
+                filters.append(
+                    f"[{index}:v]trim=duration={span:.3f},setpts=PTS-STARTPTS+{start:.3f}/TB,"
+                    f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height},setsar=1[{clip}]"
+                )
+                filters.append(
+                    f"[{previous}][{clip}]overlay=0:0:eof_action=pass:"
+                    f"enable='gte(t,{start:.3f})*lt(t,{end:.3f})'[{output_label}]"
+                )
+                previous = output_label
+            command += [
+                "-filter_complex",
+                ";".join(filters),
+                "-map",
+                f"[{previous}]",
+                "-map",
+                "0:a?",
+                "-t",
+                f"{target_duration:.3f}",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "18",
+                "-preset",
+                "fast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(output),
+            ]
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=900)
+            if proc.returncode:
+                raise RuntimeError(f"HeyGen Cinematic Avatar compositing failed: {proc.stderr[-800:]}")
+            saved = file_service.save_bytes(
+                output.read_bytes(),
+                tenant_id,
+                "generated",
+                ".mp4",
+                "video/mp4",
+            )
+            return saved["file_url"]
 
     async def _generate_v2_avatar(
         self,

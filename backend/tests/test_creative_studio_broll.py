@@ -2,7 +2,9 @@ import unittest
 
 from app.services.creative_studio_broll import (
     build_chapter_broll_segments,
+    is_production_setup_only_message,
     parse_broll_images,
+    parse_scene_plan,
 )
 from app.services.creative_studio_chat_service import ACTIONS
 
@@ -29,10 +31,84 @@ Strategist analysing inefficient budget blocks on a monitor.
 
 
 class BrollPlanTests(unittest.TestCase):
+    def test_production_lock_only_does_not_count_as_video_start(self):
+        lock = (
+            "TRAFFIC RADIUS — PROOF-FIRST AD (PRODUCTION LOCK ONLY)\n"
+            "Total duration: 75 seconds. Do not start Seedance yet.\n"
+            "Generate B-roll stills first.\n"
+        )
+        self.assertTrue(is_production_setup_only_message(lock))
+        chapter = "Start Seedance chapter 1 from 0:00-0:23 with native speech."
+        self.assertFalse(is_production_setup_only_message(chapter))
+
     def test_broll_batch_actions_registered(self):
         self.assertIn("generate_all_broll", ACTIONS)
         self.assertIn("regenerate_broll_image", ACTIONS)
         self.assertIn("approve_all_broll", ACTIONS)
+
+    def test_single_digit_clock_times_and_proof_cards_are_parsed(self):
+        prompt = """
+Scene 1 — 0:00–0:10
+VOICEOVER:
+"First exact proof line."
+
+VISUAL:
+Show the exact uploaded proof card full-frame with no presenter.
+
+Scene 2 — 0:10–0:23
+VOICEOVER:
+"Second exact proof line."
+
+VISUAL:
+Use @PROOF_B as the original proof image with no redraw.
+"""
+        scenes = parse_scene_plan(prompt)
+        self.assertEqual(len(scenes), 2)
+        self.assertEqual([scene["type"] for scene in scenes], ["proof", "proof"])
+        self.assertEqual(
+            [(scene["start"], scene["end"]) for scene in scenes],
+            [(0.0, 10.0), (10.0, 23.0)],
+        )
+
+    def test_chapter_two_prompt_does_not_count_no_proof_cards_as_proof_scene(self):
+        prompt = """
+SCENE 1 — 0:00–0:10 — PRESENTER
+VISUAL: Presenter on camera.
+SPEAK EXACTLY:
+"Opening line."
+
+SCENE 4 — 0:20–0:30 — PRESENTER
+VISUAL: Same presenter.
+SPEAK EXACTLY:
+"Closing line."
+
+FINAL LOCK:
+No proof cards.
+"""
+        scenes = parse_scene_plan(prompt)
+        self.assertEqual([scene["type"] for scene in scenes], ["presenter", "presenter"])
+
+    def test_broll_type_in_scene_heading_and_speak_exactly_are_parsed(self):
+        prompt = """
+SCENE 1 — 0:00–0:10 — PRESENTER
+VISUAL: Same presenter in the office.
+SPEAK EXACTLY: "Presenter line."
+
+SCENE 2 — 0:10–0:16 — B-ROLL
+VISUAL: Hands and commerce screens, no front-facing faces.
+SPEAK EXACTLY: "Campaign data line."
+
+SCENE 3 — 0:16–0:20 — PRESENTER
+VISUAL: Return to the same presenter.
+SPEAK EXACTLY: "Closing line."
+"""
+        scenes = parse_scene_plan(prompt)
+        self.assertEqual([scene["type"] for scene in scenes], ["presenter", "broll", "presenter"])
+        self.assertEqual(scenes[1]["dialogue"], "Campaign data line.")
+        self.assertEqual(
+            scenes[1]["visual"],
+            "Hands and commerce screens, no front-facing faces.",
+        )
 
     def test_parse_broll_images_reads_image_blocks(self):
         items = parse_broll_images(SAMPLE)

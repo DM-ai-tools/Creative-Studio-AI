@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # Roles safe to resubmit when BytePlus privacy filter rejects photoreal people.
-_PRIVACY_SAFE_ROLES = frozenset({"product", "logo", "scene"})
+_PRIVACY_SAFE_ROLES = frozenset({"product", "logo", "scene", "reference"})
 
 
 def reference_manifest(brief: dict, source_url: str | None) -> list[dict[str, str]]:
@@ -27,6 +27,12 @@ def reference_manifest(brief: dict, source_url: str | None) -> list[dict[str, st
     add(brief.get("logo_reference_url"), "logo")
     for asset in assets:
         if asset.get("role") == "scene":
+            add(asset.get("url"), asset["role"])
+    # Proof cards are editor-only assets. Sending them to Seedance invites the
+    # model to redraw their figures and typography; the exact originals are
+    # composited over the generated plate after narration is ready.
+    for asset in assets:
+        if asset.get("role") == "reference":
             add(asset.get("url"), asset["role"])
     for url in brief.get("additional_reference_urls") or []:
         add(url, "reference")

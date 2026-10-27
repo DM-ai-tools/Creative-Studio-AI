@@ -1,5 +1,7 @@
+import asyncio
 import io
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
@@ -7,6 +9,8 @@ from app.services.creative_studio_job_service import _seedance_segment_durations
 from app.services.logo_overlay import pad_image_bytes_for_seedance_reference
 from app.services.media.byteplus_seedance_client import (
     ark_api_key_for_model,
+    clamp_seedance_duration,
+    create_video_task,
     is_seedance_25_model,
     map_aspect_to_ratio,
     map_resolution,
@@ -21,6 +25,56 @@ class SeedanceModelTests(unittest.TestCase):
     def test_clip_cap_by_catalog_model(self):
         self.assertEqual(seedance_clip_cap_seconds("ark-seedance-2-0"), 15)
         self.assertEqual(seedance_clip_cap_seconds("ark-seedance-2-5"), 30)
+
+    def test_seedance_25_preserves_requested_whole_second_durations(self):
+        for seconds in (21, 23, 30):
+            self.assertEqual(
+                clamp_seedance_duration(
+                    seconds,
+                    max_seconds=seedance_clip_cap_seconds("ark-seedance-2-5"),
+                    model="dreamina-seedance-2-5-260628",
+                ),
+                seconds,
+            )
+        self.assertEqual(
+            clamp_seedance_duration(
+                15,
+                max_seconds=seedance_clip_cap_seconds("ark-seedance-2-0"),
+                model="dreamina-seedance-2-0-260128",
+            ),
+            15,
+        )
+
+    def test_create_task_sends_exact_seedance_25_duration(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "status_code": 200,
+                "content": b"{}",
+                "json": lambda self: {"id": "task-21"},
+                "text": "",
+            },
+        )()
+        request = AsyncMock(return_value=response)
+        with patch(
+            "app.services.media.byteplus_seedance_client.async_request_with_retry",
+            request,
+        ):
+            task_id = asyncio.run(
+                create_video_task(
+                    object(),
+                    prompt="One continuous 21-second commercial scene.",
+                    model="dreamina-seedance-2-5-260628",
+                    duration=21,
+                    ratio="1:1",
+                    resolution="1080p",
+                    generate_audio=True,
+                )
+            )
+        self.assertEqual(task_id, "task-21")
+        self.assertEqual(request.await_args.kwargs["json"]["duration"], 21)
+        self.assertEqual(request.await_args.kwargs["json"]["model"], "dreamina-seedance-2-5-260628")
 
     def test_resolve_api_models(self):
         self.assertEqual(

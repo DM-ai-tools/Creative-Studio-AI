@@ -26,6 +26,8 @@ import { heygenSettingsForApi, heygenSettingsFromApi, type HeyGenVideoSettings }
 import { Spinner } from '@/components/ui/Loading'
 import { useApi } from '@/hooks/useApi'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
+import { useAuth } from '@/hooks/useAuth'
+import { isCsSeedance25Only } from '@/lib/productScope'
 import { API_CACHE_TTL } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, variantsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
@@ -94,6 +96,8 @@ export default function BriefDetailPage() {
   const idRaw = params?.id
   const id = Array.isArray(idRaw) ? idRaw[0] : String(idRaw || '')
   const router = useRouter()
+  const { user } = useAuth()
+  const cs25Only = isCsSeedance25Only(user)
   const { setActiveBrandId } = useActiveBrand()
   const [isGenerating, setIsGenerating] = useState(false)
   const [showRegenerateModal, setShowRegenerateModal] = useState(false)
@@ -114,6 +118,10 @@ export default function BriefDetailPage() {
   const pollStartedAtRef = useRef<number | null>(null)
   const [pollTimedOut, setPollTimedOut] = useState(false)
   const [activeTab, setActiveTab] = useState<'brief' | 'creative_studio'>('brief')
+
+  useEffect(() => {
+    if (cs25Only) setActiveTab('creative_studio')
+  }, [cs25Only])
 
   const { data: catalog } = useApi(() => generationApi.getCatalog(false), [], {
     cacheKey: 'generation/catalog-v6',
@@ -344,10 +352,19 @@ export default function BriefDetailPage() {
     }
     const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
     const pdfMode = kb.script_source === 'pdf'
+    const customMode = kb.script_source === 'custom'
 
     setIsGenerating(true)
     try {
       let keyBenefitsToSave: Record<string, unknown> | null = null
+      if (customMode && approvedAvatarScript?.trim()) {
+        keyBenefitsToSave = {
+          ...kb,
+          avatar_script: approvedAvatarScript.trim(),
+          custom_prompt: approvedAvatarScript.trim(),
+          video_script_skeleton: approvedAvatarScript.trim(),
+        }
+      }
       if (wantsImageOnly && imageVariantSlots.length > 0) {
         const serialized = serializeImageVariants(imageVariantSlots)
         keyBenefitsToSave = {
@@ -593,6 +610,8 @@ export default function BriefDetailPage() {
 
   const kb = (brief.key_benefits ?? {}) as Record<string, unknown>
   const scriptFromPdf = kb.script_source === 'pdf'
+  const scriptFromCustom = kb.script_source === 'custom'
+  const simplifiedHeyGen = scriptFromPdf || scriptFromCustom
 
   return (
     <div>
@@ -636,37 +655,39 @@ export default function BriefDetailPage() {
         </div>
 
         {/* ── Tab switcher ── */}
-        <div className="flex gap-1 border-b border-border pb-0">
-          <button
-            type="button"
-            onClick={() => setActiveTab('brief')}
-            className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
-              activeTab === 'brief'
-                ? 'border-accent text-navy bg-surface-elevated'
-                : 'border-transparent text-mid hover:text-navy hover:border-border'
-            }`}
-          >
-            Project
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('creative_studio')}
-            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
-              activeTab === 'creative_studio'
-                ? 'border-accent text-navy bg-surface-elevated'
-                : 'border-transparent text-mid hover:text-navy hover:border-border'
-            }`}
-          >
-            <span className="text-[10px]">◆</span>
-            AI assistant
-            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
-              NEW
-            </span>
-          </button>
-        </div>
+        {!cs25Only && (
+          <div className="flex gap-1 border-b border-border pb-0">
+            <button
+              type="button"
+              onClick={() => setActiveTab('brief')}
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
+                activeTab === 'brief'
+                  ? 'border-accent text-navy bg-surface-elevated'
+                  : 'border-transparent text-mid hover:text-navy hover:border-border'
+              }`}
+            >
+              Project
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('creative_studio')}
+              className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
+                activeTab === 'creative_studio'
+                  ? 'border-accent text-navy bg-surface-elevated'
+                  : 'border-transparent text-mid hover:text-navy hover:border-border'
+              }`}
+            >
+              <span className="text-[10px]">◆</span>
+              AI assistant
+              <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
+                NEW
+              </span>
+            </button>
+          </div>
+        )}
 
         {/* ── Creative Studio tab panel ── */}
-        {activeTab === 'creative_studio' && (
+        {(cs25Only || activeTab === 'creative_studio') && (
           <CreativeStudioTab
             briefId={brief.id}
             brandId={brief.brand_id}
@@ -674,11 +695,12 @@ export default function BriefDetailPage() {
             brandName={brand?.name}
             productName={brief.product_name}
             initialPrompt={String((brief.key_benefits as Record<string, unknown>)?.image_prompt_override ?? '')}
+            seedance25Only={cs25Only}
           />
         )}
 
         {/* ── Brief tab panel ── */}
-        {activeTab === 'brief' && <>
+        {!cs25Only && activeTab === 'brief' && <>
         {pollTimedOut && (
           <div className="text-sm rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 space-y-2">
             <p className="font-medium text-amber-800">
@@ -758,6 +780,24 @@ export default function BriefDetailPage() {
           variantCount={Math.max(1, Number(brief.variant_count) || 1)}
         />
 
+        {scriptFromCustom && isHeyGen && (
+          <Card title="Timed script">
+            <div className="p-4 space-y-3 text-sm">
+              <p className="text-mid text-xs">
+                This brief uses your pasted script. Edit below if needed, then generate.
+              </p>
+              <textarea
+                className="w-full min-h-[200px] text-xs font-mono border border-border rounded-lg p-2 bg-light"
+                value={String(kb.avatar_script ?? kb.custom_prompt ?? '')}
+                onChange={(e) => {
+                  const next = e.target.value
+                  setApprovedAvatarScript(next)
+                }}
+              />
+            </div>
+          </Card>
+        )}
+
         {scriptFromPdf && isHeyGen && (
           <Card title="PDF script (authoritative)">
             <div className="p-4 space-y-3 text-sm">
@@ -806,17 +846,27 @@ export default function BriefDetailPage() {
 
         {isHeyGen && genSettings && (
           <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900">
-            <strong>Video production pipeline:</strong> Step 1 voice script (with stats OCR) → Step 2
-            B-roll from that script → Step 3 avatar settings → approve → click{' '}
-            <strong>{hasVariants ? 'Regenerate video' : 'Generate video'}</strong> at the top right
-            {hasVariants ? ' → confirm in the modal → Generate with these settings' : ''}. This page
-            does not use &quot;Create &amp; Generate&quot; — that is only on the new brief form.
+            {simplifiedHeyGen ? (
+              <>
+                <strong>HeyGen quick video:</strong> Script is set below. Pick avatar and voice, then
+                click <strong>{hasVariants ? 'Regenerate video' : 'Generate video'}</strong> at the top
+                right{hasVariants ? ' (confirm in the modal)' : ''}.
+              </>
+            ) : (
+              <>
+                <strong>Video production pipeline:</strong> Step 1 voice script (with stats OCR) → Step 2
+                B-roll from that script → Step 3 avatar settings → approve → click{' '}
+                <strong>{hasVariants ? 'Regenerate video' : 'Generate video'}</strong> at the top right
+                {hasVariants ? ' → confirm in the modal → Generate with these settings' : ''}.
+              </>
+            )}
           </div>
         )}
 
         {isHeyGen && genSettings && (
           <div className="space-y-4">
             <HeyGenProductionPipeline
+              simplifiedMode={simplifiedHeyGen}
               pdfScriptOnly={scriptFromPdf}
               durationSeconds={genSettings.videoDurationSeconds}
               avatarLabel={avatarLabel}

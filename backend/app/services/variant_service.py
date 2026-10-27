@@ -6,12 +6,47 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.brand import Brand
 from app.models.variant import Variant
 from app.models.performance import PerformanceRollup
 from app.schemas.variant import VariantUpdate
 
 
+LIBRARY_NO_BRAND_NAME = "No brand"
+
+
 class VariantService:
+    @staticmethod
+    async def resolve_library_brand_id(
+        db: AsyncSession, tenant_id: UUID, brand_id: UUID | None
+    ) -> UUID:
+        """Use the selected brand, or a per-tenant placeholder when none is chosen."""
+        if brand_id:
+            result = await db.execute(
+                select(Brand.id).where(Brand.id == brand_id, Brand.tenant_id == tenant_id)
+            )
+            resolved = result.scalar_one_or_none()
+            if not resolved:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Brand not found")
+            return brand_id
+        result = await db.execute(
+            select(Brand).where(
+                Brand.tenant_id == tenant_id,
+                Brand.name == LIBRARY_NO_BRAND_NAME,
+            )
+        )
+        placeholder = result.scalar_one_or_none()
+        if placeholder:
+            return placeholder.id
+        placeholder = Brand(
+            tenant_id=tenant_id,
+            name=LIBRARY_NO_BRAND_NAME,
+            industry="general",
+        )
+        db.add(placeholder)
+        await db.flush()
+        return placeholder.id
+
     @staticmethod
     async def list_variants(
         db: AsyncSession,
@@ -138,11 +173,9 @@ class VariantService:
             if not brief:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Brief not found")
         else:
-            if not brand_id:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Select a brand (or open Creative Studio from an existing brief) to save to Variants.",
-                )
+            resolved_brand_id = await VariantService.resolve_library_brand_id(
+                db, tenant_id, brand_id
+            )
             title = (brief_title or "").strip() or "Creative Studio"
             if product_name:
                 title = f"{title} — {product_name}".strip(" —")
@@ -153,7 +186,7 @@ class VariantService:
                 tenant_id,
                 user_id,
                 BriefCreate(
-                    brand_id=brand_id,
+                    brand_id=resolved_brand_id,
                     title=title[:255],
                     objective="Creative Studio scene",
                     target_audience="",
@@ -164,6 +197,7 @@ class VariantService:
                     key_benefits={
                         "media_type": "creative_studio",
                         "creative_studio": True,
+                        "unbranded_library_save": not bool(brand_id),
                     },
                 ),
             )

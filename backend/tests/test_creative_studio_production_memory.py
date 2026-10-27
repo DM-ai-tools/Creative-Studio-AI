@@ -81,6 +81,17 @@ class ProductionMemoryTests(unittest.TestCase):
         self.assertIn("provider speech is disabled", chapter)
         self.assertIn("do not speak", chapter.lower())
 
+    def test_native_presenter_chapter_has_one_unambiguous_speech_owner(self):
+        chapter = compile_locked_chapter_prompt(
+            self._memory(),
+            chapter_index=0,
+            speech_mode="native_presenter",
+        )
+        self.assertIn("Seedance owns the single spoken voice", chapter)
+        self.assertIn("natural lip sync", chapter)
+        self.assertNotIn("provider speech is disabled", chapter)
+        self.assertNotIn("must not speak", chapter)
+
     def test_reference_change_is_blocked_after_first_accepted_chapter(self):
         memory = self._memory()
         with tempfile.TemporaryDirectory() as folder, patch(

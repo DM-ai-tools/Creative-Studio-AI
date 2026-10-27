@@ -29,6 +29,14 @@ ANNIE_CATALOG = CatalogOption(
     gender="female",
 )
 
+# Verified public v3 look: Elin Presenter 1 (landscape).
+ELIN_PRESENTER_LOOK_ID = "1c5440e7cea944a6a40ff536412941c1"
+ELIN_CATALOG = CatalogOption(
+    id=ELIN_PRESENTER_LOOK_ID,
+    label="Elin Presenter 1 (Female)",
+    gender="female",
+)
+
 _HEX_ID = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
@@ -202,11 +210,19 @@ def _pin_featured_avatars(
     featured: list[CatalogOption],
     poses: list[CatalogOption],
 ) -> tuple[list[CatalogOption], list[CatalogOption]]:
-    """Keep Vespri + Annie easy to find at the top of featured looks."""
+    """Keep the preferred public presenters easy to find at the top."""
     featured = [o for o in featured if "vespri" not in o.label.lower()]
     has_vespri_poses = any("vespri" in p.label.lower() for p in poses)
     if not has_vespri_poses:
         featured.insert(0, VESPRI_CATALOG)
+
+    featured = [
+        o
+        for o in featured
+        if o.id != ELIN_PRESENTER_LOOK_ID and "elin presenter 1" not in o.label.lower()
+    ]
+    elin_at = 1 if featured and featured[0].id == VESPRI_GROUP_ID else 0
+    featured.insert(elin_at, ELIN_CATALOG)
 
     if _annie_configured():
         featured = [o for o in featured if o.id != ANNIE_OFFICE_LOOK_ID]

@@ -352,7 +352,7 @@ def burn_stats_images_on_video_file(
     *,
     segments: list[tuple[float, float]],
 ) -> None:
-    """Overlay stats dashboards as a side/top card — presenter stays visible."""
+    """Replace the picture with each original dashboard while retaining master audio."""
     if not stats_paths:
         raise ValueError("No stats images to overlay")
     if len(segments) < len(stats_paths):
@@ -361,24 +361,11 @@ def burn_stats_images_on_video_file(
     width, height = _video_dimensions(video_path)
     width, height = _even(width), _even(height)
 
-    portrait = height > width
-    if portrait:
-        # Top strip — avatar reads below the card
-        card_w = _even(int(width * 0.90))
-        card_h = _even(int(height * 0.26))
-        x_expr = "(W-w)/2"
-        y_expr = "H*0.05"
-    else:
-        # Right-side panel — presenter stays on the left
-        card_w = _even(int(width * 0.40))
-        card_h = _even(int(height * 0.50))
-        x_expr = "W-w-20"
-        y_expr = "(H-h)/2"
-
     parts: list[str] = []
     for i in range(len(stats_paths)):
         parts.append(
-            f"[{i + 1}:v]scale={card_w}:{card_h}:force_original_aspect_ratio=decrease,"
+            f"[{i + 1}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"setsar=1[stats{i}]"
         )
 
@@ -388,7 +375,7 @@ def burn_stats_images_on_video_file(
         seg_end = max(seg_start + 0.5, float(segments[i][1]))
         out_label = "[out]" if i == len(stats_paths) - 1 else f"[v{i}]"
         parts.append(
-            f"{prev}[stats{i}]overlay={x_expr}:{y_expr}:"
+            f"{prev}[stats{i}]overlay=0:0:"
             f"enable='between(t,{seg_start:.2f},{seg_end:.2f})'{out_label}"
         )
         prev = out_label
@@ -515,8 +502,25 @@ def apply_stats_overlay_to_video_file(
     if calc_dur > 0 and abs(calc_dur - dur) > 0.5:
         ratio = dur / float(calc_dur)
 
-    # Build per-image-index segments (image 0 → card 0, etc.) — never reorder by time.
-    indexed = detect_insert_stat_segments_by_image_index(script, n, duration=calc_dur)
+    # Explicit [INSERT STAT IMAGE N] ranges are authoritative. They remain exact,
+    # rather than being shortened or moved to match inferred proof timing.
+    indexed = detect_insert_stat_segments_by_image_index(
+        script,
+        n,
+        duration=calc_dur,
+        preserve_explicit_times=True,
+    )
+    if broll_script:
+        from app.services.video_script_skeleton import parse_broll_stat_insert_cues
+
+        for cue in parse_broll_stat_insert_cues(broll_script, duration=calc_dur):
+            idx = int(cue["image_index"])
+            if 0 <= idx < n:
+                indexed[idx] = (float(cue["start"]), float(cue["end"]))
+    explicit_indices = {i for i, segment in enumerate(indexed) if segment is not None}
+    explicit_segments = {
+        i: segment for i, segment in enumerate(indexed) if segment is not None
+    }
     voice_indexed = _segments_from_voice_proof_beats(
         script, n, duration=calc_dur, brief=brief
     )
@@ -535,7 +539,7 @@ def apply_stats_overlay_to_video_file(
                     max(end_sec, _hook_zone_end(dur) + MIN_STAT_SLIDE_SEC),
                 )
         s, e = seg
-        if ratio != 1.0:
+        if ratio != 1.0 and i not in explicit_indices:
             s, e = s * ratio, e * ratio
         segments.append((s, e))
 
@@ -550,6 +554,8 @@ def apply_stats_overlay_to_video_file(
         if events and phrases:
             min_start = _hook_zone_end(dur)
             for i in range(n):
+                if i in explicit_indices:
+                    continue
                 phrase = phrases.get(i, "")
                 stats = per_image[i] if i < len(per_image) else None
                 req_tokens = _distinctive_stat_tokens(stats) if stats else []
@@ -574,13 +580,22 @@ def apply_stats_overlay_to_video_file(
                     srt_matched += 1
                     min_start = win[1] + 0.1
 
-    segments = _enforce_segment_floors(
+    adjusted_segments = _enforce_segment_floors(
         [(max(0.0, min(s, dur)), max(0.0, min(e, dur))) for s, e in segments],
         script,
         calc_dur=calc_dur,
         ratio=ratio,
         dur=dur,
     )
+    # Restore every explicit range after fallback/proof-beat safeguards. These
+    # timestamps came directly from the user's production plan.
+    for i in explicit_indices:
+        s, e = explicit_segments[i]
+        adjusted_segments[i] = (
+            max(0.0, min(s, dur)),
+            max(0.0, min(e, dur)),
+        )
+    segments = adjusted_segments
     if segments:
         start_sec, end_sec = segments[0][0], segments[-1][1]
 

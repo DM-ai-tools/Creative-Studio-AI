@@ -15,8 +15,10 @@ from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
 from app.core.security import hash_password
+from app.core.product_scope import PRODUCT_SCOPE_CREATIVE_STUDIO_SEEDANCE25
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.services.auth_service import resolve_login_email
 
 
 def _slugify(value: str) -> str:
@@ -71,7 +73,7 @@ async def remove_members(emails: list[str]) -> int:
     return 0
 
 
-async def upsert_members(specs: list[str]) -> int:
+async def upsert_members(specs: list[str], *, product_scope: str | None = None) -> int:
     async with AsyncSessionLocal() as db:
         for spec in specs:
             username, separator, password = spec.partition(":")
@@ -79,10 +81,25 @@ async def upsert_members(specs: list[str]) -> int:
             if not separator or not username or not password:
                 raise ValueError("Each member must use username:password")
 
-            tenant = await _tenant_for_member(db, username)
-            result = await db.execute(select(User).where(User.email == username))
+            email = resolve_login_email(username)
+            tenant = await _tenant_for_member(db, email)
+            result = await db.execute(select(User).where(User.email == email))
             user = result.scalar_one_or_none()
-            display = username.split("@", 1)[0].replace(".", " ").title()
+            if not user and email != username:
+                legacy = await db.execute(select(User).where(User.email == username))
+                legacy_user = legacy.scalar_one_or_none()
+                if legacy_user:
+                    legacy_user.email = email
+                    user = legacy_user
+                    print(f"Migrated member email: {username} -> {email}")
+            local_part = email.split("@", 1)[0]
+            if local_part == "seedance_2.5":
+                display = "Seedance 2.5"
+            else:
+                display = local_part.replace(".", " ").replace("_", " ").title()
+            scope = product_scope
+            if local_part == "seedance_2.5":
+                scope = PRODUCT_SCOPE_CREATIVE_STUDIO_SEEDANCE25
             if user:
                 user.hashed_password = hash_password(password)
                 user.full_name = display
@@ -90,20 +107,23 @@ async def upsert_members(specs: list[str]) -> int:
                 user.tenant_id = tenant.id
                 user.is_active = True
                 user.is_verified = True
-                print(f"Updated member: {username} -> workspace {tenant.slug}")
+                if scope:
+                    user.product_scope = scope
+                print(f"Updated member: {email} -> workspace {tenant.slug} scope={user.product_scope}")
             else:
                 db.add(
                     User(
                         tenant_id=tenant.id,
-                        email=username,
+                        email=email,
                         hashed_password=hash_password(password),
                         full_name=display,
                         role="member",
+                        product_scope=scope,
                         is_active=True,
                         is_verified=True,
                     )
                 )
-                print(f"Created member: {username} -> workspace {tenant.slug}")
+                print(f"Created member: {email} -> workspace {tenant.slug} scope={scope}")
         await db.commit()
     return 0
 
@@ -122,13 +142,18 @@ def main() -> int:
         default=[],
         help="Remove a member account by email.",
     )
+    parser.add_argument(
+        "--product-scope",
+        default=None,
+        help="Optional product_scope for created/updated users (e.g. creative_studio_seedance25).",
+    )
     args = parser.parse_args()
     if not args.user and not args.remove:
         parser.error("Provide --user and/or --remove.")
     if args.remove:
         asyncio.run(remove_members(args.remove))
     if args.user:
-        return asyncio.run(upsert_members(args.user))
+        return asyncio.run(upsert_members(args.user, product_scope=args.product_scope))
     return 0
 
 

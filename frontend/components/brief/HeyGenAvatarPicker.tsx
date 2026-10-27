@@ -5,9 +5,11 @@ import Select from '@/components/ui/Select'
 import { cn } from '@/lib/utils'
 import {
   HEYGEN_ANNIE_OFFICE_AVATAR,
+  HEYGEN_ELIN_PRESENTER_AVATAR,
   buildHeyGenAvatarSelectGroups,
   flattenHeyGenAvatarSelectGroups,
   isAnnieOption,
+  isElinOption,
 } from '@/lib/heygenAvatars'
 import CreateAvatarModal from '@/components/brief/CreateAvatarModal'
 import type { GenerationCatalog } from '@/types'
@@ -36,9 +38,14 @@ export default function HeyGenAvatarPicker({
 
   const quickPicks = [
     HEYGEN_ANNIE_OFFICE_AVATAR,
+    HEYGEN_ELIN_PRESENTER_AVATAR,
     ...allOptions
-      .filter((o) => o.value !== HEYGEN_ANNIE_OFFICE_AVATAR.id)
-      .slice(0, compact ? 3 : 5)
+      .filter(
+        (o) =>
+          o.value !== HEYGEN_ANNIE_OFFICE_AVATAR.id &&
+          o.value !== HEYGEN_ELIN_PRESENTER_AVATAR.id
+      )
+      .slice(0, compact ? 2 : 4)
       .map((o) => ({ id: o.value, label: o.label })),
   ]
 
@@ -98,6 +105,7 @@ export default function HeyGenAvatarPicker({
           {quickPicks.map((opt) => {
             const selected = avatarId === opt.id
             const annie = isAnnieOption({ id: opt.id, label: opt.label })
+            const elin = isElinOption({ id: opt.id, label: opt.label })
             return (
               <button
                 key={opt.id}
@@ -109,18 +117,21 @@ export default function HeyGenAvatarPicker({
                   selected
                     ? 'border-mint bg-[rgba(0,194,168,0.12)] ring-2 ring-mint/40'
                     : 'border-border bg-white hover:border-mint/50',
-                  annie && !selected && 'border-mint/40 bg-mint/[0.04]',
+                  (annie || elin) && !selected && 'border-mint/40 bg-mint/[0.04]',
                   disabled && 'opacity-50 cursor-not-allowed'
                 )}
               >
                 <span className="block font-bold text-navy leading-tight">
-                  {annie ? '★ Annie' : opt.label.split(' — ').pop() || opt.label}
+                  {annie ? '★ Annie' : elin ? '★ Elin' : opt.label.split(' — ').pop() || opt.label}
                 </span>
                 {!annie && opt.label.includes(' — ') && (
                   <span className="block text-[10px] text-mid truncate">{opt.label}</span>
                 )}
                 {annie && (
                   <span className="block text-[10px] text-mid">Office standing front</span>
+                )}
+                {elin && (
+                  <span className="block text-[10px] text-mid">Presenter 1 · landscape</span>
                 )}
               </button>
             )

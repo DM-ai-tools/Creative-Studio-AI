@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 import type { User } from '@/types'
 import { BrandMark } from '@/components/brand/BrandMark'
 import { UI } from '@/lib/uiLabels'
+import { isCsSeedance25WorkspaceUser } from '@/lib/productScope'
 import {
   IconDashboard,
   IconPalette,
@@ -168,8 +169,8 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Partner — only when expanded, minimal */}
-      {!collapsed && (
+      {/* Partner — hidden for Seedance 2.5–only accounts */}
+      {!collapsed && !isCsSeedance25WorkspaceUser(user) && (
         <div className="px-3 pt-3 pb-1">
           <p className="text-[9px] font-semibold text-white/25 uppercase tracking-[0.1em] mb-1.5 px-0.5">
             Powered by
@@ -205,17 +206,26 @@ export default function Sidebar({
       <nav className="flex-1 overflow-y-auto overflow-x-hidden py-2">
         {(() => {
           const isAdmin = user.role === 'admin'
+          const cs25 = isCsSeedance25WorkspaceUser(user)
+          const workspaceItems = cs25
+            ? workspaceNav.filter((item) =>
+                ['/brand-kit', '/briefs', '/variants'].includes(item.href),
+              )
+            : workspaceNav
+          const performanceItems = cs25 ? [] : performanceNav
           const accountItems = isAdmin ? accountNav : []
           const collapsedItems = isAdmin
             ? allNav
-            : [...workspaceNav, ...performanceNav]
+            : [...workspaceItems, ...performanceItems]
           if (collapsed) {
             return <NavGroup title="" items={collapsedItems} collapsed />
           }
           return (
             <>
-              <NavGroup title="Workspace" items={workspaceNav} />
-              <NavGroup title="Analytics" items={performanceNav} />
+              <NavGroup title="Workspace" items={workspaceItems} />
+              {performanceItems.length > 0 && (
+                <NavGroup title="Analytics" items={performanceItems} />
+              )}
               {accountItems.length > 0 && (
                 <NavGroup title="Account" items={accountItems} />
               )}

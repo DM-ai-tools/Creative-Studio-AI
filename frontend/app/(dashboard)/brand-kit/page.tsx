@@ -7,6 +7,7 @@ import Topbar from '@/components/layout/Topbar'
 import BrandKitPreview from '@/components/brand-kit/BrandKitPreview'
 import LogoUploadZone from '@/components/brand-kit/LogoUploadZone'
 import ReferenceImagesGallery from '@/components/brand-kit/ReferenceImagesGallery'
+import WebsiteBrandFetchBlock from '@/components/brand-kit/WebsiteBrandFetchBlock'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import TextArea from '@/components/ui/TextArea'
@@ -395,6 +396,7 @@ export default function BrandKitPage() {
   const [isUploadingLogo, setIsUploadingLogo] = useState(false)
   const [isUploadingLogoLight, setIsUploadingLogoLight] = useState(false)
   const [isCreatingNew, setIsCreatingNew] = useState(false)
+  const [referenceGalleryKey, setReferenceGalleryKey] = useState(0)
 
   const { register, handleSubmit, reset, watch } = useForm<BrandKitForm>()
   const watched = watch()
@@ -774,6 +776,23 @@ export default function BrandKitPage() {
                 description="Core metadata used across briefs, exports, and compliance checks."
               >
                 <div className="space-y-5 flex-1 flex flex-col">
+                  <WebsiteBrandFetchBlock
+                    brands={brands}
+                    industryOverride={watched.industry}
+                    onBrandSaved={async (savedBrand) => {
+                      setBrands((prev) => {
+                        const idx = prev.findIndex((b) => b.id === savedBrand.id)
+                        if (idx >= 0) {
+                          const next = [...prev]
+                          next[idx] = { ...prev[idx], ...savedBrand }
+                          return next
+                        }
+                        return [...prev, savedBrand]
+                      })
+                      await loadBrand(savedBrand)
+                      setReferenceGalleryKey((k) => k + 1)
+                    }}
+                  />
                   <Input label="Brand name" placeholder="Click Trends" {...register('name')} />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
                     <Select
@@ -834,6 +853,7 @@ export default function BrandKitPage() {
                   <ReferenceImagesGallery
                     brandId={activeBrand.id}
                     brandName={activeBrand.name}
+                    reloadKey={referenceGalleryKey}
                   />
                 ) : (
                   <p className="text-sm text-mid">

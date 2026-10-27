@@ -9,6 +9,15 @@ export const HEYGEN_ANNIE_OFFICE_AVATAR: CatalogOption = {
   gender: 'female',
 }
 
+/** Public HeyGen look id — Elin Presenter 1 (landscape). */
+export const HEYGEN_ELIN_PRESENTER_AVATAR_ID = '1c5440e7cea944a6a40ff536412941c1'
+
+export const HEYGEN_ELIN_PRESENTER_AVATAR: CatalogOption = {
+  id: HEYGEN_ELIN_PRESENTER_AVATAR_ID,
+  label: 'Elin Presenter 1 (Female)',
+  gender: 'female',
+}
+
 /** Public HeyGen look id — Vespri (from app.heygen.com avatars/looks/public). */
 export const HEYGEN_VESPRI_AVATAR_ID = '25777ee579284b9d9081bc95c49c5f00'
 
@@ -31,6 +40,13 @@ export function isAnnieLabel(label: string): boolean {
 
 export function isAnnieOption(option: CatalogOption): boolean {
   return option.id === HEYGEN_ANNIE_OFFICE_AVATAR_ID || isAnnieLabel(option.label)
+}
+
+export function isElinOption(option: CatalogOption): boolean {
+  return (
+    option.id === HEYGEN_ELIN_PRESENTER_AVATAR_ID ||
+    option.label.toLowerCase().includes('elin presenter 1')
+  )
 }
 
 export function isVespriLabel(label: string): boolean {
@@ -69,6 +85,12 @@ export function ensureAnnieInFeatured(featured: CatalogOption[]): CatalogOption[
   return [HEYGEN_ANNIE_OFFICE_AVATAR, ...without]
 }
 
+/** Always surface the verified Elin Presenter 1 look in the picker. */
+export function ensureElinInFeatured(featured: CatalogOption[]): CatalogOption[] {
+  const without = featured.filter((o) => o.id !== HEYGEN_ELIN_PRESENTER_AVATAR_ID)
+  return [HEYGEN_ELIN_PRESENTER_AVATAR, ...without]
+}
+
 /** Featured looks first (Annie + Vespri guaranteed), then pose library for dropdowns. */
 export function resolveHeyGenAvatarCatalog(catalog?: Pick<
   GenerationCatalog,
@@ -89,6 +111,7 @@ export function resolveHeyGenAvatarCatalog(catalog?: Pick<
       (o) => !isVespriLabel(o.label) && o.id !== HEYGEN_VESPRI_AVATAR_ID
     )
   }
+  featured = ensureElinInFeatured(featured)
   featured = ensureAnnieInFeatured(featured)
   const mergedAll = [
     ...featured,
@@ -96,6 +119,9 @@ export function resolveHeyGenAvatarCatalog(catalog?: Pick<
   ]
   if (!mergedAll.some((o) => o.id === HEYGEN_ANNIE_OFFICE_AVATAR_ID)) {
     mergedAll.unshift(HEYGEN_ANNIE_OFFICE_AVATAR)
+  }
+  if (!mergedAll.some((o) => o.id === HEYGEN_ELIN_PRESENTER_AVATAR_ID)) {
+    mergedAll.splice(1, 0, HEYGEN_ELIN_PRESENTER_AVATAR)
   }
   return { featured, poses, all: mergedAll }
 }

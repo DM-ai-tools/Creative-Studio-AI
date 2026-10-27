@@ -6,9 +6,9 @@ Deploy Creative Studio AI to a single Ubuntu EC2 instance with Docker, nginx, Po
 
 | Service | URL |
 |---------|-----|
-| App | http://13.235.37.173 |
-| API | http://13.235.37.173/api/v1 |
-| Health | http://13.235.37.173/health |
+| App | https://creativestudio.tools |
+| API | https://creativestudio.tools/api/v1 |
+| Health | https://creativestudio.tools/health |
 | API docs | http://13.235.37.173/docs |
 
 Replace the IP with your domain when you attach one (`PUBLIC_ORIGIN` / `CORS_ORIGINS`).

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.product_scope import require_full_studio_access
 from app.core.security import get_current_user
 from app.schemas.variant import VariantResponse, VariantUpdate, slim_generation_params_for_list
 from app.services.ai_service import ai_service
@@ -161,6 +162,7 @@ async def fix_variant_portrait(
     db: AsyncSession = Depends(get_db),
 ):
     """Re-process an existing reel/video to 1080x1920 (removes HeyGen letterboxing)."""
+    require_full_studio_access(current_user)
     import asyncio
 
     from app.services.video_portrait import normalize_video_file, should_normalize_format
@@ -210,6 +212,7 @@ async def regenerate_variant_image(
     Retry ONLY this variant's image — keeps copy/hook/CTA and does not touch other variants.
     Runs in the background; poll the variant until status is READY or FAILED.
     """
+    require_full_studio_access(current_user)
     variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
     if variant.format in {"reel", "video"}:
         raise HTTPException(
@@ -249,6 +252,7 @@ async def regenerate_variant(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    require_full_studio_access(current_user)
     variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
     brief = await BriefService.get_brief(db, variant.brief_id, current_user.tenant_id)
     brand = await BrandService.get_brand(db, variant.brand_id, current_user.tenant_id)

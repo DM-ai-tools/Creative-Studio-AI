@@ -26,6 +26,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     role: str
+    product_scope: Optional[str] = None
     tenant_id: Optional[UUID]
     tenant_name: Optional[str] = None
     is_active: bool

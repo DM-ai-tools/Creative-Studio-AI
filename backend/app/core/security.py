@@ -76,3 +76,10 @@ async def require_admin(current_user=Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+async def require_full_studio_user(current_user=Depends(get_current_user)):
+    from app.core.product_scope import require_full_studio_access
+
+    require_full_studio_access(current_user)
+    return current_user

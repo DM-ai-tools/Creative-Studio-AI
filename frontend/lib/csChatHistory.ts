@@ -42,7 +42,7 @@ export interface CsChatAttachment {
   url: string
   previewUrl?: string
   mime?: string
-  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference'
+  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof'
 }
 
 export interface CsChatMessage {
@@ -90,6 +90,9 @@ export interface CsChatSession {
   title: string
   updatedAt: number
   createdAt: number
+  /** localStorage bucket (set when loading merged workspace history). */
+  historyBrandId?: string
+  historyBriefId?: string
   messages: CsChatMessage[]
   imagePrompt: string
   videoPrompt: string
@@ -107,25 +110,90 @@ export interface CsChatSession {
   cloneCount: number
 }
 
-function scopeKey(briefId?: string, brandId?: string) {
-  // Explicit prefixes prevent a brief id, brand id, and draft workspace from
-  // ever sharing the same browser-storage namespace.
-  if (brandId) return `brand:${brandId}`
-  if (briefId) return `brief:${briefId}`
-  return 'draft'
+/** Per user + tenant workspace (never shared across logins). */
+export type CsHistoryScope = {
+  userId: string
+  tenantId?: string
+  briefId?: string
+  brandId?: string
+  /** Server has no briefs/variants yet — drop any leaked browser history once. */
+  freshWorkspace?: boolean
 }
 
-export function csHistoryStoreKey(briefId?: string, brandId?: string) {
-  return `cs-chat-history-v2:${scopeKey(briefId, brandId)}`
+export function csHistoryScope(
+  userId: string | null | undefined,
+  briefId?: string,
+  brandId?: string,
+  options?: { tenantId?: string | null; freshWorkspace?: boolean },
+): CsHistoryScope {
+  return {
+    userId: (userId || '').trim() || 'anonymous',
+    tenantId: (options?.tenantId || '').trim() || undefined,
+    briefId: briefId || undefined,
+    brandId: brandId || undefined,
+    freshWorkspace: Boolean(options?.freshWorkspace),
+  }
 }
 
-export function csActiveChatKey(briefId?: string, brandId?: string) {
-  return `cs-chat-active-v2:${scopeKey(briefId, brandId)}`
+function scopeSegment(scope: CsHistoryScope): string {
+  const uid = scope.userId.trim() || 'anonymous'
+  const tenant = scope.tenantId ? `:t:${scope.tenantId}` : ''
+  if (scope.brandId) return `u:${uid}${tenant}:brand:${scope.brandId}`
+  if (scope.briefId) return `u:${uid}${tenant}:brief:${scope.briefId}`
+  return `u:${uid}${tenant}:draft`
+}
+
+export function csHistoryStoreKey(scope: CsHistoryScope) {
+  return `cs-chat-history-v4:${scopeSegment(scope)}`
+}
+
+export function csActiveChatKey(scope: CsHistoryScope) {
+  return `cs-chat-active-v4:${scopeSegment(scope)}`
 }
 
 /** Legacy single-thread key from earlier Supercomputer build. */
-export function csLegacyThreadKey(briefId?: string, brandId?: string) {
-  return `cs-supercomputer-chat-v3:${scopeKey(briefId, brandId)}`
+export function csLegacyThreadKey(scope: CsHistoryScope) {
+  return `cs-supercomputer-chat-v4:${scopeSegment(scope)}`
+}
+
+/** Pre-tenant v3 key (same user id only — never import shared v2 buckets). */
+function priorUserStoreKey(scope: CsHistoryScope): string {
+  const uid = scope.userId.trim()
+  if (scope.brandId) return `cs-chat-history-v3:u:${uid}:brand:${scope.brandId}`
+  if (scope.briefId) return `cs-chat-history-v3:u:${uid}:brief:${scope.briefId}`
+  return `cs-chat-history-v3:u:${uid}:draft`
+}
+
+function priorUserActiveKey(scope: CsHistoryScope): string {
+  const uid = scope.userId.trim()
+  if (scope.brandId) return `cs-chat-active-v3:u:${uid}:brand:${scope.brandId}`
+  if (scope.briefId) return `cs-chat-active-v3:u:${uid}:brief:${scope.briefId}`
+  return `cs-chat-active-v3:u:${uid}:draft`
+}
+
+function freshIsolationKey(scope: CsHistoryScope): string {
+  return `cs-chat-isolated-v1:${scope.userId}:${scope.tenantId || 'tenant'}`
+}
+
+function purgeAllChatKeysForUser(userId: string) {
+  if (typeof localStorage === 'undefined' || !userId) return
+  try {
+    const prefixes = [
+      `cs-chat-history-v3:u:${userId}`,
+      `cs-chat-history-v4:u:${userId}`,
+      `cs-chat-active-v3:u:${userId}`,
+      `cs-chat-active-v4:u:${userId}`,
+    ]
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (!key) continue
+      if (prefixes.some((p) => key.startsWith(p))) {
+        localStorage.removeItem(key)
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function uid() {
@@ -194,47 +262,269 @@ function parseStoredSessions(raw: string | null): CsChatSession[] {
     }))
 }
 
-function v1ScopeKey(briefId?: string, brandId?: string) {
-  return brandId || briefId || 'draft'
-}
-
-export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSession[] {
-  try {
-    const currentKey = csHistoryStoreKey(briefId, brandId)
-    const oldScope = v1ScopeKey(briefId, brandId)
-    const legacyKey = `cs-chat-history-v1:${oldScope}`
-    const current = parseStoredSessions(localStorage.getItem(currentKey))
-    // Restore only this exact brand's old history. Never import the shared
-    // draft bucket into a selected brand, which caused the cross-brand leak.
-    const legacy = parseStoredSessions(localStorage.getItem(legacyKey))
-    const merged = new Map<string, CsChatSession>()
-    for (const session of [...current, ...legacy]) {
+function mergeSessionLists(...lists: CsChatSession[][]): CsChatSession[] {
+  const merged = new Map<string, CsChatSession>()
+  for (const list of lists) {
+    for (const session of list) {
       const existing = merged.get(session.id)
-      if (!existing || session.updatedAt > existing.updatedAt) merged.set(session.id, session)
-    }
-    const sessions = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt)
-    if (legacy.length) {
-      saveCsChatSessions(briefId, brandId, sessions)
-      const savedIds = new Set(
-        parseStoredSessions(localStorage.getItem(currentKey)).map((session) => session.id),
-      )
-      if (sessions.every((session) => savedIds.has(session.id))) {
-        const legacyActive = localStorage.getItem(`cs-chat-active-v1:${oldScope}`)
-        if (legacyActive && savedIds.has(legacyActive)) {
-          localStorage.setItem(csActiveChatKey(briefId, brandId), legacyActive)
-        }
-        localStorage.removeItem(legacyKey)
-        localStorage.removeItem(`cs-chat-active-v1:${oldScope}`)
+      if (!existing || session.updatedAt > existing.updatedAt) {
+        merged.set(session.id, session)
       }
     }
-    if (sessions.length) return sessions
+  }
+  return Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+function targetScopeFromLegacySuffix(
+  base: CsHistoryScope,
+  suffix: string,
+): CsHistoryScope {
+  const scope: CsHistoryScope = {
+    ...base,
+    brandId: undefined,
+    briefId: undefined,
+  }
+  if (suffix === 'draft') return scope
+  if (suffix.startsWith('brand:')) {
+    scope.brandId = suffix.slice('brand:'.length)
+    return scope
+  }
+  if (suffix.startsWith('brief:')) {
+    scope.briefId = suffix.slice('brief:'.length)
+    return scope
+  }
+  return scope
+}
+
+/** One-time: copy old shared v2/v1 browser buckets into this user's v4 (established accounts only). */
+function importLegacySharedBucketsOnce(base: CsHistoryScope) {
+  if (base.freshWorkspace || typeof localStorage === 'undefined') return
+  const claimKey = `cs-chat-legacy-imported-v3:${base.userId}`
+  if (localStorage.getItem(claimKey)) return
+
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (
+        key?.startsWith('cs-chat-history-v2:') ||
+        key?.startsWith('cs-chat-history-v1:')
+      ) {
+        keys.push(key)
+      }
+    }
+    for (const key of keys) {
+      const prefix = key.startsWith('cs-chat-history-v2:')
+        ? 'cs-chat-history-v2:'
+        : 'cs-chat-history-v1:'
+      const suffix = key.slice(prefix.length)
+      const target = targetScopeFromLegacySuffix(base, suffix)
+      const incoming = parseStoredSessions(localStorage.getItem(key))
+      if (!incoming.length) continue
+      const existing = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(target)))
+      saveCsChatSessions(target, mergeSessionLists(existing, incoming))
+    }
+    localStorage.setItem(claimKey, '1')
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Copy all v3 per-user keys (pre-tenant) into matching v4 scopes. */
+function migrateAllPriorUserStores(base: CsHistoryScope) {
+  if (base.freshWorkspace || typeof localStorage === 'undefined') return
+  const prefix = `cs-chat-history-v3:u:${base.userId}:`
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (!key?.startsWith(prefix)) continue
+      const suffix = key.slice(prefix.length)
+      const target = targetScopeFromLegacySuffix(base, suffix)
+      const incoming = parseStoredSessions(localStorage.getItem(key))
+      if (!incoming.length) continue
+      const existing = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(target)))
+      saveCsChatSessions(target, mergeSessionLists(existing, incoming))
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+export function sessionStorageScope(
+  base: CsHistoryScope,
+  session: Pick<CsChatSession, 'historyBrandId' | 'historyBriefId'>,
+): CsHistoryScope {
+  return csHistoryScope(
+    base.userId,
+    session.historyBriefId ?? base.briefId,
+    session.historyBrandId ?? base.brandId,
+    { tenantId: base.tenantId, freshWorkspace: base.freshWorkspace },
+  )
+}
+
+function listV4HistoryStoreKeys(scope: CsHistoryScope): string[] {
+  if (typeof localStorage === 'undefined') return []
+  const uid = scope.userId.trim()
+  const prefix = scope.tenantId
+    ? `cs-chat-history-v4:u:${uid}:t:${scope.tenantId}:`
+    : `cs-chat-history-v4:u:${uid}:`
+  const keys: string[] = []
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key?.startsWith(prefix)) keys.push(key)
+    }
+  } catch {
+    /* ignore */
+  }
+  return keys
+}
+
+function scopeFromV4StoreKey(storeKey: string, base: CsHistoryScope): CsHistoryScope {
+  const segment = storeKey.replace('cs-chat-history-v4:', '')
+  const draftMatch = segment.match(/^u:[^:]+(?::t:[^:]+)?:draft$/)
+  if (draftMatch) {
+    return csHistoryScope(base.userId, undefined, undefined, {
+      tenantId: base.tenantId,
+      freshWorkspace: base.freshWorkspace,
+    })
+  }
+  const brandMatch = segment.match(/^u:[^:]+(?::t:[^:]+)?:brand:(.+)$/)
+  if (brandMatch) {
+    return csHistoryScope(base.userId, undefined, brandMatch[1], {
+      tenantId: base.tenantId,
+      freshWorkspace: base.freshWorkspace,
+    })
+  }
+  const briefMatch = segment.match(/^u:[^:]+(?::t:[^:]+)?:brief:(.+)$/)
+  if (briefMatch) {
+    return csHistoryScope(base.userId, briefMatch[1], undefined, {
+      tenantId: base.tenantId,
+      freshWorkspace: base.freshWorkspace,
+    })
+  }
+  return base
+}
+
+function tagSessionsWithStoreScope(
+  storeKey: string,
+  sessions: CsChatSession[],
+  base: CsHistoryScope,
+): CsChatSession[] {
+  const bucket = scopeFromV4StoreKey(storeKey, base)
+  return sessions.map((s) => ({
+    ...s,
+    historyBrandId: bucket.brandId,
+    historyBriefId: bucket.briefId,
+  }))
+}
+
+function prepareCsChatStorage(scope: CsHistoryScope) {
+  if (!scope.userId || scope.userId === 'anonymous') return
+
+  if (scope.freshWorkspace) {
+    try {
+      if (!localStorage.getItem(freshIsolationKey(scope))) {
+        purgeAllChatKeysForUser(scope.userId)
+        localStorage.setItem(freshIsolationKey(scope), '1')
+      }
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+
+  importLegacySharedBucketsOnce(scope)
+  migrateAllPriorUserStores(scope)
+}
+
+/** All chats for this user + tenant (every brand / draft bucket). */
+export function loadCsChatSessionsWorkspace(scope: CsHistoryScope): CsChatSession[] {
+  if (!scope.userId || scope.userId === 'anonymous') return []
+
+  prepareCsChatStorage(scope)
+
+  const keys = listV4HistoryStoreKeys(scope)
+  if (keys.length) {
+    const lists = keys.map((key) =>
+      tagSessionsWithStoreScope(
+        key,
+        parseStoredSessions(localStorage.getItem(key)),
+        scope,
+      ),
+    )
+    return mergeSessionLists(...lists)
+  }
+
+  return loadCsChatSessions(scope)
+}
+
+export function persistCsChatSession(scope: CsHistoryScope, session: CsChatSession) {
+  if (!scope.userId || scope.userId === 'anonymous') return
+  const storeScope = sessionStorageScope(scope, session)
+  const bucket = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(storeScope)))
+  saveCsChatSessions(storeScope, upsertCsChatSession(storeScope, session, bucket))
+}
+
+export function removeCsChatSession(scope: CsHistoryScope, session: CsChatSession) {
+  if (!scope.userId || scope.userId === 'anonymous') return
+  const storeScope = sessionStorageScope(scope, session)
+  const bucket = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(storeScope)))
+  saveCsChatSessions(
+    storeScope,
+    bucket.filter((s) => s.id !== session.id),
+  )
+}
+
+export function findWorkspaceActiveChatId(scope: CsHistoryScope): string | null {
+  const direct = getCsActiveChatId(scope)
+  if (direct) return direct
+  for (const key of listV4HistoryStoreKeys(scope)) {
+    const bucketScope = scopeFromV4StoreKey(key, scope)
+    const active = getCsActiveChatId(bucketScope)
+    if (active) return active
+  }
+  return null
+}
+
+function migratePriorUserStore(scope: CsHistoryScope): CsChatSession[] {
+  try {
+    const prior = parseStoredSessions(localStorage.getItem(priorUserStoreKey(scope)))
+    if (!prior.length) return []
+    saveCsChatSessions(scope, prior)
+    const active = localStorage.getItem(priorUserActiveKey(scope))
+    if (active && prior.some((s) => s.id === active)) {
+      setCsActiveChatId(scope, active)
+    }
+    return prior
+  } catch {
+    return []
+  }
+}
+
+export function loadCsChatSessions(scope: CsHistoryScope): CsChatSession[] {
+  if (!scope.userId || scope.userId === 'anonymous') return []
+
+  prepareCsChatStorage(scope)
+
+  try {
+    const current = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(scope)))
+    if (current.length) {
+      return current.sort((a, b) => b.updatedAt - a.updatedAt)
+    }
   } catch {
     /* ignore */
   }
 
-  // Migrate one-off sessionStorage thread if present
+  if (!scope.freshWorkspace) {
+    const migrated = migratePriorUserStore(scope)
+    if (migrated.length) {
+      return migrated.sort((a, b) => b.updatedAt - a.updatedAt)
+    }
+  }
+
   try {
-    const legacy = sessionStorage.getItem(csLegacyThreadKey(briefId, brandId))
+    const legacy = sessionStorage.getItem(csLegacyThreadKey(scope))
     if (legacy) {
       const parsed = JSON.parse(legacy)
       const messages = Array.isArray(parsed)
@@ -250,8 +540,8 @@ export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSe
         session.approvedImageUrl = String(parsed?.approvedImageUrl || '')
         session.characterReferenceUrl = String(parsed?.characterReferenceUrl || '')
         session.phase = String(parsed?.phase || '')
-        saveCsChatSessions(briefId, brandId, [session])
-        setCsActiveChatId(briefId, brandId, session.id)
+        saveCsChatSessions(scope, [session])
+        setCsActiveChatId(scope, session.id)
         return [session]
       }
     }
@@ -262,52 +552,41 @@ export function loadCsChatSessions(briefId?: string, brandId?: string): CsChatSe
   return []
 }
 
-export function saveCsChatSessions(
-  briefId: string | undefined,
-  brandId: string | undefined,
-  sessions: CsChatSession[],
-) {
+export function saveCsChatSessions(scope: CsHistoryScope, sessions: CsChatSession[]) {
+  if (!scope.userId || scope.userId === 'anonymous') return
   try {
-    const complete = sessions
-      .slice()
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-    const key = csHistoryStoreKey(briefId, brandId)
-    // Preserve every session and every message. There is no application-level
-    // count cap and saving a new chat never deletes an older one.
-    localStorage.setItem(key, JSON.stringify(complete))
+    const complete = sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
+    localStorage.setItem(csHistoryStoreKey(scope), JSON.stringify(complete))
   } catch {
     /* quota */
   }
 }
 
-export function getCsActiveChatId(briefId?: string, brandId?: string): string | null {
+export function getCsActiveChatId(scope: CsHistoryScope): string | null {
+  if (!scope.userId || scope.userId === 'anonymous') return null
   try {
-    return localStorage.getItem(csActiveChatKey(briefId, brandId))
+    return localStorage.getItem(csActiveChatKey(scope))
   } catch {
     return null
   }
 }
 
-export function setCsActiveChatId(
-  briefId: string | undefined,
-  brandId: string | undefined,
-  chatId: string,
-) {
+export function setCsActiveChatId(scope: CsHistoryScope, chatId: string) {
+  if (!scope.userId || scope.userId === 'anonymous') return
   try {
-    localStorage.setItem(csActiveChatKey(briefId, brandId), chatId)
+    localStorage.setItem(csActiveChatKey(scope), chatId)
   } catch {
     /* ignore */
   }
 }
 
 export function upsertCsChatSession(
-  briefId: string | undefined,
-  brandId: string | undefined,
+  scope: CsHistoryScope,
   session: CsChatSession,
   all: CsChatSession[],
 ): CsChatSession[] {
   const next = all.filter((s) => s.id !== session.id)
   next.unshift({ ...session, updatedAt: Date.now() })
-  saveCsChatSessions(briefId, brandId, next)
+  saveCsChatSessions(scope, next)
   return next
 }

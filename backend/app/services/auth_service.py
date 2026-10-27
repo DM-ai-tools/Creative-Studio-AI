@@ -3,19 +3,33 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
+from app.models.brief import Brief
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.variant import Variant
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 
 
 def _slugify_company(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")[:80]
     return slug or "workspace"
+
+
+async def _tenant_workspace_counts(db: AsyncSession, tenant_id: UUID | None) -> tuple[int, int]:
+    if not tenant_id:
+        return 0, 0
+    brief_q = await db.execute(
+        select(func.count()).select_from(Brief).where(Brief.tenant_id == tenant_id)
+    )
+    variant_q = await db.execute(
+        select(func.count()).select_from(Variant).where(Variant.tenant_id == tenant_id)
+    )
+    return int(brief_q.scalar() or 0), int(variant_q.scalar() or 0)
 
 
 async def _user_response(db: AsyncSession, user: User, **extra) -> UserResponse:
@@ -26,6 +40,10 @@ async def _user_response(db: AsyncSession, user: User, **extra) -> UserResponse:
         tenant_name = result.scalar_one_or_none()
     else:
         tenant_name = None
+    if "brief_count" not in extra or "variant_count" not in extra:
+        brief_count, variant_count = await _tenant_workspace_counts(db, user.tenant_id)
+        extra.setdefault("brief_count", brief_count)
+        extra.setdefault("variant_count", variant_count)
     data = UserResponse.model_validate(user)
     return data.model_copy(update={"tenant_name": tenant_name, **extra})
 
@@ -39,12 +57,34 @@ async def _build_token_response(db: AsyncSession, user: User) -> TokenResponse:
     )
 
 
-def _resolve_login_email(identifier: str) -> str:
-    if "@" in identifier:
-        return identifier.strip().lower()
-    if identifier.strip().lower() == "admin":
+def resolve_login_email(identifier: str) -> str:
+    """Canonical email for login / member upsert (username aliases → full email)."""
+    raw = (identifier or "").strip()
+    if "@" in raw:
+        return raw.lower()
+    key = raw.lower()
+    if key == "admin":
         return settings.ADMIN_EMAIL.lower()
-    return identifier.strip().lower()
+    if key == "seedance_2.5":
+        return "seedance_2.5@creativestudio.tools"
+    return key
+
+
+def login_email_candidates(identifier: str) -> list[str]:
+    """Try canonical alias first, then literal stored email (legacy upserts)."""
+    raw = (identifier or "").strip().lower()
+    if not raw:
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in (resolve_login_email(identifier), raw):
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+_resolve_login_email = resolve_login_email  # backwards compat for internal refs
 
 
 class AuthService:
@@ -115,9 +155,12 @@ class AuthService:
 
     @staticmethod
     async def login(db: AsyncSession, data: LoginRequest) -> TokenResponse:
-        email = _resolve_login_email(data.email)
-        result = await db.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
+        user = None
+        for email in login_email_candidates(data.email):
+            result = await db.execute(select(User).where(User.email == email))
+            user = result.scalar_one_or_none()
+            if user:
+                break
         if not user or not verify_password(data.password, user.hashed_password):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
         if not user.is_active:

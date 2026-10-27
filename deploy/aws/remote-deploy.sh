@@ -26,6 +26,20 @@ mv /tmp/deploy.env "$REMOTE_ROOT/deploy/aws/.env"
 
 cd "$REMOTE_ROOT"
 
+PUBLIC_ORIGIN="$(grep -E '^PUBLIC_ORIGIN=' deploy/aws/.env | head -1 | cut -d= -f2- | tr -d '\"')"
+PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-http://13.235.37.173}"
+DOMAIN="$(grep -E '^DOMAIN=' deploy/aws/.env | head -1 | cut -d= -f2- | tr -d '\"')"
+DOMAIN="${DOMAIN:-creativestudio.tools}"
+CERT_FILE="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+mkdir -p deploy/aws/certbot-www deploy/aws/nginx
+if sudo test -f "$CERT_FILE"; then
+  cp deploy/aws/nginx/default.ssl.conf deploy/aws/nginx/active.conf
+  echo "Using HTTPS nginx config (certificate present)."
+else
+  cp deploy/aws/nginx/default.bootstrap.conf deploy/aws/nginx/active.conf
+  echo "Using HTTP bootstrap nginx config (no certificate yet)."
+fi
+
 if grep -q '^APP_ENV=' backend/.env; then
   sed -i 's/^APP_ENV=.*/APP_ENV=production/' backend/.env
 else
@@ -44,7 +58,21 @@ sudo docker compose -f deploy/aws/docker-compose.prod.yml ps
 
 sleep 5
 if curl -sf http://127.0.0.1/health; then
-  echo " health OK"
+  echo " HTTP health OK"
 else
-  echo " health check failed (containers may still be starting)"
+  echo " HTTP health check failed (containers may still be starting)"
+fi
+
+if sudo test -f "$CERT_FILE"; then
+  NGINX_PORTS="$(sudo docker ps --format '{{.Ports}}' --filter name=creativestudio_nginx)"
+  if ! grep -q '443' <<<"$NGINX_PORTS"; then
+    echo "ERROR: Let's Encrypt cert exists but nginx is not publishing port 443."
+    echo "       Fix deploy/aws/docker-compose.prod.yml (443:443 + cert volumes) and redeploy."
+    exit 1
+  fi
+  if curl -sfk "https://127.0.0.1/health" -H "Host: ${DOMAIN}" >/dev/null; then
+    echo " HTTPS health OK"
+  else
+    echo "WARNING: HTTPS health check failed — run: bash deploy/aws/setup-ssl.sh"
+  fi
 fi

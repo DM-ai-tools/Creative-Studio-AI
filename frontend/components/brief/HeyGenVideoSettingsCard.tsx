@@ -43,8 +43,10 @@ interface HeyGenVideoSettingsCardProps {
   durationOptions: { id: string; label: string }[]
   /** Campaign fields used to generate visual cues with Claude */
   campaignContext?: HeyGenCampaignContext
-  /** When true, only avatar / voice / duration (PDF supplies full script). */
+  /** When true, only avatar / voice / duration (paste script or PDF supplies full script). */
   pdfScriptOnly?: boolean
+  /** Alias for pdfScriptOnly — simplified HeyGen flow without B-roll stepper. */
+  simplifiedMode?: boolean
   /** Which section to render in the production pipeline */
   section?: 'all' | 'avatar' | 'broll'
   /** Step badge number shown on the card */
@@ -75,11 +77,13 @@ export default function HeyGenVideoSettingsCard({
   durationOptions,
   campaignContext,
   pdfScriptOnly = false,
+  simplifiedMode = false,
   section = 'all',
   stepNumber = 7,
   statsImageCount = 0,
   performanceStats,
 }: HeyGenVideoSettingsCardProps) {
+  const compact = simplifiedMode || pdfScriptOnly
   const patch = (partial: Partial<HeyGenVideoSettings>) => onChange({ ...settings, ...partial })
   const [generatingVisualCues, setGeneratingVisualCues] = useState(false)
   const [generatingSceneBroll, setGeneratingSceneBroll] = useState(false)
@@ -178,10 +182,10 @@ export default function HeyGenVideoSettingsCard({
             <strong>Step 3:</strong> Choose presenter, voice, duration, and post-production options
             (subtitles, logo). Script and B-roll are already locked from steps 1–2.
           </>
-        ) : pdfScriptOnly ? (
+        ) : compact ? (
           <>
-            <strong>PDF script mode:</strong> Spoken lines come only from your uploaded PDF. Choose
-            avatar, voice, and length below.
+            <strong>Ready to render:</strong> Your script is set above. Choose presenter, voice, and
+            length — then generate. Subtitles and logo can stay on by default.
           </>
         ) : (
           <>
@@ -219,7 +223,7 @@ export default function HeyGenVideoSettingsCard({
           value={String(durationSeconds)}
           onChange={(e) => onDurationChange(Number(e.target.value))}
         />
-        {!pdfScriptOnly && (
+        {!compact && (
           <>
         <HeyGenSelectWithCustom
           label="Aspect ratio"
@@ -301,15 +305,92 @@ export default function HeyGenVideoSettingsCard({
         </div>
           </>
         )}
+        {compact && (
+          <div className="flex flex-col justify-end gap-2 text-xs md:col-span-2 mt-1">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.captions}
+                onChange={(e) => patch({ captions: e.target.checked })}
+                className="rounded border-border"
+              />
+              <span className="font-semibold text-navy uppercase tracking-wide">Subtitles</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.brandStyledOverlay}
+                onChange={(e) => patch({ brandStyledOverlay: e.target.checked })}
+                className="rounded border-border"
+              />
+              <span className="font-semibold text-navy uppercase tracking-wide">
+                Brand logo on video
+              </span>
+            </label>
+          </div>
+        )}
       </div>
 
       <p className="mt-3 text-[10px] text-mid">
         Presenter: <strong>{avatarLabel || '—'}</strong> · Voice: <strong>{voiceLabel || '—'}</strong>
       </p>
+
+
+      <div className="mt-4 rounded-xl border border-accent/25 bg-accent/[0.04] p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-navy">
+              Seedance 2.0 character B-roll
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-mid">
+              {settings.seedance2Enabled
+                ? 'On — automatically reads B-ROLL scenes from the one video prompt above and creates 1080p cinematic shots with the selected avatar.'
+                : 'Off — uses the normal HeyGen Video Agent workflow.'}
+            </p>
+          </div>
+          <div
+            className="inline-flex shrink-0 rounded-lg border border-border bg-white p-1"
+            role="group"
+            aria-label="Seedance 2.0 character B-roll"
+          >
+            <button
+              type="button"
+              onClick={() => patch({ seedance2Enabled: false })}
+              className={`rounded-md px-4 py-2 text-xs font-bold transition ${
+                !settings.seedance2Enabled
+                  ? 'bg-charcoal text-white shadow-sm'
+                  : 'text-mid hover:bg-light'
+              }`}
+              aria-pressed={!settings.seedance2Enabled}
+            >
+              Off
+            </button>
+            <button
+              type="button"
+              onClick={() => patch({ seedance2Enabled: true, brollInsert: 'directed' })}
+              className={`rounded-md px-4 py-2 text-xs font-bold transition ${
+                settings.seedance2Enabled
+                  ? 'bg-accent text-white shadow-sm'
+                  : 'text-mid hover:bg-light'
+              }`}
+              aria-pressed={settings.seedance2Enabled}
+            >
+              On
+            </button>
+          </div>
+        </div>
+        {settings.seedance2Enabled && (
+          <p className="mt-2 rounded-lg bg-white px-3 py-2 text-[11px] text-mid">
+            Nothing else to paste. Lines marked <strong>B-ROLL</strong> in the main prompt use
+            Cinematic Avatar; <strong>PRESENTER</strong> lines keep HeyGen speech and lip-sync.
+            Each 4–15 second B-roll shot uses one paid Cinematic Avatar request.
+          </p>
+        )}
+      </div>
       </>
       )}
 
-      {showBroll && !pdfScriptOnly && (
+      {showBroll && !compact && (
       <div className="mt-3 space-y-4">
         {!scriptApproved && (
           <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">

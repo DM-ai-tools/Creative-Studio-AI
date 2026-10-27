@@ -72,6 +72,24 @@ def _chapter_duration(duration_seconds: int, clip_cap: int, chapter_index: int) 
     index = max(0, min(int(chapter_index), len(durations) - 1))
     return int(durations[index])
 
+
+def _locked_chapter_duration(
+    memory: dict[str, Any], chapter_index: int, *, fallback: int
+) -> int:
+    """Use the authored chapter boundary stored in production memory.
+
+    Equal duration splitting is only a fallback for unstructured briefs. Once a
+    timed prompt has been locked, its packed scene boundaries are authoritative.
+    """
+    shots = list(memory.get("shot_list") or [])
+    index = int(chapter_index)
+    if index < 0 or index >= len(shots):
+        return int(fallback)
+    start = float(shots[index].get("start") or 0.0)
+    end = float(shots[index].get("end") or start)
+    duration = int(round(end - start))
+    return duration if duration > 0 else int(fallback)
+
 _SYSTEM = """You are Creative Studio — a production agent (think Higgsfield Supercomputer / ChatGPT agent mode).
 
 Read the USER'S FULL BRIEF carefully. If they wrote Scene 1 / Scene 2 / … (or CLIP beats), that is a STORYBOARD — do NOT collapse it into one still.
@@ -754,6 +772,12 @@ async def run_creative_studio_chat_turn(
     if action_norm not in ACTIONS:
         action_norm = "continue"
 
+    last_user = ""
+    for m in reversed(messages):
+        if str(m.get("role") or "") == "user" and str(m.get("content") or "").strip():
+            last_user = str(m.get("content") or "").strip()
+            break
+
     active_video_model = _resolve_video_model(video_model)
     video_model_label = _seedance_model_label(active_video_model)
 
@@ -763,13 +787,49 @@ async def run_creative_studio_chat_turn(
     clone_mode = bool(clone_mode)
     clone_count = max(2, min(6, int(clone_count or 4)))
     prompt_only_video = bool(prompt_only_video) and not clone_mode
-    if prompt_only_video and action_norm in {
-        "continue",
-        "generate_image",
-        "regenerate_image",
-        "generate_storyboard",
-        "approve_next",
+    from app.services.creative_studio_broll import is_production_setup_only_message
+
+    setup_only = is_production_setup_only_message(last_user)
+    # Detect standalone IMAGE block pastes — must always go to B-roll still generation
+    import re as _re
+    from app.services.creative_studio_broll import is_master_production_brief
+
+    _is_master_brief = is_master_production_brief(last_user)
+    _is_inline_broll_block = bool(
+        not _is_master_brief
+        and last_user
+        and _re.search(r"(?im)^\s*IMAGE\s+\d+\s*[-–—:]", last_user)
+        and _re.search(r"(?i)scene\s*timing|image\s+generation\s+prompt", last_user)
+    )
+
+    if setup_only and action_norm in {"generate_video", "approve_next"}:
+        action_norm = "continue"
+    # Full master brief paste → auto-generate all B-roll images first
+    if _is_master_brief and action_norm in {
+        "generate_video", "approve_next", "continue", "generate_image",
+        "regenerate_image", "generate_storyboard",
     }:
+        action_norm = "generate_all_broll"
+    if _is_inline_broll_block and action_norm in {
+        "generate_video", "approve_next", "continue", "generate_image", "regenerate_image",
+    }:
+        # Multiple IMAGE blocks in one paste → batch generate all at once
+        _inline_block_count = len(_re.findall(r"(?:^|\n)\s*IMAGE\s+\d+\s*[-–—:]", last_user, _re.I))
+        action_norm = "generate_all_broll" if _inline_block_count > 1 else "generate_broll_image"
+    if (
+        prompt_only_video
+        and not setup_only
+        and not _is_inline_broll_block
+        and not _is_master_brief
+        and mode_norm != "ask"
+        and action_norm in {
+            "continue",
+            "generate_image",
+            "regenerate_image",
+            "generate_storyboard",
+            "approve_next",
+        }
+    ):
         action_norm = "generate_video"
 
     attachments = [u for u in (attachment_urls or []) if (u or "").strip()]
@@ -792,6 +852,10 @@ async def run_creative_studio_chat_turn(
         ),
         "",
     )
+
+    def _fmt_time(seconds: float) -> str:
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m:02d}:{s:02d}"
 
     def _seedance_presenter_note() -> str:
         if selected_character_url:
@@ -823,11 +887,6 @@ async def run_creative_studio_chat_turn(
         else default_prompt_llm_model()
     )
     img_model = "openai-gpt-image-2" if clone_mode else ((image_model or "").strip() or _default_image_model())
-    last_user = ""
-    for m in reversed(messages):
-        if str(m.get("role") or "") == "user" and str(m.get("content") or "").strip():
-            last_user = str(m.get("content") or "").strip()
-            break
     full_brief = _find_full_user_brief(messages, last_user)
     requested_duration = (
         _normalize_duration(duration_seconds, _estimate_script_duration(full_brief))
@@ -904,6 +963,47 @@ async def run_creative_studio_chat_turn(
             save_production_memory(tenant_id, memory)
         return memory
 
+    def _production_lock_reply() -> dict[str, Any]:
+        from app.services.creative_studio_production_memory import pending_broll_indices
+
+        memory = _ensure_broll_memory()
+        plan = list(memory.get("broll_plan") or [])
+        pending = pending_broll_indices(memory) if plan else []
+        chapter_count = len(memory.get("shot_list") or [])
+        return {
+            "assistant_message": (
+                "Production locked — timeline and settings saved for this chat. "
+                f"{chapter_count} Seedance chapter(s) are mapped from your scene times. "
+                "Seedance is not running yet. "
+                + (
+                    f"Generate and approve B-roll stills ({len(pending)} of {len(plan)} pending), "
+                    "then ask to start chapter 1."
+                    if plan
+                    else "Paste each IMAGE 1–4 block (or generate stills one by one), approve them, "
+                    "then send your chapter 1 Seedance prompt."
+                )
+            ),
+            "intent": "reply",
+            "phase": "awaiting_broll" if plan else "planning",
+            "suggested_actions": (
+                ["generate_all_broll", "generate_broll_image"] if pending else ["generate_broll_image"]
+            ),
+            "chat_model": model_slug,
+            "image_model": img_model,
+            "video_model": active_video_model,
+            "broll_index": pending[0] if pending else (int(plan[0]["index"]) if plan else None),
+            "status": "ok",
+            "job_id": None,
+            "media_mode": None,
+            "model": None,
+            "duration_seconds": out_duration,
+            "aspect": out_aspect,
+            "error": None,
+        }
+
+    if setup_only and action_norm == "continue":
+        return _production_lock_reply()
+
     # A master brief with explicit supporting-image blocks should enter the
     # B-roll board workflow immediately. Otherwise the full presenter brief can
     # be mistaken for one opening-still prompt and GPT Image 2 may draw the
@@ -956,17 +1056,37 @@ async def run_creative_studio_chat_turn(
         pending = pending_broll_indices(memory)
         if pending:
             next_actions = ["generate_all_broll", "generate_broll_image"]
+            approve_msg = (
+                f"Approved B-roll IMAGE {idx}: {item.get('title')}. "
+                f"{len(pending)} B-roll still(s) remaining — generate all at once or one at a time."
+            )
         else:
             next_actions = ["approve_next"]
-        return {
-            "assistant_message": (
-                f"Approved B-roll IMAGE {idx}: {item.get('title')}. "
-                + (
-                    f"{len(pending)} B-roll still(s) remaining — generate all at once or one at a time."
-                    if pending
-                    else f"All B-roll stills approved. {_seedance_presenter_note()}"
+            # Smart chapter guidance from stored scene plan
+            scene_plan = list(memory.get("scene_plan") or [])
+            if scene_plan:
+                first_seedance = next(
+                    (s for s in scene_plan if s.get("type") in {"presenter", "broll"}),
+                    None,
                 )
-            ),
+                if first_seedance:
+                    t_start = first_seedance["start"]
+                    t_end = scene_plan[-1]["end"]
+                    seedance_scenes = [s for s in scene_plan if s.get("type") in {"presenter", "broll"}]
+                    approve_msg = (
+                        f"✅ All {len(memory.get('broll_plan') or [])} B-roll stills approved and locked!\n\n"
+                        f"Your production has {len(seedance_scenes)} Seedance scene(s) across "
+                        f"{int(round(t_end - t_start))}s. Send this to start:\n\n"
+                        f"**Start Seedance from {_fmt_time(t_start)}–{_fmt_time(t_end)}. "
+                        "Use approved B-roll stills at their locked scene times. "
+                        "Native Australian English female presenter throughout.**"
+                    )
+                else:
+                    approve_msg = f"All B-roll stills approved. {_seedance_presenter_note()}"
+            else:
+                approve_msg = f"All B-roll stills approved. {_seedance_presenter_note()}"
+        return {
+            "assistant_message": approve_msg,
             "intent": "reply",
             "phase": "awaiting_broll" if pending else "awaiting_video",
             "suggested_actions": next_actions,
@@ -1066,7 +1186,15 @@ async def run_creative_studio_chat_turn(
         }
 
     if action_norm == "generate_all_broll":
-        from app.services.creative_studio_production_memory import pending_broll_indices
+        from app.services.creative_studio_broll import (
+            _parse_standalone_image_block,
+            parse_broll_images,
+        )
+        from app.services.creative_studio_production_memory import (
+            ensure_broll_plan,
+            pending_broll_indices,
+            save_production_memory,
+        )
 
         if not _image_generation_configured():
             return {
@@ -1082,8 +1210,54 @@ async def run_creative_studio_chat_turn(
                 "duration_seconds": out_duration,
                 "aspect": out_aspect,
             }
+
+        # Merge any IMAGE blocks pasted inline into the stored plan
+        inline_items = parse_broll_images(last_user) if last_user else []
+        if not inline_items and last_user:
+            single = _parse_standalone_image_block(last_user)
+            if single:
+                inline_items = [single]
+
         memory = _ensure_broll_memory()
         plan = list(memory.get("broll_plan") or [])
+
+        if inline_items:
+            existing_indices = {int(r.get("index") or 0) for r in plan}
+            changed = False
+            for item in inline_items:
+                idx = int(item.get("index") or 0)
+                if idx not in existing_indices:
+                    plan.append(item)
+                    changed = True
+                else:
+                    plan = [
+                        item if int(r.get("index") or 0) == idx else r
+                        for r in plan
+                    ]
+                    changed = True
+            if changed:
+                ensure_broll_plan(memory, plan)
+                save_production_memory(tenant_id, memory)
+
+        # If this is a master brief, store the full scene plan and lock any
+        # proof-tagged uploads as editor-only (never sent to Seedance/GPT Image 2)
+        if _is_master_brief and last_user:
+            from app.services.creative_studio_broll import parse_scene_plan
+            scene_plan = parse_scene_plan(last_user)
+            if scene_plan and not memory.get("scene_plan"):
+                memory["scene_plan"] = scene_plan
+
+            # Lock proof assets (editor-only composites) in memory
+            proof_assets = [
+                {"url": str(a.get("url") or "").strip(), "label": str(a.get("role") or "proof")}
+                for a in (reference_assets or [])
+                if str(a.get("role") or "").strip().lower() == "proof"
+                and str(a.get("url") or "").strip()
+            ]
+            if proof_assets and not memory.get("proof_assets"):
+                memory["proof_assets"] = proof_assets
+
+            save_production_memory(tenant_id, memory)
         if not plan:
             return {
                 "assistant_message": (
@@ -1162,11 +1336,26 @@ async def run_creative_studio_chat_turn(
         titles = ", ".join(str(s.get("title") or "")[:36] for s in scenes[:5])
         extra = f" (+{len(scenes) - 5} more)" if len(scenes) > 5 else ""
         remaining = len(targets) < len(plan)
+        scene_plan = list(memory.get("scene_plan") or [])
+        seedance_scenes = [sc for sc in scene_plan if sc.get("type") in {"presenter", "broll"}]
+        proof_assets = list(memory.get("proof_assets") or [])
+        proof_note = (
+            f" 🔒 {len(proof_assets)} proof asset(s) locked as editor-only composites "
+            "(will NOT be sent to Seedance or GPT Image 2)."
+            if proof_assets else ""
+        )
+        master_note = (
+            f"\n\n📋 **Production parsed:** {len(scene_plan)} scenes total, "
+            f"{len(seedance_scenes)} Seedance scene(s).{proof_note} "
+            "After approving all B-roll stills, I'll guide you through each Seedance chapter in order."
+            if _is_master_brief and scene_plan
+            else ""
+        )
         return {
             "assistant_message": (
                 f"Generating {'remaining ' if remaining else 'all '}{len(scenes)} B-roll still(s) "
-                f"({titles}{extra}). Review each dashboard — Regenerate any wrong text, "
-                "then Approve all B-roll or approve individually. Seedance uses these exact PNGs."
+                f"({titles}{extra}). Review each — Regenerate any that look wrong, "
+                f"then Approve all B-roll. Seedance uses these exact PNGs.{master_note}"
             ),
             "intent": "generate_image",
             "phase": "broll_board_running",
@@ -1202,8 +1391,47 @@ async def run_creative_studio_chat_turn(
                 "duration_seconds": out_duration,
                 "aspect": out_aspect,
             }
+        from app.services.creative_studio_broll import (
+            _parse_standalone_image_block,
+            parse_broll_images,
+        )
+        from app.services.creative_studio_production_memory import (
+            ensure_broll_plan,
+            save_production_memory,
+        )
+
+        # When the user pastes an IMAGE block as a standalone message it will be
+        # shorter than the production-lock prompt, so _find_full_user_brief skips
+        # it. Parse the current user message directly first.
+        inline_items = parse_broll_images(last_user) if last_user else []
+        # Fallback: try the more lenient standalone parser if the strict regex missed it
+        if not inline_items and last_user:
+            single = _parse_standalone_image_block(last_user)
+            if single:
+                inline_items = [single]
+
         memory = _ensure_broll_memory()
         plan = list(memory.get("broll_plan") or [])
+
+        # Merge any new inline IMAGE blocks into the stored plan
+        if inline_items:
+            existing_indices = {int(r.get("index") or 0) for r in plan}
+            changed = False
+            for item in inline_items:
+                if int(item.get("index") or 0) not in existing_indices:
+                    plan.append(item)
+                    changed = True
+                else:
+                    # Overwrite with the freshly-pasted version
+                    plan = [
+                        item if int(r.get("index") or 0) == int(item.get("index") or 0) else r
+                        for r in plan
+                    ]
+                    changed = True
+            if changed:
+                ensure_broll_plan(memory, plan)
+                save_production_memory(tenant_id, memory)
+
         if not plan:
             return {
                 "assistant_message": (
@@ -1222,7 +1450,9 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
             }
         pending = pending_broll_indices(memory)
-        idx = int(broll_index or 0) or (pending[0] if pending else int(plan[0]["index"]))
+        # If inline paste specifies an index, use it; otherwise pick first pending
+        inline_idx = int(inline_items[0]["index"]) if inline_items else 0
+        idx = inline_idx or int(broll_index or 0) or (pending[0] if pending else int(plan[0]["index"]))
         item = next((row for row in plan if int(row["index"]) == idx), None)
         if not item:
             return {
@@ -1714,6 +1944,45 @@ async def run_creative_studio_chat_turn(
         }
 
     if action_norm in {"approve_next", "generate_video"}:
+        from app.services.creative_studio_broll import (
+            is_production_setup_only_message,
+            parse_broll_images,
+        )
+        from app.services.creative_studio_production_memory import (
+            approved_broll_urls,
+            pending_broll_indices,
+        )
+
+        if is_production_setup_only_message(last_user):
+            return _production_lock_reply()
+
+        broll_plan = parse_broll_images(full_brief)
+        if broll_plan:
+            memory = _ensure_broll_memory()
+            approved = approved_broll_urls(memory)
+            pending = pending_broll_indices(memory)
+            if pending or len(approved) < len(broll_plan):
+                return {
+                    "assistant_message": (
+                        f"B-roll stills must be approved before Seedance ({len(approved)}/{len(broll_plan)} done). "
+                        "Generate each IMAGE still, review, and Approve B-roll — then start chapter 1."
+                    ),
+                    "intent": "reply",
+                    "phase": "awaiting_broll",
+                    "suggested_actions": ["generate_all_broll", "generate_broll_image"],
+                    "chat_model": model_slug,
+                    "image_model": img_model,
+                    "video_model": active_video_model,
+                    "broll_index": pending[0] if pending else int(broll_plan[0]["index"]),
+                    "status": "ok",
+                    "job_id": None,
+                    "media_mode": None,
+                    "model": None,
+                    "duration_seconds": out_duration,
+                    "aspect": out_aspect,
+                    "error": None,
+                }
+
         # Approved GPT still drives video — never substitute the raw product photo as the seed.
         seed = (approved_image_url or "").strip()
         motion = (video_prompt or image_prompt or last_user or "").strip()
@@ -1883,8 +2152,58 @@ async def run_creative_studio_chat_turn(
 
         if prompt_only_video:
             # Direct mode preserves the user's authored timed prompt verbatim.
-            # It deliberately bypasses GPT image planning and LLM prompt rewrites.
-            motion = brief_for_motion or motion
+            # For master production briefs, trim the prompt to only the scenes that
+            # fall within the current chapter's time window — this stops Seedance from
+            # receiving 75s of dialogue in one call (causes 8s clip + multiple voices).
+            if _is_master_brief or is_master_production_brief(brief_for_motion):
+                from app.services.creative_studio_broll import parse_scene_plan
+                from app.services.creative_studio_production_memory import load_production_memory
+
+                mem = load_production_memory(tenant_id, session_id or "draft") or {}
+                scene_plan_all = mem.get("scene_plan") or parse_scene_plan(brief_for_motion)
+                if scene_plan_all:
+                    # Work out the chapter time window from the shot_list
+                    shot_list = list(mem.get("shot_list") or [])
+                    if shot_list and active_chapter_index < len(shot_list):
+                        ch = shot_list[active_chapter_index]
+                        ch_start = float(ch.get("start") or 0)
+                        ch_end = float(ch.get("end") or out_duration)
+                    else:
+                        ch_start, ch_end = 0.0, float(out_duration)
+
+                    # Collect only the scenes that overlap this chapter window
+                    chapter_scenes = [
+                        s for s in scene_plan_all
+                        if float(s.get("end", 0)) > ch_start - 0.5
+                        and float(s.get("start", 0)) < ch_end + 0.5
+                    ]
+
+                    if chapter_scenes:
+                        lines = [
+                            "ONE FICTIONAL PRESENTER — SINGLE VOICE — NATURAL PACE — "
+                            "LIP-SYNC EVERY WORD EXACTLY AS WRITTEN. NO SECOND VOICE.\n"
+                        ]
+                        for sc in chapter_scenes:
+                            m_s, s_s = divmod(int(sc.get("start", 0)), 60)
+                            m_e, s_e = divmod(int(sc.get("end", 0)), 60)
+                            t_label = f"{m_s:02d}:{s_s:02d}–{m_e:02d}:{s_e:02d}"
+                            sc_type = str(sc.get("type", "presenter")).upper()
+                            dialogue = str(sc.get("dialogue") or "").strip()
+                            visual = str(sc.get("visual") or "").strip()
+                            if dialogue:
+                                lines.append(
+                                    f"[{t_label} — {sc_type}]\n"
+                                    f"SPEAK EXACTLY: \"{dialogue}\"\n"
+                                    f"VISUAL: {visual}"
+                                )
+                        motion = "\n\n".join(lines)
+                    else:
+                        motion = brief_for_motion or motion
+                else:
+                    motion = brief_for_motion or motion
+            else:
+                # Direct mode preserves the user's authored timed prompt verbatim.
+                motion = brief_for_motion or motion
         else:
             motion = await _ensure_rich_motion_prompt(
                 model_slug=model_slug,
@@ -1956,8 +2275,18 @@ async def run_creative_studio_chat_turn(
                 references=refs,
                 storyboard_count=1,
             )
+            locked_shots = list(memory.get("shot_list") or [])
+            if locked_shots:
+                film_chapters = len(locked_shots)
+                chapter_video_duration = _locked_chapter_duration(
+                    memory,
+                    active_chapter_index,
+                    fallback=chapter_video_duration,
+                )
             chapter_motion = compile_locked_chapter_prompt(
-                memory, chapter_index=active_chapter_index
+                memory,
+                chapter_index=active_chapter_index,
+                speech_mode=speech_mode,
             )
         broll_segments: list[dict[str, Any]] = []
         if chapter_staging and session_id:

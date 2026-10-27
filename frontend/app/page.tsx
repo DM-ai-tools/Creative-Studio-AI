@@ -1,12 +1,6 @@
 import type { Metadata } from 'next'
-import { Syne, Manrope } from 'next/font/google'
+import { Manrope } from 'next/font/google'
 import LandingPage from '@/components/landing/LandingPage'
-
-const syne = Syne({
-  subsets: ['latin'],
-  variable: '--font-lp-display',
-  weight: ['600', '700', '800'],
-})
 
 const manrope = Manrope({
   subsets: ['latin'],
@@ -15,14 +9,14 @@ const manrope = Manrope({
 })
 
 export const metadata: Metadata = {
-  title: 'CreativeStudio AI — AI creative suite for Meta Ads',
+  title: 'CreativeStudio AI | Professional AI Image and Video Production',
   description:
-    'Brief in, on-brand variants out. Use cases, ad angles, ICP image plans, brand safety, and Meta export — built for Australian marketers.',
+    'Create brand-controlled image and video campaigns with professional model routing, role-based references, placement formats, and production-ready exports.',
 }
 
 export default function Home() {
   return (
-    <div className={`${syne.variable} ${manrope.variable}`}>
+    <div className={`${manrope.variable} lp-font-scope`}>
       <LandingPage />
     </div>
   )

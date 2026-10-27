@@ -11,6 +11,8 @@ import type { Asset, ReferenceImageAnalysis } from '@/types'
 type ReferenceImagesGalleryProps = {
   brandId: string | null | undefined
   brandName?: string
+  /** Bump after website fetch / external saves to reload the library */
+  reloadKey?: number
 }
 
 function summaryFromAsset(asset: Asset): string {
@@ -31,6 +33,7 @@ function paletteFromAsset(asset: Asset): string[] {
 export default function ReferenceImagesGallery({
   brandId,
   brandName,
+  reloadKey = 0,
 }: ReferenceImagesGalleryProps) {
   const [items, setItems] = useState<Asset[]>([])
   const [loading, setLoading] = useState(false)
@@ -58,7 +61,7 @@ export default function ReferenceImagesGallery({
 
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, reloadKey])
 
   const handleUpload = async (files: FileList | null) => {
     if (!files?.length || !brandId) return

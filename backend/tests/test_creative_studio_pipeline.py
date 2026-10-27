@@ -31,8 +31,10 @@ from app.services.creative_studio_video_finishing import (
 from app.services.creative_studio_prompt_service import build_spoken_voiceover
 from app.services.creative_studio_broll import parse_broll_images
 from app.services.creative_studio_chat_service import (
+    _chapter_duration,
     _explicit_duration_from_text,
     _film_chapter_count,
+    _locked_chapter_duration,
     _needs_chapter_image_staging,
     _normalize_duration,
     run_creative_studio_chat_turn,
@@ -53,6 +55,103 @@ from app.services.media.byteplus_usage import video_task_usage
 
 
 class PromptTests(unittest.TestCase):
+    def test_only_an_exact_broll_boundary_can_drop_blocked_handoff(self):
+        from app.services.creative_studio_job_service import _chapter_starts_with_broll
+
+        scenes = [
+            {"scene": 4, "start": 20.0, "end": 30.0, "type": "presenter"},
+            {"scene": 5, "start": 30.0, "end": 40.0, "type": "broll"},
+            {"scene": 6, "start": 40.0, "end": 48.0, "type": "presenter"},
+        ]
+        self.assertTrue(_chapter_starts_with_broll(scenes, start=30.0, end=52.0))
+        self.assertFalse(_chapter_starts_with_broll(scenes, start=20.0, end=52.0))
+
+    def test_rejected_video_handoff_retries_only_when_saved_frame_exists(self):
+        from app.services.creative_studio_job_service import (
+            _video_reference_rejection_allows_frame_retry,
+        )
+
+        error = "Seedance rejected the approved previous chapter video reference."
+        self.assertTrue(
+            _video_reference_rejection_allows_frame_retry(
+                error,
+                video_reference_url="https://example.com/chapter.mp4",
+                frame_reference_url="/files/test/final-frame.jpg",
+            )
+        )
+        self.assertFalse(
+            _video_reference_rejection_allows_frame_retry(
+                error,
+                video_reference_url="https://example.com/chapter.mp4",
+                frame_reference_url=None,
+            )
+        )
+
+    def test_generic_references_follow_broll_scene_order_per_chapter(self):
+        from app.services.creative_studio_job_service import _reference_assets_for_chapter
+
+        assets = [
+            {"url": "character.png", "role": "character"},
+            {"url": "commerce.png", "role": "reference"},
+            {"url": "plan.png", "role": "reference"},
+        ]
+        scenes = [
+            {"scene": 2, "start": 10.0, "end": 16.0, "type": "broll"},
+            {"scene": 5, "start": 30.0, "end": 40.0, "type": "broll"},
+        ]
+        first, first_note = _reference_assets_for_chapter(
+            assets, scenes, start=0.0, end=30.0,
+        )
+        second, second_note = _reference_assets_for_chapter(
+            assets, scenes, start=30.0, end=52.0,
+        )
+        self.assertEqual([item["url"] for item in first], ["character.png", "commerce.png"])
+        self.assertEqual([item["url"] for item in second], ["character.png", "plan.png"])
+        self.assertIn("Scene 2", first_note)
+        self.assertIn("Scene 5", second_note)
+
+    def test_next_chapter_overrides_are_scoped_to_one_continuation(self):
+        from app.services.creative_studio_job_service import _apply_continuation_overrides
+
+        payload = {
+            "reference_assets": [{"url": "character.png", "role": "character"}],
+            "additional_reference_urls": [],
+        }
+        _apply_continuation_overrides(
+            payload,
+            {
+                "next_prompt": "Chapter two only.",
+                "next_reference_assets": [
+                    {"url": "chapter-two.png", "role": "reference"}
+                ],
+                "next_reference_mode": "first_frame",
+                "next_seed_image_url": "chapter-two.png",
+            },
+        )
+        self.assertEqual(payload["chapter_prompt_override"], "Chapter two only.")
+        self.assertEqual(payload["chapter_seed_image_url"], "chapter-two.png")
+        self.assertEqual(len(payload["reference_assets"]), 2)
+
+        _apply_continuation_overrides(
+            payload,
+            {
+                "next_prompt": "Chapter three only.",
+                "next_reference_assets": [
+                    {"url": "chapter-three.png", "role": "reference"}
+                ],
+                "next_reference_mode": "continuity",
+            },
+        )
+        self.assertEqual(payload["chapter_prompt_override"], "Chapter three only.")
+        self.assertNotIn("chapter_seed_image_url", payload)
+        self.assertEqual(
+            payload["reference_assets"],
+            [
+                {"url": "character.png", "role": "character"},
+                {"url": "chapter-three.png", "role": "reference"},
+            ],
+        )
+
     def test_complete_authored_timeline_wins_over_incomplete_rewrite(self):
         authored = (
             "Scene 1 - OPEN | 0-14 seconds\nOpen naturally.\n"
@@ -133,6 +232,19 @@ class PromptTests(unittest.TestCase):
         ]
         self.assertIn("Opening hook", chapter_still_prompt(scenes, 0))
         self.assertIn("continuity frame", chapter_still_prompt(scenes, 1, from_continuity=True).lower())
+
+    def test_locked_timeline_boundaries_override_equal_chapter_splits(self):
+        memory = {
+            "shot_list": [
+                {"chapter": 1, "start": 0.0, "end": 23.0},
+                {"chapter": 2, "start": 23.0, "end": 53.0},
+                {"chapter": 3, "start": 53.0, "end": 75.0},
+            ]
+        }
+        self.assertEqual(_chapter_duration(75, 30, 0), 25)
+        self.assertEqual(_locked_chapter_duration(memory, 0, fallback=25), 23)
+        self.assertEqual(_locked_chapter_duration(memory, 1, fallback=25), 30)
+        self.assertEqual(_locked_chapter_duration(memory, 2, fallback=25), 22)
 
     def test_chapter_still_prompt_from_brief_reads_clip_blocks(self):
         brief = (
@@ -274,6 +386,17 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(extract_voiceover_events(text, duration_seconds=10), [
             (0.0, 5.0, "Hello."), (5.0, 10.0, "Goodbye."),
         ])
+
+    def test_voiceover_accepts_exact_sentence_direction(self):
+        text = (
+            'Scene 1 | 00:00-00:10\n'
+            'Hold the proof card while one Australian female voice speaks this exact sentence off-camera:\n'
+            '"Across our campaigns, we recorded five million dollars."'
+        )
+        self.assertEqual(
+            extract_voiceover_events(text, duration_seconds=10),
+            [(0.0, 10.0, "Across our campaigns, we recorded five million dollars.")],
+        )
 
     def test_no_camera_directions_are_spoken(self):
         self.assertEqual(build_spoken_voiceover("Slow pan around a red bottle."), "")
@@ -763,6 +886,24 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         ], capture_output=True, text=True, timeout=30)
         self.assertIn("mean_volume:", measured.stderr)
         self.assertNotIn("mean_volume: -inf", measured.stderr)
+
+    def test_stitch_preserves_video_when_chapter_codecs_differ(self):
+        from app.services.ffmpeg_util import probe_video_stream_duration
+
+        second = self.work / "mpeg4-chapter.mp4"
+        subprocess.run(
+            [
+                self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+                "color=c=red:s=128x96:r=24", "-f", "lavfi", "-i",
+                "sine=frequency=660:sample_rate=48000", "-t", "2",
+                "-c:v", "mpeg4", "-c:a", "aac", str(second),
+            ],
+            capture_output=True, check=True, timeout=30,
+        )
+        output = self.work / "mixed-codecs.mp4"
+        concat_video_files([self.audible, second], output)
+        self.assertAlmostEqual(probe_video_duration(output), 4.0, delta=0.2)
+        self.assertAlmostEqual(probe_video_stream_duration(output), 4.0, delta=0.2)
 
     def test_single_partial_clip_creates_nested_stitch_output(self):
         output = self.work / "missing" / "seedance-stitch" / "partial.mp4"
@@ -1309,7 +1450,21 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             with patch(
                 "app.services.creative_studio_job_service.asyncio.create_task"
             ) as create_task:
-                queued = await create_continuation_job(job_id, tenant_id="test")
+                queued = await create_continuation_job(
+                    job_id,
+                    tenant_id="test",
+                    overrides={
+                        "next_prompt": (
+                            "Create exactly 15 seconds for the second chapter. "
+                            "The same fictional presenter reviews the campaign plan and says "
+                            'exactly: "Here is your practical next step."'
+                        ),
+                        "next_reference_assets": [
+                            {"url": "/files/test/chapter-two-proof.png", "role": "reference"}
+                        ],
+                        "next_reference_mode": "continuity",
+                    },
+                )
                 continuation = create_task.call_args.args[0]
                 await continuation
 
@@ -1326,8 +1481,62 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
                 second_call.kwargs["brief"]["continuity_video_reference_url"],
                 "https://example.com/approved-chapter.mp4",
             )
-            self.assertIn("15", second_call.kwargs["prompt"])
-            self.assertIn("30", second_call.kwargs["prompt"])
+            self.assertIn("practical next step", second_call.kwargs["prompt"])
+            self.assertIn(
+                {"url": "/files/test/chapter-two-proof.png", "role": "reference"},
+                second_call.kwargs["brief"]["reference_assets"],
+            )
+
+    async def test_continuation_exact_first_frame_resets_previous_video_reference(self):
+        from app.services import creative_studio_job_service as job_service
+
+        parent_id = await job_service.create_job(
+            tenant_id="test",
+            payload={
+                "media_mode": "video",
+                "model": "ark-seedance-2-5",
+                "prompt": "Scene 1 | 0-10 seconds\nFirst chapter.",
+                "duration_seconds": 30,
+                "reference_assets": [],
+            },
+        )
+        await job_service.update_job(
+            parent_id,
+            status="done",
+            result={
+                "status": "done",
+                "continuation_available": True,
+                "completed_segments": 1,
+                "staged_segment_paths": [],
+                "continuity_reference_url": "/files/test/previous-frame.png",
+                "continuity_video_reference_url": "https://example.com/previous.mp4",
+            },
+        )
+        with patch(
+            "app.services.creative_studio_job_service.asyncio.create_task"
+        ) as create_task:
+            queued = await job_service.create_continuation_job(
+                parent_id,
+                tenant_id="test",
+                overrides={
+                    "next_prompt": "Create exactly 10 seconds from the uploaded proof image.",
+                    "next_reference_assets": [
+                        {"url": "/files/test/proof.png", "role": "reference"}
+                    ],
+                    "next_reference_mode": "first_frame",
+                    "next_seed_image_url": "/files/test/proof.png",
+                },
+            )
+            queued_coroutine = create_task.call_args.args[0]
+            queued_coroutine.close()
+
+        payload = job_service._JOBS[queued["job_id"]]["payload"]
+        self.assertEqual(payload["chapter_reference_mode"], "first_frame")
+        self.assertEqual(payload["chapter_seed_image_url"], "/files/test/proof.png")
+        self.assertEqual(
+            payload["chapter_prompt_override"],
+            "Create exactly 10 seconds from the uploaded proof image.",
+        )
 
     async def test_exact_timed_voiceover_is_mixed_and_video_length_preserved(self):
         wav = self.work / "speech.wav"

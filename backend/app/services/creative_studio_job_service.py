@@ -124,6 +124,91 @@ def _localize_timed_events(
     ]
 
 
+def _reference_assets_for_chapter(
+    reference_assets: list[dict[str, Any]],
+    scene_plan: list[dict[str, Any]],
+    *,
+    start: float,
+    end: float,
+) -> tuple[list[dict[str, Any]], str]:
+    """Route generic uploads to B-roll scenes in upload/timeline order."""
+    assets = [asset for asset in reference_assets if isinstance(asset, dict)]
+    generic = [
+        asset for asset in assets
+        if str(asset.get("role") or "reference").strip().lower() == "reference"
+    ]
+    persistent = [
+        asset for asset in assets
+        if str(asset.get("role") or "reference").strip().lower() != "reference"
+    ]
+    broll_scenes = sorted(
+        (scene for scene in scene_plan if str(scene.get("type") or "") == "broll"),
+        key=lambda scene: (float(scene.get("start") or 0), int(scene.get("scene") or 0)),
+    )
+    if not generic or not broll_scenes:
+        return assets, ""
+
+    selected: list[dict[str, Any]] = list(persistent)
+    bindings: list[str] = []
+    for upload_index, (asset, scene) in enumerate(zip(generic, broll_scenes), start=1):
+        scene_start = float(scene.get("start") or 0)
+        scene_end = float(scene.get("end") or scene_start)
+        if scene_start < float(end) and scene_end > float(start):
+            selected.append(asset)
+            bindings.append(
+                f"Uploaded Reference {upload_index} is assigned only to "
+                f"Scene {int(scene.get('scene') or 0)} ({scene_start:g}-{scene_end:g}s)."
+            )
+    note = ""
+    if bindings:
+        note = (
+            "\n\nCHAPTER REFERENCE BINDING: "
+            + " ".join(bindings)
+            + " Do not substitute another uploaded image or reuse these references in a different scene."
+        )
+    return selected, note
+
+
+def _video_reference_rejection_allows_frame_retry(
+    error: str,
+    *,
+    video_reference_url: str | None,
+    frame_reference_url: str | None,
+) -> bool:
+    """Recognize a rejected video handoff that can retry from its saved frame."""
+    low = str(error or "").lower()
+    return bool(
+        video_reference_url
+        and frame_reference_url
+        and (
+            "approved previous chapter video reference" in low
+            or "video reference" in low
+        )
+    )
+
+
+def _chapter_starts_with_broll(
+    scene_plan: list[dict[str, Any]],
+    *,
+    start: float,
+    end: float,
+) -> bool:
+    """Return true when the first authored scene in this chapter is B-roll."""
+    chapter_scenes = sorted(
+        (
+            scene for scene in scene_plan
+            if float(scene.get("start") or 0) < float(end)
+            and float(scene.get("end") or 0) > float(start)
+        ),
+        key=lambda scene: float(scene.get("start") or 0),
+    )
+    return bool(
+        chapter_scenes
+        and str(chapter_scenes[0].get("type") or "") == "broll"
+        and abs(float(chapter_scenes[0].get("start") or 0) - float(start)) <= 0.1
+    )
+
+
 def _video_job_result_payload(
     *,
     result: dict[str, Any] | None,
@@ -164,6 +249,8 @@ def _video_job_result_payload(
         "logo_end_hold_seconds": (result or {}).get("logo_end_hold_seconds"),
         "logo_warning": (result or {}).get("logo_warning"),
         "logo_deferred": (result or {}).get("logo_deferred"),
+        "proof_composited": bool((result or {}).get("proof_composited")),
+        "proof_composite_count": (result or {}).get("proof_composite_count"),
     }
     for key in (
         "next_chapter_image_available",
@@ -412,6 +499,130 @@ async def _apply_chapter_image_staging_result(
             logo_url=logo_url,
         )
         logo_applied = bool(logo_url and overlays_applied)
+
+    # ── Auto proof composite: replace placeholder charcoal scenes with uploaded PNGs ──
+    proof_assets = list((production_memory or {}).get("proof_assets") or [])
+    scene_plan = list((production_memory or {}).get("scene_plan") or [])
+
+    # Build proof_scenes from scene_plan if available, otherwise parse time windows
+    # directly from the proof asset labels (e.g. "PROOF A — 0:00 to 0:10")
+    def _proof_scenes_from_assets(assets: list) -> list:
+        import re
+        scenes = []
+        for idx, asset in enumerate(assets):
+            label = str(asset.get("label") or asset.get("role") or "")
+            m = re.search(r"(\d{1,2}):(\d{2})\s*(?:to|[-–—])\s*(\d{1,2}):(\d{2})", label, re.I)
+            if m:
+                start = int(m.group(1)) * 60 + int(m.group(2))
+                end = int(m.group(3)) * 60 + int(m.group(4))
+            else:
+                # fallback: 10s windows starting from 0
+                start = idx * 10
+                end = start + 10
+            scenes.append({"type": "proof", "scene": idx + 1, "start": start, "end": end})
+        return scenes
+
+    if proof_assets and final_work_url:
+        proof_scenes = [s for s in scene_plan if s.get("type") == "proof"] if scene_plan \
+            else _proof_scenes_from_assets(proof_assets)
+        try:
+            from app.services.proof_composite import composite_proof_over_video
+            from app.services.ffmpeg_util import require_ffmpeg
+            from app.core.config import settings
+
+            ffmpeg = require_ffmpeg()
+            if ffmpeg and proof_scenes and len(proof_assets) >= len(proof_scenes):
+                import urllib.request, tempfile
+                # We have the fully stitched film. We need to replace the
+                # proof-scene time windows with the uploaded PNG frames.
+                # Build a new video: for each proof scene overlay the PNG over that segment.
+                work_url = final_work_url
+                for idx, ps in enumerate(proof_scenes):
+                    if idx >= len(proof_assets):
+                        break
+                    proof_url = str(proof_assets[idx].get("url") or "").strip()
+                    if not proof_url:
+                        continue
+                    t_start = float(ps.get("start", 0))
+                    t_end = float(ps.get("end", t_start + 10))
+                    dur = round(t_end - t_start, 3)
+                    # Download working video
+                    vid_tmp = Path(tempfile.mktemp(suffix=".mp4"))
+                    img_tmp = Path(tempfile.mktemp(suffix=".png"))
+                    out_tmp = Path(tempfile.mktemp(suffix=".mp4"))
+                    try:
+                        urllib.request.urlretrieve(work_url, vid_tmp)
+                        urllib.request.urlretrieve(proof_url, img_tmp)
+                        W = H = 1080
+                        pad_color = "0x1A1C20"
+                        # Extract before + replace window + after, stitch
+                        before = Path(tempfile.mktemp(suffix=".mp4"))
+                        proof_seg = Path(tempfile.mktemp(suffix=".mp4"))
+                        after = Path(tempfile.mktemp(suffix=".mp4"))
+                        concat_list = Path(tempfile.mktemp(suffix=".txt"))
+                        import subprocess
+                        # 1. Cut segment before proof window
+                        if t_start > 0.1:
+                            subprocess.run([ffmpeg, "-y", "-i", str(vid_tmp),
+                                "-t", str(t_start), "-c", "copy", str(before)],
+                                capture_output=True)
+                        # 2. Generate proof still segment
+                        subprocess.run([
+                            ffmpeg, "-y",
+                            "-loop", "1", "-i", str(img_tmp),
+                            "-i", str(vid_tmp),
+                            "-ss", str(t_start), "-t", str(dur),
+                            "-filter_complex",
+                            f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={pad_color}[v]",
+                            "-map", "[v]", "-map", "1:a?",
+                            "-ss_from_pts", "1",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                            "-c:a", "copy", "-t", str(dur),
+                            str(proof_seg),
+                        ], capture_output=True)
+                        # 3. Cut segment after proof window
+                        subprocess.run([ffmpeg, "-y", "-i", str(vid_tmp),
+                            "-ss", str(t_end), "-c", "copy", str(after)],
+                            capture_output=True)
+                        # 4. Concat
+                        parts = []
+                        if t_start > 0.1 and before.is_file() and before.stat().st_size > 0:
+                            parts.append(f"file '{before}'\n")
+                        if proof_seg.is_file() and proof_seg.stat().st_size > 0:
+                            parts.append(f"file '{proof_seg}'\n")
+                        if after.is_file() and after.stat().st_size > 0:
+                            parts.append(f"file '{after}'\n")
+                        if parts:
+                            concat_list.write_text("".join(parts), encoding="utf-8")
+                            subprocess.run([
+                                ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                                "-i", str(concat_list),
+                                "-c", "copy", str(out_tmp),
+                            ], capture_output=True)
+                            if out_tmp.is_file() and out_tmp.stat().st_size > 10_000:
+                                saved = file_service.save_bytes(
+                                    content=out_tmp.read_bytes(),
+                                    tenant_id=tenant_id,
+                                    subfolder="generated",
+                                    suffix=".mp4",
+                                    content_type="video/mp4",
+                                )
+                                work_url = saved["file_url"]
+                                logger.info(
+                                    "Proof composite scene %d applied → %s",
+                                    ps.get("scene"), work_url,
+                                )
+                    except Exception as pe:
+                        logger.error("Proof composite scene %d failed: %s", idx + 1, pe)
+                    finally:
+                        for p in [vid_tmp, img_tmp, out_tmp, before, proof_seg, after, concat_list]:
+                            try: p.unlink(missing_ok=True)
+                            except OSError: pass
+                if work_url != final_work_url:
+                    final_work_url = work_url
+        except Exception as proof_err:
+            logger.error("Auto proof composite skipped: %s", proof_err)
 
     final_local = _ensure_local_video(final_work_url, tenant_id=tenant_id)
     if final_local and Path(final_local).is_file():
@@ -749,6 +960,7 @@ async def recover_continuation_job(
     cast_reference_url: str | None = None,
     continuity_video_reference_url: str | None = None,
     production_id: str | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rebuild a staged continuation after the in-memory job store was lost."""
     from app.services.logo_overlay import file_url_to_local_path
@@ -783,6 +995,7 @@ async def recover_continuation_job(
             "production_id": production_id,
         }
     )
+    _apply_continuation_overrides(cont_payload, overrides)
     async with _LOCK:
         _JOBS[next_id] = {
             "job_id": next_id,
@@ -806,7 +1019,82 @@ async def recover_continuation_job(
     }
 
 
-async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+def _apply_continuation_overrides(
+    payload: dict[str, Any],
+    overrides: dict[str, Any] | None,
+) -> None:
+    """Bind one user-authored prompt/reference set to the resumed chapter."""
+    values = dict(overrides or {})
+    payload.pop("chapter_prompt_override", None)
+    payload.pop("chapter_seed_image_url", None)
+    base_assets = payload.get("continuation_base_reference_assets")
+    if not isinstance(base_assets, list):
+        base_assets = list(payload.get("reference_assets") or [])
+        payload["continuation_base_reference_assets"] = base_assets
+    payload["reference_assets"] = list(base_assets)
+    base_extra = payload.get("continuation_base_additional_reference_urls")
+    if not isinstance(base_extra, list):
+        base_extra = list(payload.get("additional_reference_urls") or [])
+        payload["continuation_base_additional_reference_urls"] = base_extra
+    payload["additional_reference_urls"] = list(base_extra)
+
+    next_prompt = str(values.get("next_prompt") or "").strip()
+    if next_prompt:
+        payload["chapter_prompt_override"] = next_prompt
+
+    allowed_roles = {"product", "logo", "scene", "character", "reference"}
+    incoming: list[dict[str, str]] = []
+    for item in values.get("next_reference_assets") or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        role = str(item.get("role") or "reference").strip().lower()
+        if not url:
+            continue
+        if role not in allowed_roles:
+            role = "reference"
+        incoming.append({"url": url, "role": role})
+    if incoming:
+        merged: dict[str, dict[str, str]] = {
+            str(item.get("url") or "").strip(): {
+                "url": str(item.get("url") or "").strip(),
+                "role": str(item.get("role") or "reference").strip().lower(),
+            }
+            for item in (payload.get("reference_assets") or [])
+            if isinstance(item, dict) and str(item.get("url") or "").strip()
+        }
+        for item in incoming:
+            merged[item["url"]] = item
+        payload["reference_assets"] = list(merged.values())[:9]
+        extra = [
+            str(url or "").strip()
+            for url in (payload.get("additional_reference_urls") or [])
+            if str(url or "").strip()
+        ]
+        for item in incoming:
+            if item["role"] == "reference" and item["url"] not in extra:
+                extra.append(item["url"])
+        payload["additional_reference_urls"] = extra[:7]
+
+    mode = str(values.get("next_reference_mode") or "continuity").strip().lower()
+    if mode not in {"continuity", "first_frame"}:
+        mode = "continuity"
+    payload["chapter_reference_mode"] = mode
+    seed_url = str(values.get("next_seed_image_url") or "").strip()
+    if mode == "first_frame":
+        if not seed_url and incoming:
+            seed_url = incoming[0]["url"]
+        if not seed_url:
+            raise ValueError("Exact first-frame continuation requires one newly attached image.")
+        payload["chapter_seed_image_url"] = seed_url
+
+
+async def create_continuation_job(
+    job_id: str,
+    *,
+    tenant_id: str,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Queue the next reviewed Seedance chapter for a staged long video."""
     async with _LOCK:
         parent = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
@@ -822,22 +1110,27 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
         existing_id = str(result.get("next_job_id") or "").strip()
         if existing_id and existing_id in _JOBS:
             existing = _JOBS[existing_id]
-            return {
-                "job_id": existing_id,
-                "status": existing.get("status") or "queued",
-                "progress": existing.get("progress") or "Queued — starting next part…",
-            }
+            if str(existing.get("status") or "") not in {"failed", "cancelled"}:
+                return {
+                    "job_id": existing_id,
+                    "status": existing.get("status") or "queued",
+                    "progress": existing.get("progress") or "Queued — starting next part…",
+                }
+            result.pop("next_job_id", None)
 
         approved_video_reference = str(
             result.get("continuity_video_reference_url") or ""
         ).strip()
-        if not approved_video_reference:
+        approved_frame_reference = str(
+            result.get("continuity_reference_url") or ""
+        ).strip()
+        if not approved_video_reference and not approved_frame_reference:
             return {
                 "job_id": job_id,
                 "status": "failed",
                 "error": (
-                    "The approved chapter video reference is unavailable. The next Seedance "
-                    "call was not submitted, so no continuation credits were used."
+                    "The approved chapter has no saved video or final-frame reference. The next "
+                    "Seedance call was not submitted, so no continuation credits were used."
                 ),
             }
         next_id = str(uuid.uuid4())
@@ -845,15 +1138,16 @@ async def create_continuation_job(job_id: str, *, tenant_id: str) -> dict[str, A
         payload.update({
             "stage_index": int(result.get("completed_segments") or 0),
             "staged_segment_paths": list(result.get("staged_segment_paths") or []),
-            "continuity_reference_url": result.get("continuity_reference_url"),
+            "continuity_reference_url": approved_frame_reference or None,
             "cast_reference_url": result.get("cast_reference_url"),
-            "continuity_video_reference_url": approved_video_reference,
+            "continuity_video_reference_url": approved_video_reference or None,
             "continuity_frame_count": int(result.get("continuity_frame_count") or 0),
             "continuity_privacy_fallback_count": int(
                 result.get("continuity_privacy_fallback_count") or 0
             ),
             "generated_duration_seconds": int(result.get("generated_duration_seconds") or 0),
         })
+        _apply_continuation_overrides(payload, overrides)
         next_job = {
             "job_id": next_id,
             "tenant_id": tenant_id,
@@ -1647,6 +1941,59 @@ async def run_creative_studio_job(job_id: str) -> None:
         )
         data["production_id"] = production_memory["production_id"]
         data["production_session_id"] = production_session_id
+        from app.services.creative_studio_broll import parse_scene_plan
+
+        proof_assets: list[dict[str, Any]] = []
+        seen_proof_urls: set[str] = set()
+        for asset in [
+            *((production_memory or {}).get("proof_assets") or []),
+            *(
+                asset
+                for asset in (data.get("reference_assets") or [])
+                if str(asset.get("role") or "").strip().lower() == "proof"
+            ),
+        ]:
+            url = str(asset.get("url") or "").strip()
+            if url and url not in seen_proof_urls:
+                seen_proof_urls.add(url)
+                proof_assets.append({**asset, "url": url, "role": "proof"})
+        # Proof validation must follow the prompt for THIS generation. Reusing a
+        # master-brief scene_plan from session memory would wrongly require proof
+        # cards on presenter-only chapters (e.g. Chapter 2).
+        parsed_current = parse_scene_plan(finishing_brief)
+        authored_scene_plan = (
+            parsed_current
+            if parsed_current
+            else list((production_memory or {}).get("scene_plan") or [])
+        )
+        authored_proof_scenes = [
+            scene for scene in authored_scene_plan if scene.get("type") == "proof"
+        ]
+        explicit_proof_request = bool(
+            re.search(
+                r"(?i)@proof_[a-z0-9]+|uploaded proof (?:card|image)|"
+                r"(?:exact|original) proof (?:card|image)|proof composite",
+                finishing_brief,
+            )
+        )
+        if explicit_proof_request and not proof_assets:
+            raise ValueError(
+                "This prompt requires exact proof cards, but no upload is assigned the "
+                "Proof (editor only) role. Assign that role to each original proof image "
+                "and retry. No Seedance request was submitted."
+            )
+        if proof_assets and not authored_proof_scenes:
+            raise ValueError(
+                "Proof images are attached, but their timed proof scenes could not be read. "
+                "Use scene headings such as 'Scene 1 — 0:00–0:10' and say 'uploaded proof "
+                "card' in each matching scene. No Seedance request was submitted."
+            )
+        if authored_proof_scenes and len(proof_assets) < len(authored_proof_scenes):
+            raise ValueError(
+                f"The prompt contains {len(authored_proof_scenes)} timed proof scenes, but only "
+                f"{len(proof_assets)} image(s) are assigned Proof (editor only). Attach and label "
+                "every original proof card before retrying. No Seedance request was submitted."
+            )
         from app.services.creative_studio_preflight import validate_video_preflight
         preflight_report = validate_video_preflight(
             prompt=visual_prompt,
@@ -1660,6 +2007,8 @@ async def run_creative_studio_job(job_id: str) -> None:
             product_reference_url=str(data.get("product_reference_url") or "").strip() or None,
             logo_reference_url=str(data.get("logo_reference_url") or "").strip() or None,
             require_storyboard_coverage=bool(data.get("require_storyboard_coverage", True)),
+            # Chapter prompts are intentionally single-scene — don't require multi-scene structure
+            is_chapter=bool(data.get("film_total_chapters", 1) > 1 or data.get("film_chapter_index", 0) > 0),
         )
         await update_job(
             job_id,
@@ -1981,6 +2330,13 @@ async def run_creative_studio_job(job_id: str) -> None:
             accepted_log = list(production_memory.get("chapter_log") or [])
             resumed_index = len(accepted_log) if data.get("stage_index") is None else int(data.get("stage_index") or 0)
             stage_index = max(0, min(resumed_index, len(segment_durations) - 1))
+            chapter_prompt_override = str(data.get("chapter_prompt_override") or "").strip()
+            chapter_reference_mode = str(
+                data.get("chapter_reference_mode") or "continuity"
+            ).strip().lower()
+            chapter_seed_image_url = str(data.get("chapter_seed_image_url") or "").strip()
+            if chapter_reference_mode not in {"continuity", "first_frame"}:
+                chapter_reference_mode = "continuity"
             generated_seconds = int(data.get("generated_duration_seconds") or 0)
             segment_paths: list[Path] = [
                 Path(value) for value in (data.get("staged_segment_paths") or [])
@@ -2012,15 +2368,57 @@ async def run_creative_studio_job(job_id: str) -> None:
                 data.get("continuity_privacy_fallback_count") or 0
             )
             elapsed = float(sum(segment_durations[:stage_index]))
+            override_voice_events = (
+                extract_voiceover_events(
+                    chapter_prompt_override,
+                    duration_seconds=float(segment_durations[stage_index]),
+                )
+                if chapter_prompt_override
+                else []
+            )
+
+            def staged_native_narration(
+                segment_index: int,
+                start: float,
+                end: float,
+            ) -> str:
+                if not sound_on or timed_tts:
+                    return ""
+                if chapter_prompt_override and segment_index == stage_index:
+                    chapter_start = float(sum(segment_durations[:segment_index]))
+                    local_start = max(0.0, start - chapter_start)
+                    local_end = max(local_start, end - chapter_start)
+                    return "\n".join(
+                        f'Voiceover, {max(a, local_start) - local_start:g}–'
+                        f'{min(b, local_end) - local_start:g} seconds: "{line}"'
+                        for a, b, line in override_voice_events
+                        if a < local_end and b > local_start
+                    )
+                return native_narration(start, end)
+
             # Preflight every chapter before submitting any billable provider task.
             segment_prompts: list[str] = []
             offset = 0
             for segment_index, seconds in enumerate(segment_durations):
                 from app.services.creative_studio_production_memory import compile_locked_chapter_prompt
 
-                local_prompt = compile_locked_chapter_prompt(
-                    production_memory, chapter_index=segment_index,
-                )
+                if chapter_prompt_override and segment_index == stage_index:
+                    local_prompt = validate_video_prompt(chapter_prompt_override)
+                    local_prompt += (
+                        "\n\nNEXT-CHAPTER OVERRIDE: Render only this newly authored chapter. "
+                        "Preserve the production's locked brand, fictional cast, voice character, "
+                        "wardrobe, location language and colour grade. Do not replay an earlier chapter."
+                    )
+                else:
+                    local_prompt = compile_locked_chapter_prompt(
+                        production_memory,
+                        chapter_index=segment_index,
+                        speech_mode=(
+                            "native_presenter"
+                            if native_presenter_speech
+                            else "external_voiceover"
+                        ),
+                    )
                 # Timeline slicing keeps only the current authored beat. Repeat
                 # the brand invariant on every billable scene request so it can
                 # never be lost with another global finishing section.
@@ -2040,7 +2438,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                 # submitting any billable task. Continuation instructions are short
                 # and use this already validated chapter prompt as their base.
                 validate_video_prompt(
-                    local_prompt + "\n" + native_narration(offset, offset + seconds)
+                    local_prompt + "\n" + staged_native_narration(
+                        segment_index, offset, offset + seconds
+                    )
                     + build_continuity_contract(
                         segment_index=segment_index,
                         segment_count=len(segment_durations),
@@ -2069,14 +2469,44 @@ async def run_creative_studio_job(job_id: str) -> None:
                         error="Cancelled by user",
                     )
                     return
-                if interactive_staging and segment_index > 0 and not continuity_video_reference_url:
+                use_chapter_first_frame = bool(
+                    interactive_staging
+                    and segment_index == stage_index
+                    and chapter_reference_mode == "first_frame"
+                    and chapter_seed_image_url
+                )
+                if use_chapter_first_frame:
+                    # BytePlus does not accept an exact first_frame and a reference
+                    # video in the same task. The user explicitly chose the exact
+                    # opening image, so this chapter resets visual continuity.
+                    continuity_reference_url = None
+                    cast_reference_url = None
+                    continuity_video_reference_url = None
+                if (
+                    interactive_staging
+                    and segment_index > 0
+                    and not continuity_video_reference_url
+                    and not continuity_reference_url
+                    and not use_chapter_first_frame
+                ):
                     raise RuntimeError(
-                        "The previous approved Seedance chapter video reference is unavailable. "
+                        "The previous approved Seedance chapter video and final-frame references are unavailable. "
                         "Generation stopped before submitting the next billable chapter to avoid "
                         "inventing a different presenter, voice or location."
                     )
                 segment_start = elapsed
                 segment_end = elapsed + segment_duration
+                chapter_reference_assets, chapter_reference_note = _reference_assets_for_chapter(
+                    list(brief.get("reference_assets") or []),
+                    authored_scene_plan,
+                    start=segment_start,
+                    end=segment_end,
+                )
+                chapter_broll_boundary = _chapter_starts_with_broll(
+                    authored_scene_plan,
+                    start=segment_start,
+                    end=segment_end,
+                )
                 chapter_input_continuity_url = continuity_reference_url
                 chapter_storyboard_urls: list[str] = []
                 if storyboard_urls:
@@ -2128,7 +2558,9 @@ async def run_creative_studio_job(job_id: str) -> None:
                     segment_prompt = validate_video_prompt(
                         segment_prompts[segment_index]
                         + "\n"
-                        + native_narration(part_start, segment_end)
+                        + staged_native_narration(
+                            segment_index, part_start, segment_end
+                        )
                         + build_continuity_contract(
                             segment_index=segment_index,
                             segment_count=len(segment_durations),
@@ -2137,6 +2569,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                             total_duration=generate_duration,
                             has_previous_frame=bool(continuity_reference_url),
                         )
+                        + chapter_reference_note
                         + continuation_instruction
                         + (
                             f"\nComplete the remaining action within the first {chapter_remaining:g}s; "
@@ -2165,6 +2598,8 @@ async def run_creative_studio_job(job_id: str) -> None:
                     source_path: Path | None = None
                     use_privacy_safe_handoff = False
                     use_privacy_safe_storyboard = False
+                    drop_rejected_video_reference = False
+                    drop_blocked_continuity = False
                     privacy_safe_storyboard_url: str | None = None
                     # Three staged attempts: exact approved frame, one transient
                     # retry, and (only after a privacy rejection) a face-free crop
@@ -2173,36 +2608,70 @@ async def run_creative_studio_job(job_id: str) -> None:
                     # A plain text-to-video request has no safer alternate input,
                     # so resubmitting it can only duplicate spend. Extra attempts
                     # are reserved for a materially different privacy-safe frame.
-                    attempt_limit = 2 if (exact_storyboard_mode or continuity_reference_url) else 1
+                    attempt_limit = (
+                        3
+                        if chapter_broll_boundary
+                        and continuity_video_reference_url
+                        and continuity_reference_url
+                        else 2
+                        if (
+                            exact_storyboard_mode
+                            or continuity_reference_url
+                            or use_chapter_first_frame
+                        )
+                        else 1
+                    )
                     for attempt in range(attempt_limit):
                         attempt_prompt = segment_prompt
                         # The official logo is reserved for deterministic finishing.
                         # Giving it to Seedance encourages approximate badges and
                         # wordmarks on clothing, boxes and signs.
                         attempt_reference_assets = [
-                            asset for asset in (brief.get("reference_assets") or [])
+                            asset for asset in chapter_reference_assets
                             if not (
                                 isinstance(asset, dict)
                                 and str(asset.get("role") or "").strip().lower() == "logo"
                             )
                         ]
-                        attempt_cast_reference_url = cast_reference_url
-                        attempt_continuity_reference_url = continuity_reference_url
-                        attempt_continuity_video_url = continuity_video_reference_url
+                        attempt_cast_reference_url = (
+                            None if drop_blocked_continuity else cast_reference_url
+                        )
+                        attempt_continuity_reference_url = (
+                            None if drop_blocked_continuity else continuity_reference_url
+                        )
+                        attempt_continuity_video_url = (
+                            None if drop_rejected_video_reference
+                            else continuity_video_reference_url
+                        )
                         attempt_strict_continuity = bool(continuity_reference_url)
                         attempt_strict_character = bool(brief.get("strict_character_reference"))
                         attempt_source_image_url = (
-                            chapter_storyboard_urls[0]
+                            chapter_seed_image_url
+                            if use_chapter_first_frame and continuation_index == 0
+                            else chapter_storyboard_urls[0]
                             if chapter_storyboard_urls and continuation_index == 0
                             else seed_url
                             if segment_index == 0 and continuation_index == 0
                             else None
                         )
                         attempt_strict_opening = bool(
-                            exact_storyboard_mode
-                            and chapter_storyboard_urls
-                            and continuation_index == 0
+                            continuation_index == 0
+                            and (
+                                use_chapter_first_frame
+                                or (exact_storyboard_mode and chapter_storyboard_urls)
+                            )
                         )
+                        if drop_blocked_continuity:
+                            attempt_strict_continuity = False
+                            attempt_strict_character = False
+                            attempt_prompt += (
+                                "\n\nB-ROLL CHAPTER BOUNDARY: BytePlus blocked both photoreal "
+                                "handoff inputs. Begin directly from this chapter's assigned B-roll "
+                                "reference and follow its authored motion. Do not show a presenter "
+                                "before the first PRESENTER scene. When the presenter returns, use "
+                                "the locked written cast description, wardrobe, office and voice; "
+                                "do not introduce a second person or a new speaking voice."
+                            )
                         if use_privacy_safe_storyboard:
                             if privacy_safe_storyboard_url is None:
                                 privacy_safe_storyboard_url = save_privacy_safe_storyboard_frame(
@@ -2416,7 +2885,34 @@ async def run_creative_studio_job(job_id: str) -> None:
                                 or "privacy" in provider_error.lower()
                                 or "real person" in provider_error.lower()
                             )
-                            if storyboard_privacy_blocked and not use_privacy_safe_storyboard:
+                            video_reference_blocked = _video_reference_rejection_allows_frame_retry(
+                                provider_error,
+                                video_reference_url=continuity_video_reference_url,
+                                frame_reference_url=continuity_reference_url,
+                            )
+                            if video_reference_blocked and not drop_rejected_video_reference:
+                                drop_rejected_video_reference = True
+                                await update_job(
+                                    job_id,
+                                    progress=(
+                                        "BytePlus rejected the previous chapter video reference; "
+                                        "retrying the same chapter from its exact saved final frame…"
+                                    ),
+                                )
+                            elif (
+                                privacy_blocked
+                                and chapter_broll_boundary
+                                and not drop_blocked_continuity
+                            ):
+                                drop_blocked_continuity = True
+                                await update_job(
+                                    job_id,
+                                    progress=(
+                                        "BytePlus also blocked the photoreal final frame. This chapter "
+                                        "starts with B-roll, so retrying from its assigned scene reference…"
+                                    ),
+                                )
+                            elif storyboard_privacy_blocked and not use_privacy_safe_storyboard:
                                 use_privacy_safe_storyboard = True
                                 await update_job(
                                     job_id,
@@ -2982,6 +3478,42 @@ async def run_creative_studio_job(job_id: str) -> None:
                     result["logo_deferred"] = film_index + 1 < film_total
             if logo_applied:
                 result["logo_applied"] = True
+            if proof_assets and authored_proof_scenes:
+                from app.services.proof_composite import composite_proof_windows
+
+                proof_scenes_for_output = authored_proof_scenes
+                proof_assets_for_output = proof_assets
+                if data.get("chapter_image_staging"):
+                    chapter_start, chapter_end = _chapter_timeline_window(
+                        data,
+                        production_memory,
+                        generate_duration=float(generate_duration),
+                    )
+                    localized: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                    for proof_index, scene in enumerate(authored_proof_scenes):
+                        scene_start = float(scene.get("start") or 0.0)
+                        scene_end = float(scene.get("end") or 0.0)
+                        if scene_start >= chapter_end or scene_end <= chapter_start:
+                            continue
+                        localized.append((
+                            proof_assets[proof_index],
+                            {
+                                **scene,
+                                "start": max(0.0, scene_start - chapter_start),
+                                "end": min(chapter_end, scene_end) - chapter_start,
+                            },
+                        ))
+                    proof_assets_for_output = [asset for asset, _ in localized]
+                    proof_scenes_for_output = [scene for _, scene in localized]
+                if proof_scenes_for_output:
+                    current_url, proof_count = composite_proof_windows(
+                        video_url=current_url,
+                        proof_assets=proof_assets_for_output,
+                        proof_scenes=proof_scenes_for_output,
+                        tenant_id=tenant_id,
+                    )
+                    result["proof_composited"] = proof_count > 0
+                    result["proof_composite_count"] = proof_count
             if timed_tts and (result.get("voiceover") or {}).get("status") != "done":
                 mix_error = result.get("audio_warning") or "Required narration finishing failed"
                 result["audio_warning"] = mix_error
@@ -2997,10 +3529,24 @@ async def run_creative_studio_job(job_id: str) -> None:
                     "provider": "seedance",
                 }
             result["url"] = current_url
-            from app.services.ffmpeg_util import probe_has_audio
+            from app.services.ffmpeg_util import probe_has_audio, probe_video_duration
             from app.services.video_subtitles import _ensure_local_video
 
             audio_path = _ensure_local_video(current_url, tenant_id=tenant_id)
+            final_duration = probe_video_duration(audio_path) if audio_path else None
+            if final_duration and final_duration > 0:
+                result["duration_seconds"] = int(round(final_duration))
+                expected_duration = float(
+                    (result or {}).get("requested_duration_seconds")
+                    or generate_duration
+                    or 0
+                )
+                if expected_duration and final_duration + 0.75 < expected_duration:
+                    result["partial"] = True
+                    result["duration_warning"] = (
+                        f"Final output is {final_duration:.1f}s, shorter than the "
+                        f"requested {expected_duration:.0f}s."
+                    )
             has_audio = probe_has_audio(audio_path) if audio_path else None
             result["audio_present"] = has_audio
             if sound_on and has_audio is not True:
@@ -3093,6 +3639,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                 f" {(result or {}).get('text_overlay_count') or 0} exact timed text "
                 "overlay(s) applied."
             )
+        if (result or {}).get("proof_composited"):
+            stitch_note += (
+                f" {(result or {}).get('proof_composite_count') or 0} original proof "
+                "card(s) composited in the editor without generative redrawing."
+            )
         if (result or {}).get("logo_applied"):
             stitch_note += " Brand logo applied."
         provider_usage = (result or {}).get("provider_usage") or []
@@ -3118,7 +3669,13 @@ async def run_creative_studio_job(job_id: str) -> None:
         await update_job(
             job_id,
             status=status if status in {"done", "mock", "failed"} else "failed",
-            progress=("Completed with audio warnings" if (result or {}).get("audio_warning") else "Done")
+            progress=(
+                "Partial output — duration mismatch"
+                if (result or {}).get("partial") and (result or {}).get("duration_warning")
+                else "Completed with audio warnings"
+                if (result or {}).get("audio_warning")
+                else "Done"
+            )
             if status in {"done", "mock"} else "Failed",
             error=(result or {}).get("error"),
             result=_video_job_result_payload(
@@ -3134,9 +3691,63 @@ async def run_creative_studio_job(job_id: str) -> None:
         )
     except Exception as exc:
         logger.exception("Creative Studio job %s failed", job_id)
+        retry_result: dict[str, Any] | None = None
+        staged_paths = [
+            str(value) for value in (data.get("staged_segment_paths") or [])
+            if str(value or "").strip()
+        ]
+        continuity_frame = str(data.get("continuity_reference_url") or "").strip()
+        stage_index = int(data.get("stage_index") or 0)
+        if (
+            bool(data.get("interactive_staging"))
+            and stage_index > 0
+            and staged_paths
+            and continuity_frame
+        ):
+            segment_count = stage_index + 1
+            try:
+                from app.services.creative_studio_production_memory import load_production_memory
+
+                retry_memory = load_production_memory(
+                    tenant_id,
+                    str(data.get("production_session_id") or data.get("creative_studio_session_id") or ""),
+                )
+                segment_count = max(
+                    segment_count,
+                    len(list((retry_memory or {}).get("shot_list") or [])),
+                )
+            except Exception:
+                logger.exception("Could not read production memory while preserving continuation")
+            retry_result = {
+                "status": "failed",
+                "model": str(data.get("model") or ""),
+                "requested_duration_seconds": int(
+                    data.get("duration_seconds") or data.get("full_film_duration") or 0
+                ),
+                "segment_count": segment_count,
+                "completed_segments": stage_index,
+                "generated_duration_seconds": int(data.get("generated_duration_seconds") or 0),
+                "continuation_available": True,
+                "partial": True,
+                "staged_segment_paths": staged_paths,
+                "continuity_reference_url": continuity_frame,
+                "continuity_video_reference_url": (
+                    str(data.get("continuity_video_reference_url") or "").strip() or None
+                ),
+                "cast_reference_url": (
+                    str(data.get("cast_reference_url") or "").strip() or None
+                ),
+                "continuity_frame_count": int(data.get("continuity_frame_count") or 0),
+                "production_id": data.get("production_id"),
+                "note": (
+                    "The accepted earlier chapter is preserved. Continue in this same chat to "
+                    "retry only the unfinished chapter from the saved final frame."
+                ),
+            }
         await update_job(
             job_id,
             status="failed",
-            progress="Failed",
+            progress=("Continuation ready to retry" if retry_result else "Failed"),
             error=str(exc)[:500],
+            result=retry_result,
         )

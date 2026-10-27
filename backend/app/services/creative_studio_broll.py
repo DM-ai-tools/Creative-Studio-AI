@@ -8,6 +8,186 @@ from typing import Any
 
 SEEDANCE_MIN_SEGMENT_SECONDS = 4.0
 
+_PRODUCTION_SETUP_MARKERS = (
+    "production lock only",
+    "lock only — do not",
+    "do not start seedance",
+    "don't start seedance",
+    "do not start video",
+    "no seedance yet",
+    "confirm production locked",
+    "b-roll stills first",
+    "broll stills first",
+    "generate b-roll stills first",
+    "generate broll stills first",
+    "do not start seedance yet",
+    "do not start the full video",
+    "seedance will not start",
+    "next i will generate image",
+    "reply: confirm production",
+)
+
+
+def is_master_production_brief(text: str) -> bool:
+    """
+    True when the user pastes a full production master brief that contains
+    IMAGE blocks + SCENE/chapter timeline. The app should auto-orchestrate
+    the whole pipeline from this single paste.
+    """
+    t = str(text or "")
+    if len(t) < 800:
+        return False
+    has_image_blocks = bool(re.search(r"(?im)^[ \t]*IMAGE\s+\d+\s*[-–—]", t))
+    has_scenes = bool(re.search(r"(?im)^[ \t]*(?:SCENE|Chapter)\s+\d+\s*[—–\-]", t))
+    has_timeline = bool(re.search(r"\d{2}:\d{2}[–—\-]\d{2}:\d{2}", t))
+    has_dialogue = bool(re.search(r"(?i)DIALOGUE|SPEAK EXACTLY|narration", t))
+    return has_image_blocks and (has_scenes or has_timeline) and has_dialogue
+
+
+def build_presenter_only_prompt(scene_plan: list[dict]) -> str:
+    """
+    Build a Seedance native-speech prompt containing ONLY presenter scenes.
+    B-roll and proof scenes are excluded — their audio is handled by TTS voiceover.
+    This prevents Seedance from generating multiple voices or cutting clips short.
+    """
+    presenter_scenes = [s for s in scene_plan if s.get("type") == "presenter"]
+    if not presenter_scenes:
+        return ""
+    lines = []
+    for s in presenter_scenes:
+        t_start = s.get("start", 0)
+        t_end = s.get("end", t_start + 10)
+        dialogue = str(s.get("dialogue") or "").strip()
+        visual = str(s.get("visual") or "").strip()
+        m_start, s_start = divmod(int(t_start), 60)
+        m_end, s_end = divmod(int(t_end), 60)
+        lines.append(
+            f"{m_start:02d}:{s_start:02d}–{m_end:02d}:{s_end:02d} PRESENTER — SPEAK EXACTLY:\n"
+            f"\"{dialogue}\"\n"
+            f"VISUAL: {visual}"
+        )
+    return "\n\n".join(lines)
+
+
+def split_scene_plan_by_audio_mode(
+    scene_plan: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """
+    Split scene plan into:
+    - native_speech_scenes: presenter scenes → Seedance generates lip-synced video + audio
+    - tts_scenes: proof + broll scenes → Seedance generates silent video, app overlays TTS
+
+    Returns (native_speech_scenes, tts_scenes)
+    """
+    native = [s for s in scene_plan if s.get("type") == "presenter"]
+    tts = [s for s in scene_plan if s.get("type") in {"proof", "broll"}]
+    return native, tts
+
+
+def _scene_requests_proof_composite(body_low: str) -> bool:
+    """True only when a scene positively requires editor proof compositing."""
+    if re.search(
+        r"(?i)\b(?:no|not|without|do not|don't|never|exclude|recreate|display|repeat)\b"
+        r"[^\n]{0,48}\bproof\b",
+        body_low,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"(?i)proof composite|replacement plate|editor[- ]only|editor.*composite|"
+            r"(?:exact|original|uploaded)\s+proof(?:\s+card|\s+image)?|"
+            r"show the exact uploaded proof|@proof_[a-z0-9]+|"
+            r"use\s+@?proof_[a-z0-9]+",
+            body_low,
+        )
+    )
+
+
+def parse_scene_plan(brief: str) -> list[dict]:
+    """
+    Parse every SCENE N — block from the master brief into an ordered list:
+    [{"scene": 1, "start": 0.0, "end": 10.0, "type": "proof"|"broll"|"presenter",
+      "broll_index": 1|None, "dialogue": "...", "visual": "..."}]
+    """
+    _SCENE_BLOCK = re.compile(
+        r"(?is)SCENE\s+(\d+)\s*[—–\-]+\s*"
+        r"(\d{1,2}:\d{2})[–—\-]+(\d{1,2}:\d{2})"
+        r"([^\n]*)\n"
+        r"(.+?)"
+        r"(?=\n\s*SCENE\s+\d+\s*[—–\-]|\Z)",
+    )
+    scenes = []
+    for m in _SCENE_BLOCK.finditer(brief):
+        num = int(m.group(1))
+        start = _parse_time(m.group(2))
+        end = _parse_time(m.group(3))
+        header = str(m.group(4) or "").strip()
+        body = str(m.group(5) or "").strip()
+
+        # Determine scene type
+        body_low = body.lower()
+        type_text = f"{header}\n{body}".lower()
+        broll_idx = None
+        broll_m = re.search(r"USE\s+IMAGE\s+(\d+)", body, re.I)
+        if broll_m:
+            broll_idx = int(broll_m.group(1))
+            scene_type = "broll"
+        elif re.search(r"\bb[ -]?roll\b|\bcutaway\b", type_text):
+            scene_type = "broll"
+        elif _scene_requests_proof_composite(body_low):
+            scene_type = "proof"
+        elif re.search(r"presenter|talking.head|return.*presenter", type_text):
+            scene_type = "presenter"
+        else:
+            scene_type = "presenter"
+
+        # Extract dialogue
+        dialogue_m = re.search(
+            r"(?is)(?:DIALOGUE[^\n]*\n(?:SPEAK EXACTLY[:\s]*)?|SPEAK EXACTLY[:\s]*)"
+            r"\n?[“\"']?(.+?)[”\"']?(?=\n\n|\Z)",
+            body,
+        )
+        dialogue = re.sub(r"\s+", " ", str(dialogue_m.group(1) if dialogue_m else "").strip())
+
+        # Extract visual direction
+        visual_m = re.search(
+            r"(?is)VISUAL\s*:\s*(.+?)(?=\n\s*(?:SPEAK EXACTLY|VOICEOVER|DIALOGUE)\b|\n\n|\Z)",
+            body,
+        )
+        visual = re.sub(r"\s+", " ", str(visual_m.group(1) if visual_m else "").strip())
+
+        scenes.append({
+            "scene": num,
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "type": scene_type,
+            "broll_index": broll_idx,
+            "dialogue": dialogue[:500],
+            "visual": visual[:400],
+        })
+    return scenes
+
+
+def is_production_setup_only_message(text: str) -> bool:
+    """User is locking the brief / plan — must not queue Seedance yet."""
+    low = str(text or "").lower()
+    if any(marker in low for marker in _PRODUCTION_SETUP_MARKERS):
+        return True
+    if "production lock" in low and any(
+        phrase in low
+        for phrase in (
+            "do not start",
+            "don't start",
+            "not start seedance",
+            "b-roll first",
+            "broll first",
+            "images first",
+            "reply:",
+        )
+    ):
+        return True
+    return False
+
 _BROLL_BLOCK = re.compile(
     r"(?is)IMAGE\s+(\d+)\s*[-–—]\s*([^\n]+)\n"
     r"(?:[^\n]*\n)*?"
@@ -16,7 +196,7 @@ _BROLL_BLOCK = re.compile(
     r"(\d{1,2}(?::\d{2}(?:\.\d+)?|\.\d+)?|\d+(?:\.\d+)?)\s*(?:s|seconds?)?\b"
     r"(?:[^\n]*\n)*?"
     r"(?:Image generation prompt:\s*\n?)?"
-    r"(.+?)(?=\n(?:Use:|Do not reuse|\-{3,}|IMAGE\s+\d+\s*[-–—]|\Z))"
+    r"(.+?)(?=\n(?:Use:|Do not reuse|\-{3,}|IMAGE\s+\d+\s*[-–—])|\Z)"
 )
 
 _BACKGROUND_IMAGE_HEADER = re.compile(
@@ -87,6 +267,73 @@ def _parse_time(value: str) -> float:
         mins, secs = raw.split(":", 1)
         return float(mins) * 60.0 + float(secs)
     return float(raw)
+
+
+def _parse_standalone_image_block(text: str) -> dict[str, Any] | None:
+    """
+    Parse a single pasted IMAGE block that may have no trailing newline.
+    Matches format:
+        IMAGE 1 - TITLE
+        Scene timing: 0:08–0:09.5
+        Image generation prompt:
+        <prompt text ...>
+    """
+    m = re.search(
+        r"(?is)IMAGE\s+(\d+)\s*[-–—:]\s*([^\n]+)",
+        text,
+    )
+    if not m:
+        return None
+    index = int(m.group(1))
+    title = re.sub(r"\s+", " ", str(m.group(2) or f"Image {index}")).strip()
+
+    # Extract timing — "Scene timing: 0:08–0:09.5" or inline like "0:08-0:09.5"
+    timing = re.search(
+        r"(?i)(?:scene\s*timing\s*[:\s]\s*)?"
+        r"(\d{1,2}(?::\d{2}(?:\.\d+)?|\.\d+)?|\d+(?:\.\d+)?)\s*[–—\-]\s*"
+        r"(\d{1,2}(?::\d{2}(?:\.\d+)?|\.\d+)?|\d+(?:\.\d+)?)",
+        text,
+    )
+    start = _parse_time(timing.group(1)) if timing else 0.0
+    end = _parse_time(timing.group(2)) if timing else start + 1.5
+    if end <= start:
+        end = start + 1.5
+
+    # Extract prompt — everything after "Image generation prompt:" label (or full text)
+    prompt_match = re.search(
+        r"(?is)image\s+generation\s+prompt\s*[:\s]\s*(.+)$",
+        text,
+    )
+    if prompt_match:
+        prompt = re.sub(r"\s+", " ", str(prompt_match.group(1) or "").strip())
+    else:
+        # Fallback: strip the header lines, use the rest as the prompt
+        lines = text.strip().splitlines()
+        body_lines = [
+            l for l in lines
+            if not re.match(r"(?i)image\s+\d+|scene\s+timing", l)
+        ]
+        prompt = " ".join(body_lines).strip()
+
+    if not prompt:
+        return None
+
+    wants_readable = image_prompt_wants_readable_text(prompt, brief=text)
+    suffix = _BROLL_READABLE_SUFFIX if wants_readable else _BROLL_ABSTRACT_SUFFIX
+    if wants_readable and _BROLL_READABLE_PREFIX.strip() not in prompt:
+        prompt = f"{_BROLL_READABLE_PREFIX}{prompt}"
+    if suffix.strip() not in prompt:
+        prompt = f"{prompt}{suffix}"
+
+    return {
+        "index": index,
+        "title": title[:120],
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration": round(end - start, 3),
+        "image_prompt": prompt[:2200],
+        "wants_readable_text": wants_readable,
+    }
 
 
 def parse_broll_images(brief: str) -> list[dict[str, Any]]:

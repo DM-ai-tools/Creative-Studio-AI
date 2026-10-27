@@ -155,6 +155,37 @@ def probe_video_duration(video_path: Path | str) -> float | None:
     return val if val > 0.5 else None
 
 
+def probe_video_stream_duration(video_path: Path | str) -> float | None:
+    """Decode only the video stream and return its real final timestamp.
+
+    Container duration can be longer than the video stream when audio survives a
+    bad stitch. Decoding to the null muxer catches that frozen-last-frame case.
+    """
+    path = Path(video_path)
+    ffmpeg = ffmpeg_executable()
+    if not path.is_file() or not ffmpeg:
+        return None
+    proc = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path),
+            "-map", "0:v:0", "-an", "-f", "null", "-",
+            "-progress", "pipe:1", "-nostats",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        return None
+    values: list[float] = []
+    import re
+
+    for match in re.finditer(r"(?m)^out_time=(\d+):(\d+):(\d+(?:\.\d+)?)$", proc.stdout or ""):
+        hours, minutes, seconds = int(match.group(1)), int(match.group(2)), float(match.group(3))
+        values.append(hours * 3600 + minutes * 60 + seconds)
+    return max(values) if values and max(values) > 0.1 else None
+
+
 def drawtext_font_opts() -> str:
     """fontconfig name (bundled ffmpeg on Windows has libfontconfig)."""
     if os.name == "nt":

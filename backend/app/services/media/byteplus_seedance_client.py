@@ -78,6 +78,8 @@ def is_seedance_25_model(model: str | None) -> bool:
 
 
 def seedance_clip_cap_seconds(model: str | None) -> int:
+    # BytePlus accepts any whole-second duration in these documented ranges.
+    # Seedance 2.5: 4-30 seconds. Seedance 2.0: 4-15 seconds.
     return 30 if is_seedance_25_model(model) else 15
 
 
@@ -239,12 +241,28 @@ def resolve_seedance_api_ratio(
     )
 
 
-def clamp_seedance_duration(seconds: int | None, *, max_seconds: int = 15) -> int:
+def snap_to_valid_seedance_duration(seconds: int, model: str | None = None) -> int:
+    """Clamp a whole-second request to the documented BytePlus model range."""
+    try:
+        n = int(seconds)
+    except (TypeError, ValueError):
+        n = 5
+    cap = seedance_clip_cap_seconds(model)
+    return max(4, min(cap, n))
+
+
+def clamp_seedance_duration(
+    seconds: int | None,
+    *,
+    max_seconds: int = 15,
+    model: str | None = None,
+) -> int:
     try:
         n = int(seconds or 5)
     except (TypeError, ValueError):
         n = 5
-    return max(4, min(max_seconds, n))
+    cap = min(max(4, int(max_seconds or 15)), seedance_clip_cap_seconds(model))
+    return max(4, min(cap, n))
 
 
 def map_resolution(resolution: str | None, *, model: str | None = None) -> str:
@@ -340,6 +358,7 @@ async def create_video_task(
         "duration": clamp_seedance_duration(
             duration,
             max_seconds=seedance_clip_cap_seconds(api_model),
+            model=api_model,
         ),
         "ratio": task_ratio,
         "resolution": map_resolution(resolution, model=api_model),
@@ -477,3 +496,4 @@ def extract_video_url(task: dict[str, Any]) -> str | None:
         if task.get(key):
             return str(task[key])
     return None
+

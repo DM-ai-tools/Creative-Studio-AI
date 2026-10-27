@@ -16,8 +16,12 @@ import { mapCreativeFormatOptions, videoPreviewAspectClass, videoModalObjectFit 
 import { getVariantPreviewUrls } from '@/lib/variantMedia'
 import { cn, formatDate } from '@/lib/utils'
 import type { Variant, AdFormat, ComplianceStatus } from '@/types'
+import { useAuth } from '@/hooks/useAuth'
+import { isCsSeedance25Only } from '@/lib/productScope'
 
 export default function VariantsPage() {
+  const { user } = useAuth()
+  const cs25Only = isCsSeedance25Only(user)
   const [formatFilter, setFormatFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [briefFilter, setBriefFilter] = useState('all')
@@ -112,8 +116,12 @@ export default function VariantsPage() {
             <Button variant="outline" size="sm" onClick={handleRefresh}>
               Refresh
             </Button>
-            <Button variant="secondary" size="sm">Send to Compliance</Button>
-            <Button variant="primary" size="sm">Export Selected</Button>
+            {!cs25Only && (
+              <>
+                <Button variant="secondary" size="sm">Send to Compliance</Button>
+                <Button variant="primary" size="sm">Export Selected</Button>
+              </>
+            )}
           </>
         }
       />

@@ -11,9 +11,12 @@ import { assetUrl } from '@/lib/utils'
 import type { Asset, GenerationModelOption } from '@/types'
 import {
   emptyCsSession,
+  csHistoryScope,
   getCsActiveChatId,
   loadCsChatSessions,
-  saveCsChatSessions,
+  persistCsChatSession,
+  removeCsChatSession,
+  sessionStorageScope,
   setCsActiveChatId,
   titleFromMessages,
   type CsChatMessage,
@@ -23,12 +26,15 @@ import {
 } from '@/lib/csChatHistory'
 import CsMessageContent from '@/components/brief/CsMessageContent'
 import { UI } from '@/lib/uiLabels'
+import { useAuth } from '@/hooks/useAuth'
+import { CS25_DEFAULT_VIDEO_MODEL, isCsSeedance25Only } from '@/lib/productScope'
 
 type ChatMode = 'auto' | 'ask' | 'generate'
 type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
 type AspectId = '9/16' | '1/1' | '16/9' | '4/3' | '4/5'
 type ResolutionId = '480p' | '720p' | '1080p'
 type SpeechMode = 'native_presenter' | 'external_voiceover'
+type ContinuationReferenceMode = 'continuity' | 'first_frame'
 type PipelineAction = CsPipelineAction
 type MediaLibrarySection = 'uploads' | 'generations' | 'characters' | 'liked'
 type MediaLibraryFilter = 'recent' | 'all' | 'images' | 'videos' | 'audio'
@@ -44,6 +50,8 @@ interface Props {
   brandName?: string
   productName?: string
   initialPrompt?: string
+  /** When true, video output is locked to Seedance 2.5 (account policy). */
+  seedance25Only?: boolean
 }
 
 const DURATIONS: { id: DurationId; label: string }[] = [
@@ -157,6 +165,75 @@ function mergeStoryboardFrames(
   )
 }
 
+function isProductionSetupMessage(text: string): boolean {
+  const low = text.toLowerCase()
+  if (low.includes('production lock only')) return true
+  if (low.includes('do not start seedance') || low.includes("don't start seedance")) return true
+  if (low.includes('do not start video') || low.includes('no seedance yet')) return true
+  if (low.includes('b-roll stills first') || low.includes('broll stills first')) return true
+  if (low.includes('generate b-roll stills first') || low.includes('generate broll stills first')) {
+    return true
+  }
+  if (low.includes('production lock') && (
+    low.includes('do not start') ||
+    low.includes("don't start") ||
+    low.includes('b-roll first') ||
+    low.includes('broll first') ||
+    low.includes('reply:')
+  )) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Parse inline chapter timestamps like "0:00–0:23" or "0:23–0:53" from a prompt
+ * and return the total chapter duration in seconds.
+ * Finds the LAST end-time in the prompt (e.g. 0:23 → 23s, 0:53 → 53-23=30s for window).
+ * Actually returns (lastEndSeconds - firstStartSeconds) as the chapter window duration.
+ */
+function extractChapterDurationFromPrompt(text: string): number | undefined {
+  // Match patterns: 0:00–0:23, 0:23-0:53, 00:10–00:23 etc.
+  const timeRe = /(\d{1,2}):(\d{2})\s*[–—\-]\s*(\d{1,2}):(\d{2})/g
+  let firstStart: number | undefined
+  let lastEnd: number | undefined
+  let m: RegExpExecArray | null
+  while ((m = timeRe.exec(text)) !== null) {
+    const startSec = parseInt(m[1]) * 60 + parseInt(m[2])
+    const endSec = parseInt(m[3]) * 60 + parseInt(m[4])
+    if (firstStart === undefined) firstStart = startSec
+    lastEnd = endSec
+  }
+  if (firstStart === undefined || lastEnd === undefined) return undefined
+  const duration = lastEnd - firstStart
+  return duration > 0 ? duration : undefined
+}
+
+/** Count how many IMAGE N - blocks are in the text */
+function countBrollImageBlocks(text: string): number {
+  const matches = text.match(/(?:^|\n)\s*IMAGE\s+\d+\s*[-–—:]/gi)
+  return matches ? matches.length : 0
+}
+
+/** Detect IMAGE 1–9 B-roll block pastes — should generate stills, never a video */
+function isBrollImageBlock(text: string): boolean {
+  return /(?:^|\n)\s*IMAGE\s+\d+\s*[-–—:]/im.test(text) &&
+    /scene\s*timing|image\s+generation\s+prompt/i.test(text)
+}
+
+/**
+ * Detect a full master production brief:
+ * has IMAGE blocks + SCENE timeline + DIALOGUE — one paste orchestrates everything.
+ */
+function isMasterProductionBrief(text: string): boolean {
+  if (text.length < 800) return false
+  const hasImages = /(?:^|\n)\s*IMAGE\s+\d+\s*[-–—]/im.test(text)
+  const hasScenes = /(?:^|\n)\s*SCENE\s+\d+\s*[-–—]/im.test(text)
+  const hasTimeline = /\d{2}:\d{2}[–—\-]\d{2}:\d{2}/.test(text)
+  const hasDialogue = /DIALOGUE|SPEAK EXACTLY|narration/i.test(text)
+  return hasImages && hasScenes && hasTimeline && hasDialogue
+}
+
 function seedanceClipCap(modelId: string) {
   return /2-5|2\.5/i.test(modelId) ? 30 : 15
 }
@@ -193,7 +270,9 @@ function buildContinuationRecoveryPayload(args: {
   const clipCap = seedanceClipCap(args.videoModel)
   const durationSeconds =
     args.requestedDurationSeconds ??
-    (args.duration === 'auto' ? 90 : Number(args.duration))
+    (args.duration === 'auto'
+      ? (extractChapterDurationFromPrompt(args.videoPrompt) ?? 90)
+      : Number(args.duration))
   return {
     creative_studio_session_id: args.sessionId,
     media_mode: 'video',
@@ -318,7 +397,10 @@ export default function CreativeStudioTab({
   brandName,
   productName,
   initialPrompt,
+  seedance25Only: seedance25OnlyProp,
 }: Props) {
+  const { user } = useAuth()
+  const seedance25Only = seedance25OnlyProp ?? isCsSeedance25Only(user)
   const {
     data: csModels,
     isLoading: catalogLoading,
@@ -341,6 +423,20 @@ export default function CreativeStudioTab({
 
   const [pickedBrandId, setPickedBrandId] = useState(brandIdProp || '')
   const brandId = (brandIdProp || pickedBrandId || '').trim() || undefined
+  const freshWorkspace = useMemo(() => {
+    const bc = user?.brief_count
+    const vc = user?.variant_count
+    if (bc == null || vc == null) return false
+    return bc === 0 && vc === 0
+  }, [user?.brief_count, user?.variant_count])
+  const historyScope = useMemo(
+    () =>
+      csHistoryScope(user?.id, briefId, brandId, {
+        tenantId: user?.tenant_id,
+        freshWorkspace,
+      }),
+    [user?.id, user?.tenant_id, freshWorkspace, briefId, brandId],
+  )
   const selectedBrand = (brands || []).find((brand) => brand.id === brandId)
   const effectiveBrandName = brandName || selectedBrand?.name || ''
 
@@ -360,6 +456,8 @@ export default function CreativeStudioTab({
   const [videoModel, setVideoModel] = useState('ark-seedance-2-0')
   const [soundOn, setSoundOn] = useState(true)
   const [speechMode, setSpeechMode] = useState<SpeechMode>('native_presenter')
+  const [continuationReferenceMode, setContinuationReferenceMode] =
+    useState<ContinuationReferenceMode>('continuity')
   const [useStoryboardReferences, setUseStoryboardReferences] = useState(false)
   // Direct Seedance remains the default. Image-first is opt-in so existing
   // chats keep their current cost and generation behaviour.
@@ -409,10 +507,11 @@ export default function CreativeStudioTab({
     [csModels],
   )
   const defaultChatModel = csModels?.default_chat_model || 'anthropic/claude-sonnet-4.6'
-  const videoModels = useMemo(
-    () => (csModels?.video_models || []) as GenerationModelOption[],
-    [csModels],
-  )
+  const videoModels = useMemo(() => {
+    const all = (csModels?.video_models || []) as GenerationModelOption[]
+    if (!seedance25Only) return all
+    return all.filter((m) => /2-5|2\.5/i.test(m.id))
+  }, [csModels, seedance25Only])
   const imageModels = useMemo(
     () => (csModels?.image_models || []) as GenerationModelOption[],
     [csModels],
@@ -421,10 +520,36 @@ export default function CreativeStudioTab({
   const imageModelLabelText = imageModelLabel(imageModel)
   const projectDurationSeconds = duration === 'auto' ? 90 : Number(duration)
   const videoModelLabel = seedanceModelLabel(videoModel)
+  const pendingContinuationMessage = useMemo(
+    () =>
+      [...messages]
+        .reverse()
+        .find(
+          (message) =>
+            Boolean(message.jobId) &&
+            (message.suggestedActions?.includes('continue_video') ||
+              isChapterHandoffReady(
+                message,
+                message.continuationMeta?.requested_duration_seconds ??
+                  projectDurationSeconds,
+                clipCap,
+              )),
+        ),
+    [messages, projectDurationSeconds, clipCap],
+  )
   const selectedChatLabel = useMemo(() => {
     if (chatModel === 'auto') return 'Auto'
     return chatModels.find((m) => m.id === chatModel)?.label || chatModel
   }, [chatModel, chatModels])
+
+  useEffect(() => {
+    if (!seedance25Only) return
+    const preferred =
+      csModels?.video_model_default && /2-5|2\.5/i.test(csModels.video_model_default)
+        ? csModels.video_model_default
+        : CS25_DEFAULT_VIDEO_MODEL
+    setVideoModel(preferred)
+  }, [seedance25Only, csModels?.video_model_default])
 
   const applySession = useCallback((session: CsChatSession) => {
     const storedMessages = session.messages || []
@@ -492,27 +617,52 @@ export default function CreativeStudioTab({
   }, [csModels?.video_model_default])
 
   useEffect(() => {
+    if (!user?.id) {
+      setSessions([])
+      setHydrated(false)
+      return
+    }
+    if (user.brief_count == null || user.variant_count == null) {
+      return
+    }
     skipNextHistorySaveRef.current = true
     setHydrated(false)
-    const loaded = loadCsChatSessions(briefId, brandId)
+    const loaded = loadCsChatSessions(historyScope)
     let list = loaded
-    let activeId = getCsActiveChatId(briefId, brandId)
+    let activeId = getCsActiveChatId(historyScope)
     let current = list.find((s) => s.id === activeId)
     if (!current) {
       if (list.length === 0) {
-        current = emptyCsSession()
+        current = {
+          ...emptyCsSession(),
+          historyBrandId: brandId,
+          historyBriefId: briefId,
+        }
         list = [current]
-        saveCsChatSessions(briefId, brandId, list)
+        persistCsChatSession(historyScope, current)
       } else {
         current = list[0]
       }
       activeId = current.id
-      setCsActiveChatId(briefId, brandId, activeId)
+      const activeScope = sessionStorageScope(historyScope, {
+        ...current,
+        historyBrandId: current.historyBrandId ?? brandId,
+        historyBriefId: current.historyBriefId ?? briefId,
+      })
+      setCsActiveChatId(activeScope, activeId)
     }
     setSessions(list)
     applySession(current)
     setHydrated(true)
-  }, [briefId, brandId, applySession])
+  }, [
+    historyScope,
+    user?.id,
+    user?.brief_count,
+    user?.variant_count,
+    applySession,
+    briefId,
+    brandId,
+  ])
 
   useEffect(() => {
     if (!hydrated || !activeChatId) return
@@ -528,10 +678,10 @@ export default function CreativeStudioTab({
         messagesUnchanged && existing?.title
           ? existing.title
           : messages.length > 0
-            ? titleFromMessages(messages)
-            : existing?.title && existing.title !== 'New chat'
-              ? existing.title
-              : 'New chat'
+          ? titleFromMessages(messages)
+          : existing?.title && existing.title !== 'New chat'
+            ? existing.title
+            : 'New chat'
       const nextSession: CsChatSession = {
         id: activeChatId,
         title,
@@ -567,13 +717,19 @@ export default function CreativeStudioTab({
         ...nextSession,
         updatedAt: activityChanged ? Date.now() : existing?.updatedAt || Date.now(),
       }
+      const tagged: CsChatSession = {
+        ...savedSession,
+        historyBrandId: existing?.historyBrandId ?? brandId,
+        historyBriefId: existing?.historyBriefId ?? briefId,
+      }
+      persistCsChatSession(historyScope, tagged)
+      const activeScope = sessionStorageScope(historyScope, tagged)
+      setCsActiveChatId(activeScope, activeChatId)
       const next = activityChanged
-        ? [savedSession, ...prev.filter((s) => s.id !== activeChatId)]
-        : [...prev.map((s) => (s.id === activeChatId ? savedSession : s))].sort(
+        ? [{ ...tagged, updatedAt: tagged.updatedAt }, ...prev.filter((s) => s.id !== activeChatId)]
+        : [...prev.map((s) => (s.id === activeChatId ? { ...tagged } : s))].sort(
             (a, b) => b.updatedAt - a.updatedAt,
           )
-      saveCsChatSessions(briefId, brandId, next)
-      setCsActiveChatId(briefId, brandId, activeChatId)
       return next
     })
   }, [
@@ -593,9 +749,10 @@ export default function CreativeStudioTab({
     cloneSceneId,
     cloneCount,
     activeChatId,
-    briefId,
-    brandId,
+    historyScope,
     hydrated,
+    brandId,
+    briefId,
   ])
 
   useEffect(() => {
@@ -604,13 +761,16 @@ export default function CreativeStudioTab({
   }, [messages, busy])
 
   const startNewChat = () => {
-    const session = emptyCsSession()
+    const session: CsChatSession = {
+      ...emptyCsSession(),
+      historyBrandId: brandId,
+      historyBriefId: briefId,
+    }
     setSessions((prev) => {
-      const next = [session, ...prev]
-      saveCsChatSessions(briefId, brandId, next)
-      return next
+      persistCsChatSession(historyScope, session)
+      return [session, ...prev]
     })
-    setCsActiveChatId(briefId, brandId, session.id)
+    setCsActiveChatId(sessionStorageScope(historyScope, session), session.id)
     applySession(session)
   }
 
@@ -619,7 +779,7 @@ export default function CreativeStudioTab({
     const session = sessions.find((s) => s.id === id)
     if (!session) return
     viewOnlyChatIdRef.current = id
-    setCsActiveChatId(briefId, brandId, id)
+    setCsActiveChatId(sessionStorageScope(historyScope, session), id)
     applySession(session)
   }
 
@@ -627,19 +787,24 @@ export default function CreativeStudioTab({
 
   const deleteChat = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation()
+    const target = sessions.find((s) => s.id === id)
+    if (target) removeCsChatSession(historyScope, target)
     const remaining = sessions.filter((s) => s.id !== id)
     if (remaining.length === 0) {
-      const fresh = emptyCsSession()
-      saveCsChatSessions(briefId, brandId, [fresh])
+      const fresh: CsChatSession = {
+        ...emptyCsSession(),
+        historyBrandId: brandId,
+        historyBriefId: briefId,
+      }
+      persistCsChatSession(historyScope, fresh)
       setSessions([fresh])
-      setCsActiveChatId(briefId, brandId, fresh.id)
+      setCsActiveChatId(sessionStorageScope(historyScope, fresh), fresh.id)
       applySession(fresh)
       return
     }
-    saveCsChatSessions(briefId, brandId, remaining)
     setSessions(remaining)
     if (id === activeChatId) {
-      setCsActiveChatId(briefId, brandId, remaining[0].id)
+      setCsActiveChatId(sessionStorageScope(historyScope, remaining[0]), remaining[0].id)
       applySession(remaining[0])
     }
   }
@@ -912,7 +1077,8 @@ export default function CreativeStudioTab({
                 }
               : session,
           )
-          saveCsChatSessions(briefId, brandId, next)
+          const touched = next.find((s) => s.id === sessionId)
+          if (touched) persistCsChatSession(historyScope, touched)
           return next
         })
       }
@@ -979,7 +1145,9 @@ export default function CreativeStudioTab({
             const brollBoardReady =
               done && mediaMode === 'broll_board' && board.some((b) => b.url)
             const suggestedActions: PipelineAction[] =
-              done && mediaMode === 'video' && res.retry_chapter_available
+              (done || failed) && mediaMode === 'video' && res.continuation_available
+                ? ['continue_video']
+                : done && mediaMode === 'video' && res.retry_chapter_available
                 ? ['generate_video']
                 : done && mediaMode === 'video' && res.next_chapter_image_available
                   ? ['approve_next']
@@ -999,16 +1167,16 @@ export default function CreativeStudioTab({
                               : ['generate_image']
                           : []
             return {
-              status: (res.status as ChatMessage['status']) || 'running',
-              progress: res.progress || undefined,
-              mediaUrl: res.url || undefined,
+            status: (res.status as ChatMessage['status']) || 'running',
+            progress: res.progress || undefined,
+            mediaUrl: res.url || undefined,
               byteplusUrl: res.byteplus_url || undefined,
-              seedImageUrl: res.seed_image_url || undefined,
-              model: res.model || undefined,
-              error: res.error || undefined,
-              durationSeconds: res.duration_seconds || undefined,
-              ...(done && mediaMode === 'video' && res.note
-                ? {
+            seedImageUrl: res.seed_image_url || undefined,
+            model: res.model || undefined,
+            error: res.error || undefined,
+            durationSeconds: res.duration_seconds || undefined,
+            ...(done && mediaMode === 'video' && res.note
+              ? {
                     content: `${
                       res.next_chapter_image_available
                         ? 'Chapter ready for review.'
@@ -1020,23 +1188,25 @@ export default function CreativeStudioTab({
                               ? 'Partial video ready.'
                               : 'Video ready.'
                     } ${res.note}`,
-                  }
-                : {}),
+                }
+              : {}),
               storyboard:
                 mediaMode === 'broll_board' || mediaMode === 'storyboard'
                   ? mergeStoryboardFrames(current?.storyboard, board)
                   : board.length
                     ? board
                     : current?.storyboard,
-              mediaMode:
+            mediaMode:
                 mediaMode === 'broll_board' || res.media_mode === 'broll_board'
                   ? 'broll_board'
                   : mediaMode === 'storyboard' || res.media_mode === 'storyboard'
-                    ? 'storyboard'
-                    : mediaMode,
+                ? 'storyboard'
+                : mediaMode,
               suggestedActions,
-              phase: done
-                ? mediaMode === 'video'
+              phase: failed && mediaMode === 'video' && res.continuation_available
+                ? 'awaiting_video_continuation'
+                : done
+              ? mediaMode === 'video'
                   ? res.next_chapter_image_available
                     ? 'awaiting_chapter_image'
                     : res.continuation_available
@@ -1044,20 +1214,20 @@ export default function CreativeStudioTab({
                       : 'done'
                   : mediaMode === 'broll_board' || brollIndex
                     ? 'awaiting_broll'
-                    : 'awaiting_video'
-                : failed || cancelled
-                  ? cancelled
-                    ? 'cancelled'
-                    : 'failed'
+                : 'awaiting_video'
+              : failed || cancelled
+                ? cancelled
+                  ? 'cancelled'
+                  : 'failed'
                   : mediaMode === 'broll_board'
                     ? 'broll_board_running'
-                    : mediaMode === 'storyboard'
-                      ? 'storyboard_running'
-                      : mediaMode === 'image'
-                        ? 'image_running'
-                        : 'video_running',
+                : mediaMode === 'storyboard'
+                  ? 'storyboard_running'
+                  : mediaMode === 'image'
+                    ? 'image_running'
+                    : 'video_running',
               ...(brollIndex ? { brollIndex } : {}),
-              ...(done &&
+              ...((done || failed) &&
               (res.continuation_available || res.next_chapter_image_available) &&
               res.completed_segments &&
               res.segment_count
@@ -1288,6 +1458,8 @@ export default function CreativeStudioTab({
           ? 'character'
           : /logo|wordmark|brandmark/i.test(file.name)
             ? 'logo'
+            : pendingContinuationMessage
+              ? 'reference'
             : !productAssigned
               ? 'product'
               : 'reference'
@@ -1464,10 +1636,6 @@ export default function CreativeStudioTab({
 
   const saveToVariants = async (msg: ChatMessage) => {
     if (!msg.mediaUrl) return
-    if (!briefId && !brandId) {
-      toast.error(`Select a brand (or open from a project) to save to ${UI.creativeLibrary.toLowerCase()}`)
-      return
-    }
     try {
       const variant = await variantsApi.createFromMedia({
         media_url: msg.mediaUrl,
@@ -1483,7 +1651,11 @@ export default function CreativeStudioTab({
         product_name: productName || '',
       })
       updateMessage(msg.id, { variantId: variant.id })
-      toast.success(`Saved to ${UI.creativeLibrary.toLowerCase()}`)
+      toast.success(
+        brandId || briefId
+          ? `Saved to ${UI.creativeLibrary.toLowerCase()}`
+          : `Saved to ${UI.creativeLibrary.toLowerCase()} (No brand)`,
+      )
     } catch (err) {
       toast.error(extractApiError(err, `Could not save to ${UI.creativeLibrary.toLowerCase()}`))
     }
@@ -1508,6 +1680,7 @@ export default function CreativeStudioTab({
     approvedBrollByteplusOverride?: string
     brollBoardApprovals?: { index: number; url: string; byteplus_url?: string }[]
     existingBoardMessageId?: string
+    modeOverride?: ChatMode
   }) => {
     if (busy) return
     const action = opts.action || 'continue'
@@ -1560,9 +1733,10 @@ export default function CreativeStudioTab({
     }
     const referenceAssets = Array.from(referenceByUrl.values())
       .filter((asset) => asset.role === 'scene' || asset.role === 'character' ||
+        asset.role === 'reference' || asset.role === 'proof' ||
         asset.url === turnProductRef || asset.url === turnLogoRef || turnAdditionalRefs.includes(asset.url))
       .map((asset) => ({ url: asset.url, role: asset.role || 'reference' as const }))
-      .slice(0, 9)
+        .slice(0, 9)
     const cloneHasCharacterReference = referenceAssets.some((asset) => asset.role === 'character')
     const boardUrls = (
       opts.storyboardImageUrls ||
@@ -1584,7 +1758,7 @@ export default function CreativeStudioTab({
         role: 'user',
         content: (userText || `(${action.replace(/_/g, ' ')})`) +
           (isVideoAction && promptOnlyVideo
-            ? '\nGenerate directly from this timed prompt using uploaded references as general visual guidance while generating a fictional character. Exclude GPT-generated storyboard images.'
+            ? '\nGenerate directly from this timed prompt. Use every uploaded reference according to its assigned role and preserve the authored scene order. Exclude GPT-generated storyboard images.'
             : isVideoAction && !promptOnlyVideo && !useStoryboardReferences
               ? '\nUse the approved GPT Image 2 still as the Seedance opening frame. Keep original uploads as supplemental identity, product, scene and logo references.'
               : ''),
@@ -1613,12 +1787,12 @@ export default function CreativeStudioTab({
         error: undefined,
       })
     } else {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: pendingId,
-          role: 'assistant',
-          content:
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: pendingId,
+        role: 'assistant',
+        content:
             action === 'generate_image' ||
             action === 'regenerate_image' ||
             action === 'generate_next_chapter_image' ||
@@ -1631,21 +1805,23 @@ export default function CreativeStudioTab({
                 : 'Generating GPT Image 2 still…'
               : action === 'generate_all_broll'
                 ? 'Generating all B-roll stills…'
-                : action === 'approve_next' || action === 'generate_video'
+            : action === 'approve_next' || action === 'generate_video'
                   ? `Starting ${videoModelLabel}…`
-                  : 'Thinking…',
-          status: 'running',
-        },
-      ])
+              : 'Thinking…',
+        status: 'running',
+      },
+    ])
     }
 
     try {
       const res = await generationApi.creativeStudioChat({
         session_id: activeChatId,
         messages: historyForApi,
-        mode,
+        mode: opts.modeOverride ?? mode,
         chat_model: chatModel,
-        duration_seconds: duration === 'auto' ? undefined : Number(duration),
+        duration_seconds: duration === 'auto'
+          ? (extractChapterDurationFromPrompt(vidP || userText) ?? undefined)
+          : Number(duration),
         aspect,
         resolution,
         sound_on: soundOn,
@@ -1733,7 +1909,7 @@ export default function CreativeStudioTab({
         chapterIndex:
           typeof res.chapter_index === 'number'
             ? res.chapter_index
-            : undefined,
+          : undefined,
         filmTotalChapters:
           typeof res.film_total_chapters === 'number'
             ? res.film_total_chapters
@@ -1787,19 +1963,183 @@ export default function CreativeStudioTab({
     }
   }
 
+  const startContinuation = async (
+    fromMsg: ChatMessage,
+    draftPrompt = '',
+    draftAttachments: ChatAttachment[] = [],
+  ) => {
+    if (!fromMsg.jobId) {
+      toast.error('The reviewed video part is missing its continuation job')
+      return
+    }
+    const firstImage = draftAttachments.find(
+      (asset) =>
+        (asset.mime || '').startsWith('image') ||
+        Boolean(asset.previewUrl) ||
+        /\.(?:png|jpe?g|webp|gif|avif)$/i.test(asset.name || asset.url),
+    )
+    if (continuationReferenceMode === 'first_frame' && !firstImage) {
+      toast.error('Attach one image before choosing Exact first frame')
+      return
+    }
+    setComposer('')
+    setAttachments([])
+
+    const nextChapter =
+      fromMsg.continuationMeta?.chapter_index ??
+      (fromMsg.continuationMeta?.completed_segments || 1)
+    const userText = draftPrompt.trim() ||
+      `Generate chapter ${nextChapter + 1} from the reviewed previous chapter`
+    const userMsg: ChatMessage = {
+      id: uid(),
+      role: 'user',
+      content: userText,
+      attachments: draftAttachments,
+    }
+    const pendingId = uid()
+    const assistantMsg: ChatMessage = {
+      id: pendingId,
+      role: 'assistant',
+      content:
+        continuationReferenceMode === 'first_frame'
+          ? 'Starting the next Seedance chapter from the newly attached exact first frame…'
+          : 'Starting the next Seedance chapter with the previous approved video and new references…',
+      mediaMode: 'video',
+      status: 'queued',
+      progress: 'Queued…',
+      videoPrompt: draftPrompt.trim() || fromMsg.videoPrompt || videoPrompt,
+    }
+    setMessages((previous) => [...previous, userMsg, assistantMsg])
+    setBusy(true)
+    try {
+      const lockedReferenceAssets = Array.from(
+        new Map(
+          [...messages.flatMap((message) => message.attachments || []), ...draftAttachments]
+            .filter((asset) => asset.url)
+            .map((asset) => [asset.url, asset]),
+        ).values(),
+      )
+      if (
+        characterReferenceUrl &&
+        !lockedReferenceAssets.some((asset) => asset.url === characterReferenceUrl)
+      ) {
+        lockedReferenceAssets.push({
+          id: `character-${characterReferenceUrl}`,
+          name: 'Character anchor',
+          url: characterReferenceUrl,
+          role: 'character',
+        })
+      }
+      const requestedTotal =
+        fromMsg.continuationMeta?.requested_duration_seconds ??
+        (duration === 'auto' ? 90 : Number(duration))
+      const recovery = fromMsg.mediaUrl
+        ? {
+            part_video_url: fromMsg.mediaUrl,
+            completed_segments: fromMsg.continuationMeta?.completed_segments ?? 1,
+            segment_count:
+              fromMsg.continuationMeta?.segment_count ??
+              Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(videoModel))),
+            generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
+            continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
+            production_id: fromMsg.continuationMeta?.production_id,
+            continuity_video_reference_url:
+              fromMsg.continuationMeta?.continuity_video_reference_url,
+            payload: buildContinuationRecoveryPayload({
+              sessionId: activeChatId,
+              videoModel,
+              videoPrompt: fromMsg.videoPrompt || videoPrompt,
+              duration,
+              aspect,
+              resolution,
+              soundOn,
+              speechMode,
+              promptOnlyVideo,
+              productName: productName || '',
+              brandName: effectiveBrandName,
+              productReferenceUrl,
+              logoReferenceUrl,
+              additionalReferenceUrls,
+              referenceAssets: lockedReferenceAssets,
+              requestedDurationSeconds: requestedTotal,
+            }),
+          }
+        : {}
+      const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId, {
+        ...recovery,
+        next_prompt: draftPrompt.trim(),
+        next_reference_assets: draftAttachments
+          .filter((asset) => asset.url)
+          .map((asset) => ({
+            url: asset.url,
+            role: asset.role || 'reference',
+          })),
+        next_reference_mode: continuationReferenceMode,
+        next_seed_image_url:
+          continuationReferenceMode === 'first_frame' ? firstImage?.url || '' : '',
+      })
+      if (!next.job_id) throw new Error(next.error || 'Next video part was not queued')
+      updateMessage(fromMsg.id, {
+        suggestedActions: [],
+        continuationMeta: undefined,
+      })
+      updateMessage(pendingId, {
+        jobId: next.job_id,
+        status: 'queued',
+        progress: next.progress || 'Queued…',
+      })
+      setContinuationReferenceMode('continuity')
+      void pollJobIntoMessage(next.job_id, pendingId, 'video')
+    } catch (err) {
+      const message = extractApiError(err, 'Could not start the next video part')
+      updateMessage(pendingId, {
+        status: 'failed',
+        error: message,
+        content: message,
+        suggestedActions: ['continue_video'],
+      })
+      toast.error(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleSend = async () => {
     const text = composer.trim()
     const atts = [...attachments]
+    if (pendingContinuationMessage && (text || atts.length)) {
+      await startContinuation(pendingContinuationMessage, text, atts)
+      return
+    }
     setComposer('')
     setAttachments([])
+    const masterBrief = !cloneMode && isMasterProductionBrief(text)
+    const productionLock = !masterBrief && isProductionSetupMessage(text)
+    const brollBlock = !masterBrief && !productionLock && isBrollImageBlock(text)
+    const brollCount = brollBlock ? countBrollImageBlocks(text) : 0
+
+    const derivedAction: PipelineAction = cloneMode
+      ? 'generate_image'
+      : masterBrief
+        ? 'generate_all_broll'           // full brief → generate all B-roll images first
+        : productionLock
+          ? 'continue'                   // lock only → save memory, no generation
+          : brollBlock
+            ? (brollCount > 1 ? 'generate_all_broll' : 'generate_broll_image')
+            : promptOnlyVideo
+              ? 'generate_video'
+              : 'generate_image'
+
+    const notVideo = masterBrief || productionLock || brollBlock
     await runTurn({
       userText: text,
       userAttachments: atts,
-      action: cloneMode ? 'generate_image' : promptOnlyVideo ? 'generate_video' : 'generate_image',
+      action: derivedAction,
       appendUser: true,
-      imagePromptOverride: promptOnlyVideo ? undefined : text,
-      videoPromptOverride: promptOnlyVideo ? text : undefined,
-      approvedImageOverride: promptOnlyVideo ? '' : undefined,
+      modeOverride: productionLock ? 'ask' : undefined,
+      imagePromptOverride: notVideo || !promptOnlyVideo ? text : undefined,
+      videoPromptOverride: notVideo ? undefined : promptOnlyVideo ? text : undefined,
+      approvedImageOverride: promptOnlyVideo && !notVideo ? '' : undefined,
       useStoredReferences: cloneMode,
     })
   }
@@ -1916,102 +2256,23 @@ export default function CreativeStudioTab({
       return
     }
     if (action === 'continue_video') {
-      if (!fromMsg?.jobId) {
-        toast.error('The reviewed video part is missing its continuation job')
-        return
-      }
-      const userMsg: ChatMessage = {
-        id: uid(),
-        role: 'user',
-        content: 'Generate next Seedance part from the reviewed final frame',
-      }
-      const pendingId = uid()
-      const assistantMsg: ChatMessage = {
-        id: pendingId,
-        role: 'assistant',
-        content: 'Starting the next Seedance part from the previous part’s final frame…',
-        mediaMode: 'video',
-        status: 'queued',
-        progress: 'Queued…',
-        videoPrompt: fromMsg.videoPrompt || videoPrompt,
-      }
-      setMessages((previous) => [...previous, userMsg, assistantMsg])
-      setBusy(true)
-      try {
-        const lockedReferenceAssets = Array.from(
-          new Map(
-            messages
-              .flatMap((message) => message.attachments || [])
-              .filter((asset) => asset.url)
-              .map((asset) => [asset.url, asset]),
-          ).values(),
-        )
-        if (
-          characterReferenceUrl &&
-          !lockedReferenceAssets.some((asset) => asset.url === characterReferenceUrl)
-        ) {
-          lockedReferenceAssets.push({
-            id: `character-${characterReferenceUrl}`,
-            name: 'Character anchor',
-            url: characterReferenceUrl,
-            role: 'character',
-          })
-        }
-        const requestedTotal =
-          fromMsg.continuationMeta?.requested_duration_seconds ??
-          (duration === 'auto' ? 90 : Number(duration))
-        const recovery = fromMsg.mediaUrl
-          ? {
-              part_video_url: fromMsg.mediaUrl,
-              completed_segments: fromMsg.continuationMeta?.completed_segments ?? 1,
-              segment_count:
-                fromMsg.continuationMeta?.segment_count ??
-                Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(videoModel))),
-              generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
-              continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
-              production_id: fromMsg.continuationMeta?.production_id,
-              continuity_video_reference_url:
-                fromMsg.continuationMeta?.continuity_video_reference_url,
-              payload: buildContinuationRecoveryPayload({
-                sessionId: activeChatId,
-                videoModel,
-                videoPrompt: fromMsg.videoPrompt || videoPrompt,
-                duration,
-                aspect,
-                resolution,
-                soundOn,
-                speechMode,
-                promptOnlyVideo,
-                productName: productName || '',
-                brandName: effectiveBrandName,
-                productReferenceUrl,
-                logoReferenceUrl,
-                additionalReferenceUrls,
-                referenceAssets: lockedReferenceAssets,
-                requestedDurationSeconds: requestedTotal,
-              }),
-            }
-          : undefined
-        const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId, recovery)
-        if (!next.job_id) throw new Error(next.error || 'Next video part was not queued')
-        updateMessage(pendingId, {
-          jobId: next.job_id,
-          status: 'queued',
-          progress: next.progress || 'Queued…',
-        })
-        void pollJobIntoMessage(next.job_id, pendingId, 'video')
-      } catch (err) {
-        const message = extractApiError(err, 'Could not start the next video part')
-        updateMessage(pendingId, {
-          status: 'failed',
-          error: message,
-          content: message,
-          suggestedActions: ['continue_video'],
-        })
-        toast.error(message)
-      } finally {
-        setBusy(false)
-      }
+      const text = composer.trim()
+      const atts = [...attachments]
+      await startContinuation(fromMsg as ChatMessage, text, atts)
+      return
+    }
+    if (
+      action === 'approve_next' &&
+      fromMsg?.jobId &&
+      isChapterHandoffReady(
+        fromMsg,
+        fromMsg.continuationMeta?.requested_duration_seconds ?? projectDurationSeconds,
+        clipCap,
+      )
+    ) {
+      const text = composer.trim()
+      const atts = [...attachments]
+      await startContinuation(fromMsg, text, atts)
       return
     }
     if (
@@ -2315,6 +2576,7 @@ export default function CreativeStudioTab({
                                 }
                                 className="min-w-0 flex-1 rounded-lg bg-black/45 border border-white/10 px-1.5 py-1 text-[10px] text-white/80"
                               >
+                                <option value="proof">🔒 Proof (editor only)</option>
                                 <option value="reference">Reference</option>
                                 <option value="product">Product</option>
                                 <option value="character">Character</option>
@@ -2380,6 +2642,40 @@ export default function CreativeStudioTab({
           </div>
         </div>
       )}
+      {pendingContinuationMessage ? (
+        <div className="mb-2 rounded-xl border border-[#b8f000]/35 bg-[#b8f000]/10 px-3 py-2.5 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-bold text-[#b8f000]">
+                Next chapter setup
+              </p>
+              <p className="text-[10px] text-white/60">
+                Paste only the next chapter prompt and attach references for that chapter. Sending here continues the reviewed video.
+              </p>
+            </div>
+            <select
+              value={continuationReferenceMode}
+              onChange={(event) =>
+                setContinuationReferenceMode(
+                  event.target.value as ContinuationReferenceMode,
+                )
+              }
+              className="rounded-lg border border-white/15 bg-[#16171a] px-2.5 py-1.5 text-[10px] text-white"
+              aria-label="Next chapter reference mode"
+            >
+              <option value="continuity">
+                Preserve previous video continuity
+              </option>
+              <option value="first_frame">
+                Start exactly from first attached image
+              </option>
+            </select>
+          </div>
+          <p className="text-[9px] text-white/45">
+            Preserve continuity keeps the previous presenter/video and uses new uploads as visual references. Exact first frame starts from the new image and resets previous-video continuity because BytePlus cannot accept both in one request.
+          </p>
+        </div>
+      ) : null}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-2 px-1">
           {attachments.map((a) => (
@@ -2406,6 +2702,7 @@ export default function CreativeStudioTab({
                 className="mt-1 block w-full max-w-28 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white"
                 title="How this image should be used"
               >
+                <option value="proof">🔒 Proof (editor only)</option>
                 <option value="product">Product</option>
                 <option value="logo">Brand logo</option>
                 <option value="scene">Scene / location</option>
@@ -2434,7 +2731,11 @@ export default function CreativeStudioTab({
           onChange={(e) => setComposer(e.target.value)}
           onKeyDown={onKeyDown}
           rows={hasMessages ? 2 : 4}
-          placeholder="Make a 10s UGC product video for my campaign…"
+          placeholder={
+            pendingContinuationMessage
+              ? 'Paste only the next chapter prompt, then attach its proof or reference images…'
+              : 'Make a 10s UGC product video for my campaign…'
+          }
           className={`w-full resize-none overflow-y-auto cs-message-scroll bg-transparent px-4 text-[15px] text-white placeholder:text-white/35 focus:outline-none ${
             hasMessages
               ? 'pt-3 pb-1 max-h-24'
@@ -2583,7 +2884,7 @@ export default function CreativeStudioTab({
         >
           <span className="font-semibold text-white/75">
             {composerSettingsOpen ? 'Hide generation settings' : 'Generation settings'}
-          </span>
+        </span>
           <span className="text-white/40">
             {' '}
             · {videoModelLabel} · {aspect.replace('/', ':')} ·{' '}
@@ -2621,26 +2922,35 @@ export default function CreativeStudioTab({
           </select>
         ) : null}
         {!promptOnlyVideo && cloneMode ? (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
             Clone Image · {cloneCount} copies
-          </span>
+        </span>
         ) : null}
-        <select
-          value={videoModel}
-          onChange={(e) => setVideoModel(e.target.value)}
-          className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[220px]"
-          title="Seedance video model"
-          aria-label="Seedance video model"
-        >
-          {(videoModels.length ? videoModels : [
-            { id: 'ark-seedance-2-0', label: 'Seedance 2.0 · 15s clips' },
-            { id: 'ark-seedance-2-5', label: 'Seedance 2.5 · 30s clips' },
-          ]).map((model) => (
-            <option key={model.id} value={model.id} className="bg-[#121316]">
-              Video · {model.label}
-            </option>
-          ))}
-        </select>
+        {seedance25Only ? (
+          <span
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80"
+            title="Seedance 2.5 only for this account"
+          >
+            Video · Seedance 2.5 · 30s clips
+          </span>
+        ) : (
+          <select
+            value={videoModel}
+            onChange={(e) => setVideoModel(e.target.value)}
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[220px]"
+            title="Seedance video model"
+            aria-label="Seedance video model"
+          >
+            {(videoModels.length ? videoModels : [
+              { id: 'ark-seedance-2-0', label: 'Seedance 2.0 · 15s clips' },
+              { id: 'ark-seedance-2-5', label: 'Seedance 2.5 · 30s clips' },
+            ]).map((model) => (
+              <option key={model.id} value={model.id} className="bg-[#121316]">
+                Video · {model.label}
+              </option>
+            ))}
+          </select>
+        )}
         {productReferenceUrl ? (
           <span className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 text-[#b8f000] px-2.5 py-1">
             Product photo locked
@@ -2897,8 +3207,8 @@ export default function CreativeStudioTab({
               + New chat
             </button>
             <p className="text-[10px] text-white/35 px-0.5">
-              {effectiveBrandName ? `${effectiveBrandName} · ` : ''}
-              {sessions.length} {sessions.length === 1 ? 'chat' : 'chats'} · saved in this browser
+              {effectiveBrandName ? `${effectiveBrandName} · ` : 'No brand · '}
+              {sessions.length} {sessions.length === 1 ? 'chat' : 'chats'} · this account only
             </p>
           </div>
           <div className="flex-1 min-h-0 overflow-y-scroll cs-panel-scroll p-2 space-y-3">
@@ -2908,44 +3218,44 @@ export default function CreativeStudioTab({
                   {group.label}
                 </p>
                 {group.sessions.map((s) => {
-                  const active = s.id === activeChatId
-                  return (
-                    <div
-                      key={s.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => switchChat(s.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') switchChat(s.id)
-                      }}
-                      className={`group w-full text-left rounded-xl px-3 py-2.5 cursor-pointer ${
-                        active
-                          ? 'bg-white/10 border border-white/15'
-                          : 'hover:bg-white/5 border border-transparent'
-                      }`}
-                    >
+              const active = s.id === activeChatId
+              return (
+                <div
+                  key={s.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => switchChat(s.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') switchChat(s.id)
+                  }}
+                  className={`group w-full text-left rounded-xl px-3 py-2.5 cursor-pointer ${
+                    active
+                      ? 'bg-white/10 border border-white/15'
+                      : 'hover:bg-white/5 border border-transparent'
+                  }`}
+                >
                       <div className="flex items-start justify-between gap-2 min-w-0">
                         <div className="min-w-0 flex-1">
                           <p className="text-xs font-semibold text-white truncate">
-                            {s.title || 'New chat'}
-                          </p>
+                      {s.title || 'New chat'}
+                    </p>
                           <p className="text-[10px] text-white/35 mt-0.5 truncate">
                             {formatChatTime(s.updatedAt)}
                             {s.messages?.length ? ` · ${s.messages.length} msgs` : ''}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          title="Delete chat"
-                          onClick={(e) => deleteChat(s.id, e)}
+                    <button
+                      type="button"
+                      title="Delete chat"
+                      onClick={(e) => deleteChat(s.id, e)}
                           className="opacity-0 group-hover:opacity-100 text-white/40 hover:text-red-300 text-xs shrink-0 leading-none pt-0.5"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
               </div>
             ))}
             {!sessions.length && (
@@ -3006,7 +3316,7 @@ export default function CreativeStudioTab({
                 onChange={(e) => setPickedBrandId(e.target.value)}
                 className="rounded-lg border border-white/15 bg-[#16171a] px-2 py-1.5 text-xs text-white"
               >
-                <option value="">Select brand…</option>
+                <option value="">No brand (optional)</option>
                 {(brands || []).map((b) => (
                   <option key={b.id} value={b.id}>
                     {b.name}
@@ -3021,24 +3331,24 @@ export default function CreativeStudioTab({
           <>
             <div className="flex-1 min-h-0 overflow-y-auto cs-panel-scroll flex flex-col items-center justify-center px-4 py-8">
               <div className="text-center space-y-3 max-w-lg">
-                <div className="inline-flex items-center gap-2">
-                  <span className="h-8 w-8 rounded-lg bg-[#b8f000] text-black font-black grid place-items-center">
-                    ~
-                  </span>
-                  <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white uppercase">
-                    What are we creating today?
-                  </h2>
-                </div>
+              <div className="inline-flex items-center gap-2">
+                <span className="h-8 w-8 rounded-lg bg-[#b8f000] text-black font-black grid place-items-center">
+                  ~
+                </span>
+                <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-white uppercase">
+                  What are we creating today?
+                </h2>
+              </div>
                 <p className="text-sm text-white/45">
                   {promptOnlyVideo
                     ? 'Send a timed prompt directly to Seedance. Product, scene and character references are optional.'
                     : 'Generate a GPT Image 2 starting scene, review or regenerate it, then animate the approved still with Seedance.'}
-                </p>
-              </div>
+              </p>
+            </div>
             </div>
             <div className="shrink-0 border-t border-white/10 px-4 py-3 bg-[#0c0d10]">
-              {composerCard}
-            </div>
+            {composerCard}
+          </div>
           </>
         ) : (
           <>
@@ -3069,9 +3379,9 @@ export default function CreativeStudioTab({
                       : m.phase === 'awaiting_video' &&
                           m.suggestedActions?.includes('approve_next')
                         ? (['approve_next'] as PipelineAction[])
-                        : m.phase === 'awaiting_image' && (m.imagePrompt || imagePrompt)
-                          ? (['generate_image'] as PipelineAction[])
-                          : []
+                      : m.phase === 'awaiting_image' && (m.imagePrompt || imagePrompt)
+                        ? (['generate_image'] as PipelineAction[])
+                        : []
 
                 return (
                   <div key={m.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -3253,8 +3563,8 @@ export default function CreativeStudioTab({
                           m.status === 'running') && (
                           <div className="pt-2 space-y-2">
                             <div className="flex flex-wrap items-center justify-between gap-2">
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
-                                Storyboard · {m.storyboard.length} scenes
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">
+                              Storyboard · {m.storyboard.length} scenes
                               </p>
                               <p className="text-[10px] text-white/45">
                                 {storyboardFramesForVideo(m.storyboard).length} selected for Seedance
@@ -3293,11 +3603,11 @@ export default function CreativeStudioTab({
                                         }
                                       >
                                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        <img
-                                          src={src}
-                                          alt={frame.title || 'Scene'}
-                                          className="w-full aspect-[9/16] object-cover bg-black"
-                                        />
+                                      <img
+                                        src={src}
+                                        alt={frame.title || 'Scene'}
+                                        className="w-full aspect-[9/16] object-cover bg-black"
+                                      />
                                       </button>
                                     ) : (
                                       <div className="w-full aspect-[9/16] grid place-items-center text-[10px] text-white/35 animate-pulse">

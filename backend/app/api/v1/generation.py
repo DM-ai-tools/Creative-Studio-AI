@@ -10,7 +10,13 @@ logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.product_scope import (
+    coerce_creative_studio_video_model,
+    default_video_model_for_user,
+    filter_video_catalog_for_user,
+    is_creative_studio_seedance25_only,
+)
+from app.core.security import get_current_user, require_full_studio_user
 from app.schemas.avatar_script import (
     AvatarScriptRequest,
     AvatarScriptResponse,
@@ -54,7 +60,7 @@ async def generation_catalog(refresh: bool = False):
 @router.post("/avatar-script", response_model=AvatarScriptResponse)
 async def avatar_script(
     data: AvatarScriptRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     try:
         return await generate_avatar_script(data)
@@ -65,7 +71,7 @@ async def avatar_script(
 @router.post("/master-script-preview", response_model=MasterScriptPreviewResponse)
 async def master_script_preview(
     data: MasterScriptPreviewRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Unified timeline: voice + B-roll + stat images per beat (approve before generate)."""
     beats_raw, warnings = build_master_production_timeline(
@@ -82,7 +88,7 @@ async def master_script_preview(
 @router.post("/extract-stats-image", response_model=StatsImageExtractionResponse)
 async def extract_stats_image(
     file: UploadFile = File(...),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Read ROAS / ROI / conversion stats from a performance dashboard screenshot."""
     raw = await file.read()
@@ -470,7 +476,7 @@ class StrategyParseResponse(BaseModel):
 @router.post("/parse-strategy", response_model=StrategyParseResponse)
 async def parse_strategy_file(
     file: UploadFile = File(...),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Read a client strategy .md/.txt/.docx and fill a CreativeStudio brief + variant plans."""
     name = (file.filename or "strategy.md").lower()
@@ -535,7 +541,7 @@ class ModelSuggestionResponse(BaseModel):
 @router.post("/suggest-models", response_model=ModelSuggestionResponse)
 async def suggest_models_endpoint(
     data: ModelSuggestionRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Analyse campaign inputs and recommend the best image, video, and copy models."""
     catalog = get_generation_catalog()
@@ -560,7 +566,7 @@ async def suggest_models_endpoint(
 @router.post("/strategy-preview", response_model=StrategyPreviewResponse)
 async def strategy_preview(
     data: StrategyPreviewRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Build ICP + HALO + hooks + body outline + competitor positioning for manager review."""
     result = await generate_strategy_preview(
@@ -585,7 +591,7 @@ async def strategy_preview(
 @router.post("/website-script", response_model=WebsiteScriptResponse)
 async def website_script(
     data: WebsiteScriptRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Scrape a webpage, pick a duration-based framework, generate a spoken avatar script."""
     from fastapi import HTTPException
@@ -622,7 +628,7 @@ async def website_script(
 @router.post("/icp-script", response_model=IcpScriptResponse)
 async def icp_script(
     data: IcpScriptRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Build an ICP profile first, then use it to generate a spoken avatar script."""
     return await generate_icp_script(data)
@@ -648,7 +654,7 @@ class ImagePromptResponse(BaseModel):
 @router.post("/image-prompt", response_model=ImagePromptResponse)
 async def generate_image_prompt_endpoint(
     data: ImagePromptRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Generate a detailed AI image generation prompt from brief context."""
     from app.services.image_prompt_service import generate_image_prompt
@@ -686,7 +692,7 @@ class ImagePlanResponse(BaseModel):
 @router.post("/preview-image-plan", response_model=ImagePlanResponse)
 async def preview_image_plan(
     data: ImagePlanRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """
     Intelligent preview: LLM reads campaign brief, selects best image use cases,
@@ -753,7 +759,7 @@ class SuggestAdAnglesResponse(BaseModel):
 @router.post("/suggest-ad-angles", response_model=SuggestAdAnglesResponse)
 async def suggest_ad_angles_endpoint(
     data: SuggestAdAnglesRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Suggest ad angles from industry + niche + ICP (business logic)."""
     from app.services.ad_angle_library import suggest_ad_angles
@@ -856,7 +862,7 @@ class IcpImagePlanResponse(BaseModel):
 @router.post("/icp-image-plan", response_model=IcpImagePlanResponse)
 async def icp_image_plan(
     data: IcpImagePlanRequest,
-    current_user=Depends(get_current_user),
+    current_user=Depends(require_full_studio_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1029,7 +1035,7 @@ class ProductionScriptResponse(BaseModel):
 @router.post("/production-script", response_model=ProductionScriptResponse)
 async def production_script_from_brief(
     data: ProductionScriptFromBriefRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Build filled skeleton from brief form fields (composer preview)."""
     brief = {
@@ -1155,7 +1161,7 @@ async def voice_preview(
         default="Hi, I'm your AI video presenter. Let me tell you something exciting today!",
         max_length=300,
     ),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Generate a short TTS audio preview for the selected voice via HeyGen /v2/text_to_speech."""
     if not settings.HEYGEN_API_KEY:
@@ -1227,7 +1233,7 @@ def _heygen_headers() -> dict[str, str]:
 async def create_photo_avatar(
     photo: UploadFile = File(..., description="Portrait photo (JPEG/PNG, ≤32 MB)"),
     name: str = Form(..., description="Display name for this avatar"),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Upload a photo and kick off HeyGen photo-avatar creation (v3 API).
 
@@ -1320,7 +1326,7 @@ async def create_photo_avatar(
 @router.get("/photo-avatar/{photo_avatar_id}", response_model=PhotoAvatarStatusResponse)
 async def get_photo_avatar_status(
     photo_avatar_id: str,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Poll the status of a photo-avatar creation job (v3 API).
 
@@ -1424,15 +1430,22 @@ class CreativeStudioGenerateResponse(BaseModel):
 
 
 class CreativeStudioRecoverContinuationRequest(BaseModel):
-    part_video_url: str
-    completed_segments: int = Field(ge=1)
-    segment_count: int = Field(ge=2)
-    payload: dict
+    # Recovery fields are optional during an ordinary in-memory continuation.
+    # They become required only when the parent job disappeared after a restart.
+    part_video_url: str = ""
+    completed_segments: int = Field(default=0, ge=0)
+    segment_count: int = Field(default=0, ge=0)
+    payload: dict = Field(default_factory=dict)
     generated_duration_seconds: int | None = None
     continuity_frame_count: int | None = None
     cast_reference_url: str | None = None
     continuity_video_reference_url: str | None = None
     production_id: str | None = None
+    # Bind a newly authored prompt and uploads to the next reviewed chapter.
+    next_prompt: str = Field(default="", max_length=32_000)
+    next_reference_assets: list[dict[str, str]] = Field(default_factory=list, max_length=9)
+    next_reference_mode: Literal["continuity", "first_frame"] = "continuity"
+    next_seed_image_url: str = ""
 
 
 class CreativeStudioPromptRequest(BaseModel):
@@ -1465,7 +1478,7 @@ class CreativeStudioChatMessage(BaseModel):
 
 class CreativeStudioReference(BaseModel):
     url: str = Field(min_length=1)
-    role: Literal["product", "logo", "scene", "character", "reference"]
+    role: Literal["product", "logo", "scene", "character", "reference", "proof"]
 
 
 class BrollBoardApproval(BaseModel):
@@ -1564,7 +1577,7 @@ async def creative_studio_clone_scenes(_current_user=Depends(get_current_user)):
 
 
 @router.get("/creative-studio/models")
-async def creative_studio_models(_current_user=Depends(get_current_user)):
+async def creative_studio_models(current_user=Depends(get_current_user)):
     """Creative Studio catalog: OpenRouter chat + GPT Image 2 + Seedance."""
     from app.services.media.byteplus_seedance_catalog import (
         byteplus_seedance_video_catalog_options,
@@ -1592,13 +1605,14 @@ async def creative_studio_models(_current_user=Depends(get_current_user)):
     oai_ok = openai_configured()
     video_models = []
     video_models.extend(byteplus_seedance_video_catalog_options())
-    if hf_ok:
+    if hf_ok and not is_creative_studio_seedance25_only(current_user):
         video_models.extend(higgsfield_video_catalog_options())
+    video_models = filter_video_catalog_for_user(current_user, video_models)
     image_models = []
     image_models.extend(openai_image_catalog_options())
     if ark_ok:
         image_models.extend(byteplus_seedream_catalog_options())
-    if hf_ok:
+    if hf_ok and not is_creative_studio_seedance25_only(current_user):
         image_models.extend(higgsfield_image_catalog_options())
     chat_models = prompt_llm_catalog_options()
 
@@ -1619,7 +1633,9 @@ async def creative_studio_models(_current_user=Depends(get_current_user)):
         "chat_models": chat_models,
         "default_chat_model": default_prompt_llm_model(),
         "image_model_default": "openai-gpt-image-2",
-        "video_model_default": "ark-seedance-2-0",
+        "video_model_default": default_video_model_for_user(
+            current_user, "ark-seedance-2-0"
+        ),
         "image_models": image_models,
         "video_models": video_models,
         "message": " ".join(messages) if messages else None,
@@ -1651,6 +1667,7 @@ async def creative_studio_chat(
         "approve_all_broll",
     }:
         raise HTTPException(status_code=422, detail="messages required")
+    video_model = coerce_creative_studio_video_model(current_user, data.video_model)
     try:
         result = await run_creative_studio_chat_turn(
             tenant_id=str(current_user.tenant_id),
@@ -1689,7 +1706,7 @@ async def creative_studio_chat(
         storyboard_image_urls=list(data.storyboard_image_urls or []),
         prompt_only_video=bool(data.prompt_only_video),
         preserve_image_text=bool(data.preserve_image_text),
-        video_model=data.video_model,
+        video_model=video_model,
         chapter_index=data.chapter_index,
         continuity_style_url=data.continuity_style_url,
         accumulated_segment_paths=list(data.accumulated_segment_paths or []),
@@ -1711,7 +1728,7 @@ async def creative_studio_chat(
 @router.post("/creative-studio/prompt", response_model=CreativeStudioPromptResponse)
 async def creative_studio_prompt(
     data: CreativeStudioPromptRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_full_studio_user),
 ):
     """Auto-generate a Higgsfield/Cinema Studio prompt from niche + scene settings."""
     from app.services.creative_studio_prompt_service import generate_creative_studio_prompt
@@ -1756,6 +1773,11 @@ async def creative_studio_generate(
     current_user=Depends(get_current_user),
 ):
     """Start Creative Studio generate in the background (avoids browser HTTP timeouts)."""
+    if is_creative_studio_seedance25_only(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="This account uses the Creative Studio chat pipeline (Seedance 2.5) only.",
+        )
     import asyncio
 
     from app.services.creative_studio_job_service import (
@@ -1869,7 +1891,15 @@ async def creative_studio_job_continue(
     )
 
     tenant_id = str(current_user.tenant_id)
-    job = await create_continuation_job(job_id, tenant_id=tenant_id)
+    overrides = data.model_dump() if data else {}
+    try:
+        job = await create_continuation_job(
+            job_id,
+            tenant_id=tenant_id,
+            overrides=overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not job and data and data.part_video_url.strip():
         try:
             job = await recover_continuation_job(
@@ -1883,6 +1913,7 @@ async def creative_studio_job_continue(
                 cast_reference_url=data.cast_reference_url,
                 continuity_video_reference_url=data.continuity_video_reference_url,
                 production_id=data.production_id,
+                overrides=overrides,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

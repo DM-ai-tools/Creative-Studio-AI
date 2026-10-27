@@ -3,6 +3,7 @@ export interface User {
   email: string
   full_name: string
   role: 'admin' | 'member' | 'viewer'
+  product_scope?: string | null
   tenant_id: string | null
   tenant_name?: string | null
   is_active: boolean

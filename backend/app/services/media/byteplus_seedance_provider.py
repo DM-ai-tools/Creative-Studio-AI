@@ -244,6 +244,12 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 for i, asset in enumerate(extra_video_refs, 1)
             ],
         }
+        if reported + 1 < duration:
+            result["partial"] = True
+            result["duration_warning"] = (
+                f"Seedance returned {reported}s for a {duration}s request. "
+                "The shortened output was preserved for review and must not be treated as complete."
+            )
         if download_warning:
             result["download_warning"] = download_warning[:500]
         return result
@@ -272,9 +278,15 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "error": "BytePlus ModelArk API key not set for this Seedance model",
             }
 
-        requested = requested_video_duration_seconds(brief, override=duration_seconds)
+        if duration_seconds is not None:
+            # Seedance accepts any whole-second duration inside its model limit.
+            # Do not pass this through the generic Runway UI-duration resolver,
+            # which maps values such as 21s and 23s back to the 8s default.
+            requested = max(1, int(round(float(duration_seconds))))
+        else:
+            requested = requested_video_duration_seconds(brief)
         max_sec = seedance_clip_cap_seconds(model or api_model)
-        duration = clamp_seedance_duration(requested, max_seconds=max_sec)
+        duration = clamp_seedance_duration(requested, max_seconds=max_sec, model=api_model)
 
         aspect = str(
             brief.get("creative_studio_aspect")

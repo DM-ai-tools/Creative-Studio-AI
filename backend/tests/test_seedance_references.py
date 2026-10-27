@@ -44,6 +44,39 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         safe = filter_manifest_for_privacy_retry(manifest)
         self.assertEqual([asset["role"] for asset in safe], ["product", "scene", "logo"])
 
+    def test_proof_is_editor_only_while_supporting_reference_is_sent(self):
+        self.brief["reference_assets"].extend([
+            {"url": "https://example.com/proof-a.png", "role": "proof"},
+            {"url": "https://example.com/proof-b.png", "role": "reference"},
+        ])
+        manifest = reference_manifest(self.brief, None)
+        self.assertNotIn({"url": "https://example.com/proof-a.png", "role": "proof"}, manifest)
+        self.assertIn({"url": "https://example.com/proof-b.png", "role": "reference"}, manifest)
+        self.assertNotIn("PROOF CARD", reference_instructions(manifest))
+
+    async def test_short_provider_result_is_marked_partial(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        with (
+            patch(module + ".ark_configured_for_model", return_value=True),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
+            patch(module + ".create_video_task", AsyncMock(return_value="short-task")),
+            patch(module + ".poll_video_task", AsyncMock(return_value={"duration": 8})),
+            patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
+            patch(module + "._download_asset", AsyncMock(return_value={"url": "fixture.mp4"})),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="A timed proof sequence.",
+                brief={"creative_studio_aspect": "1/1"},
+                copy={},
+                format_type="square",
+                model="ark-seedance-2-5",
+                tenant_id="test",
+                duration_seconds=23,
+            )
+        self.assertTrue(result["partial"])
+        self.assertIn("returned 8s for a 23s request", result["duration_warning"])
+
     def test_continuity_frame_is_bound_before_product_and_scene_references(self):
         self.brief["continuity_reference_url"] = "https://example.com/handoff.jpg"
         manifest = reference_manifest(self.brief, None)

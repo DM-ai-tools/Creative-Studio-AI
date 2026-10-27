@@ -272,6 +272,41 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
                     bucket.append(line)
             elif line not in untimed:
                 untimed.append(line)
+    # Accept plain-language production prompts such as
+    # "the Australian female voice speaks this exact sentence off-camera:".
+    spoken_sentence = re.compile(
+        r'(?is)\b(?:voice|narrator)\b[^\n:]{0,240}?\b(?:speaks?|says?|reads?)\b'
+        r'[^\n:]{0,240}?\b(?:exact|following|this)\b[^\n:]{0,240}?:\s*\n+\s*'
+        r'(?:"([^"\n]+)"|“([^”\n]+)”|\x27([^\x27\n]+)\x27)',
+    )
+    for match in spoken_sentence.finditer(text):
+        line = next((group.strip() for group in match.groups() if group), "")
+        if not line:
+            continue
+        headers = list(re.finditer(
+            r"(?im)^\s*(?:#{1,6}\s*)?(?:Scene|CLIP)\s*\d+[^\n]*",
+            text[:match.start()],
+        ))
+        heading = headers[-1].group() if headers else ""
+        clock_timing = (
+            re.search(
+                r"(\d{1,2}:\d{2}(?:\.\d+)?)\s*[–—-]\s*(\d{1,2}:\d{2}(?:\.\d+)?)",
+                heading,
+            )
+            if heading else None
+        )
+        if clock_timing:
+            events.append((
+                _overlay_clock_seconds(clock_timing.group(1)),
+                _overlay_clock_seconds(clock_timing.group(2)),
+                line,
+            ))
+            continue
+        timing = re.search(_RANGE, heading) if heading else None
+        if timing:
+            events.append((float(timing.group(1)), float(timing.group(2)), line))
+        if not timing and line not in untimed:
+            untimed.append(line)
     # Distribute narration independently inside each authored chapter. This keeps
     # complete sentences out of the 15-second handoff and prevents Chapter 2 from
     # inheriting Chapter 1's 00:00 timing.

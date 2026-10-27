@@ -1,4 +1,4 @@
-# Production stack for a single EC2 host (nginx on :80).
+# Production stack for a single EC2 host (nginx on :80 and :443).
 # Usage (from repo root on server):
 #   docker compose -f deploy/aws/docker-compose.prod.yml --env-file deploy/aws/.env up -d --build
 
@@ -77,8 +77,11 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/active.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot-www:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - backend
       - frontend

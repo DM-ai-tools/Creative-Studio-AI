@@ -308,7 +308,12 @@ def ensure_production_memory(
     return memory
 
 
-def compile_locked_chapter_prompt(memory: dict[str, Any], *, chapter_index: int) -> str:
+def compile_locked_chapter_prompt(
+    memory: dict[str, Any],
+    *,
+    chapter_index: int,
+    speech_mode: str = "external_voiceover",
+) -> str:
     shots = list(memory.get("shot_list") or [])
     if chapter_index < 0 or chapter_index >= len(shots):
         raise ValueError("Requested chapter is outside the locked production timeline")
@@ -338,6 +343,17 @@ def compile_locked_chapter_prompt(memory: dict[str, Any], *, chapter_index: int)
         f"with QA status {previous[0].get('qa_status')}."
         if previous else "This is the first chapter. Establish the locked world once."
     )
+    native_presenter = str(speech_mode or "").strip().lower() == "native_presenter"
+    audio_lock = (
+        "AUDIO/ACTING LOCK: Seedance owns the single spoken voice and matching mouth motion. "
+        "The visible presenter speaks only the exact assigned dialogue with natural lip sync; "
+        "during B-roll the same voice continues off-camera. Never add a second narrator or read "
+        "production directions aloud.\n"
+        if native_presenter
+        else
+        "AUDIO/ACTING LOCK: provider speech is disabled. Narration is an off-camera master track. "
+        "Visible people must not speak, mouth words, or perform lip-sync; use natural closed-mouth reactions.\n"
+    )
     return (
         "LOCKED PRODUCTION PACKAGE — NEVER RECAST, RESTYLE OR REWRITE.\n"
         f"Production {memory.get('production_id')}; chapter {chapter_index + 1}/{len(shots)}; "
@@ -346,8 +362,8 @@ def compile_locked_chapter_prompt(memory: dict[str, Any], *, chapter_index: int)
         "IDENTITY LOCK: preserve the accepted fictional presenter's face, age, skin tone, hair, "
         "navy/charcoal wardrobe and proportions. Preserve all product colours, logos, props and office architecture.\n"
         "STYLE LOCK: 24fps, one warm-neutral grade, identical white balance and restrained green/blue accents.\n"
-        "AUDIO/ACTING LOCK: provider speech is disabled. Narration is an off-camera master track. "
-        "Visible people must not speak, mouth words, or perform lip-sync; use natural closed-mouth reactions.\n"
+        + audio_lock
+        +
         "B-ROLL LOCK: every visual must illustrate the narration cue at that exact local time. "
         "No generic walking, random dashboards, filler shots or repeated action.\n"
         f"HANDOFF: {previous_line} Start from the attached exact continuity frame when present.\n"

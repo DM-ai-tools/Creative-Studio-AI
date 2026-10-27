@@ -40,12 +40,19 @@ async def upload_image_to_heygen(
         return None
     mime = _guess_mime(image_path)
     try:
+        # httpx must create the multipart boundary. Reusing the JSON header from
+        # the Video Agent request makes the upload body unreadable to HeyGen.
+        upload_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() != "content-type"
+        }
         with image_path.open("rb") as fh:
             resp = await async_request_with_retry(
                 client,
                 "POST",
                 f"{base.rstrip('/')}/v3/assets",
-                headers=headers,
+                headers=upload_headers,
                 files={"file": (image_path.name, fh, mime)},
                 label="HeyGen asset upload",
             )

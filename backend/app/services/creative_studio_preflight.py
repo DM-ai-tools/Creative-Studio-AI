@@ -15,6 +15,7 @@ def validate_video_preflight(
     product_reference_url: str | None, logo_reference_url: str | None,
     speech_mode: str = "external_voiceover",
     require_storyboard_coverage: bool = True,
+    is_chapter: bool = False,
 ) -> dict[str, Any]:
     """Build a reviewable asset/shot lock and block structurally invalid jobs."""
     validate_video_prompt(prompt)
@@ -27,9 +28,15 @@ def validate_video_preflight(
     scene_count = max(len(list(SHOT_HEADER.finditer(prompt))), len(windows))
     errors: list[str] = []
     warnings: list[str] = []
-    if duration > 15 and scene_count < 2:
+    # Individual chapters of a multi-chapter production are single scenes — don't block them.
+    # Also skip the multi-scene requirement when the prompt has explicit timestamps (0:00–0:10 style)
+    # because those already encode the scene structure inline.
+    _has_inline_times = bool(__import__('re').search(
+        r'\d{1,2}:\d{2}[–—\-]\d{1,2}:\d{2}', prompt
+    ))
+    if duration > 15 and scene_count < 2 and not is_chapter and not _has_inline_times:
         errors.append("Long Seedance videos require an explicit timed multi-scene plan.")
-    if scene_count >= 2 and not windows:
+    if scene_count >= 2 and not windows and not _has_inline_times:
         errors.append("Scene timings are missing, overlapping, or do not cover the full duration.")
     if require_storyboard_coverage and boards and scene_count and len(boards) > scene_count:
         errors.append(

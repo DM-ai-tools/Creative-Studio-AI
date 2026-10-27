@@ -43,3 +43,6 @@ async def create_tables():
         await conn.execute(text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ"
         ))
+        await conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS product_scope VARCHAR(64)"
+        ))

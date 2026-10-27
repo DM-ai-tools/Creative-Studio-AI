@@ -4,7 +4,7 @@ param(
     [string]$SshUser = "ubuntu",
     [string]$PpkPath = "$env:USERPROFILE\Downloads\DM-Creative-studioppk.ppk",
     [string]$HostKey = "ssh-ed25519 SHA256:jTOaSeVI4b8N91dCskmU0wNyKUR/TsJPI+fFkOa3X7I",
-    [string]$PublicOrigin = "http://creativestudio.tools"
+    [string]$PublicOrigin = "https://creativestudio.tools"
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,7 +78,7 @@ if (-not (Test-Path $deployEnvLocal)) {
         "POSTGRES_USER=csuser"
         "POSTGRES_PASSWORD=$pgPass"
         "REDIS_PASSWORD=$redisPass"
-        "NEXT_PUBLIC_APP_NAME=CreativeStudio AI"
+        'NEXT_PUBLIC_APP_NAME="CreativeStudio AI"'
     )
     $lines | Set-Content -Path $deployEnvLocal -Encoding ascii
     Write-Host "Created deploy/aws/.env with generated database passwords."

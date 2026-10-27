@@ -535,7 +535,13 @@ def conform_shot_duration(source: Path, output: Path, seconds: float) -> Path:
 
 
 def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
-    """Concatenate MP4 clips with re-encode (stream-copy often yields wrong duration)."""
+    """Concatenate independently encoded clips through decoded filter streams.
+
+    Seedance can return H.264 for one chapter and HEVC for the next. The concat
+    demuxer treats every packet as the first codec and can silently drop the
+    later video while preserving its audio. Filter concat decodes each input
+    first, so codec changes cannot create a frozen final frame.
+    """
     if not paths:
         raise ValueError("No video clips to concatenate")
     if len(paths) == 1:
@@ -545,75 +551,77 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
     ffmpeg = require_ffmpeg()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".txt",
-        delete=False,
-        encoding="utf-8",
-    ) as list_file:
-        for p in paths:
-            escaped = str(p.resolve()).replace("'", "'\\''")
-            list_file.write(f"file '{escaped}'\n")
-        list_path = Path(list_file.name)
+    from app.services.ffmpeg_util import probe_has_audio, probe_video_stream_duration
 
+    audio_flags = [probe_has_audio(path) for path in paths]
+    if any(flag is None for flag in audio_flags):
+        raise RuntimeError("Cannot verify clip streams before stitching")
+    if any(audio_flags) and not all(audio_flags):
+        raise RuntimeError("Mixed audio streams must be normalized before encoded concatenation")
+    has_audio = bool(all(audio_flags))
+
+    reencode_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+    for path in paths:
+        reencode_cmd += ["-i", str(path)]
+    filters: list[str] = []
+    for index in range(len(paths)):
+        filters.append(
+            f"[{index}:v:0]fps=24,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[v{index}]"
+        )
+        if has_audio:
+            filters.append(
+                f"[{index}:a:0]aresample=48000,asetpts=PTS-STARTPTS[a{index}]"
+            )
+    concat_inputs = "".join(
+        f"[v{index}][a{index}]" if has_audio else f"[v{index}]"
+        for index in range(len(paths))
+    )
+    filters.append(
+        f"{concat_inputs}concat=n={len(paths)}:v=1:a={1 if has_audio else 0}"
+        + ("[vout][aout]" if has_audio else "[vout]")
+    )
+    reencode_cmd += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
+    if has_audio:
+        reencode_cmd += ["-map", "[aout]"]
+    reencode_cmd += [
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
+    ]
+    if has_audio:
+        reencode_cmd += ["-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    reencode_cmd += ["-movflags", "+faststart", str(output_path)]
+
+    proc2 = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=600)
     try:
-        # Always re-encode so durations add correctly across Higgsfield clips
-        reencode_cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_path),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ]
-        proc2 = subprocess.run(reencode_cmd, capture_output=True, text=True)
         expected_duration = sum(
             duration
             for duration in (probe_video_duration(path) for path in paths)
             if duration is not None
         )
-        output_duration = (
-            probe_video_duration(output_path)
+        output_video_duration = (
+            probe_video_stream_duration(output_path)
             if output_path.is_file() and output_path.stat().st_size > 0
             else None
         )
         duration_tolerance = max(0.5, expected_duration * 0.05)
         valid_output = bool(
-            output_duration
+            output_video_duration
             and expected_duration > 0
-            and output_duration >= expected_duration - duration_tolerance
+            and output_video_duration >= expected_duration - duration_tolerance
         )
         if proc2.returncode != 0 and valid_output:
             logger.warning(
                 "FFmpeg returned %s after producing a valid %.3fs stitched video; keeping it",
                 proc2.returncode,
-                output_duration,
+                output_video_duration,
             )
         elif proc2.returncode != 0 or not valid_output:
             raise RuntimeError(
                 "Failed to stitch video clips: "
                 f"{(proc2.stderr or proc2.stdout or 'no FFmpeg diagnostic')[-400:]}"
             )
-    finally:
-        list_path.unlink(missing_ok=True)
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
 
 
 def trim_video_to_duration(video_path: Path, max_seconds: float) -> Path | None:

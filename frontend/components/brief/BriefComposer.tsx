@@ -19,6 +19,7 @@ import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import ModelSelectorBlock from '@/components/brief/ModelSelectorBlock'
 import StrategyPreviewPanel from '@/components/brief/StrategyPreviewPanel'
 import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipeline'
+import HeyGenSimpleVideoTab from '@/components/brief/HeyGenSimpleVideoTab'
 import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
 import HeroAiImageTab from '@/components/brief/HeroAiImageTab'
 import {
@@ -51,6 +52,8 @@ import {
 } from '@/components/brief/BriefGenerationPanel'
 import { useApi } from '@/hooks/useApi'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
+import { useAuth } from '@/hooks/useAuth'
+import { isCsSeedance25Only } from '@/lib/productScope'
 import { API_CACHE_TTL, clearApiCache, clearBriefListCaches, patchApiCache } from '@/lib/apiCache'
 import { brandsApi, briefsApi, generationApi, assetsApi } from '@/lib/api'
 import { extractApiError } from '@/lib/apiErrors'
@@ -451,6 +454,8 @@ function PillRadio({
 
 export default function BriefComposer(_props: BriefComposerProps) {
   const router = useRouter()
+  const { user } = useAuth()
+  const cs25Only = isCsSeedance25Only(user)
   const { activeBrandId, setActiveBrandId } = useActiveBrand()
   const { data: brands, refetch: refetchBrands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands',
@@ -461,7 +466,29 @@ export default function BriefComposer(_props: BriefComposerProps) {
     ttlMs: API_CACHE_TTL.catalog,
   })
 
-  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio' | 'hero_ai_image'>('image')
+  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio' | 'hero_ai_image'>(
+    () => (cs25Only ? 'creative_studio' : 'image'),
+  )
+
+  useEffect(() => {
+    if (cs25Only) setMediaType('creative_studio')
+  }, [cs25Only])
+
+  const composerMediaTabs = useMemo(() => {
+    const tabs = [
+      { id: 'image' as const, label: 'Image', hint: 'Static & carousel ads' },
+      { id: 'video' as const, label: 'Video', hint: 'HeyGen · paste script & generate' },
+      { id: 'hero_ai_image' as const, label: UI.imageAdFromPhoto, hint: UI.addTextToImage },
+      {
+        id: 'creative_studio' as const,
+        label: UI.aiAssistant,
+        hint: 'Chat playground · Seedance',
+        badge: 'NEW' as const,
+      },
+    ]
+    if (cs25Only) return tabs.filter((tab) => tab.id === 'creative_studio')
+    return tabs
+  }, [cs25Only])
   const [imageVariantSlots, setImageVariantSlots] = useState<ImageVariantSlot[]>([
     emptyImageVariantSlot(),
     emptyImageVariantSlot(),
@@ -1431,8 +1458,10 @@ export default function BriefComposer(_props: BriefComposerProps) {
   const isCustomScriptMode = scriptBuildMode === 'custom' && wantsVideo
   const isWebsiteScriptMode = scriptBuildMode === 'website' && wantsVideo
   const isAlternateScriptMode = isPdfScriptMode || isCustomScriptMode || isWebsiteScriptMode
-  /** PDF/custom hide campaign detail steps; website keeps audience, script, etc. */
-  const hideCampaignDetailSteps = isPdfScriptMode || isCustomScriptMode
+  /** Video tab + PDF/custom hide campaign detail steps. */
+  const hideCampaignDetailSteps =
+    mediaType === 'video' || isPdfScriptMode || isCustomScriptMode
+  const isHeyGenVideoTab = mediaType === 'video'
 
   const imageModelSelect = useMemo(
     () =>
@@ -1498,6 +1527,19 @@ export default function BriefComposer(_props: BriefComposerProps) {
         setValue('formats', ['reel'], { shouldValidate: true })
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaType])
+
+  useEffect(() => {
+    if (mediaType !== 'video') return
+    setScriptBuildMode('custom')
+    setGenSettings((prev) => ({
+      ...prev,
+      videoModel: 'heygen-video-agent',
+      videoDurationSeconds: prev.videoDurationSeconds || 30,
+    }))
+    setValue('formats', ['reel'], { shouldValidate: true })
+    setValue('placements', ['reels'], { shouldValidate: true })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaType])
 
@@ -2104,11 +2146,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
 
     if (isCustomMode) {
       if (!customPrompt.trim()) {
-        toast.error('Paste your video prompt or script.')
-        return
-      }
-      if (!referenceImageFile) {
-        toast.error('Add a reference image (upload or paste).')
+        toast.error('Paste your timed video script.')
         return
       }
       if (isHeyGen && (!genSettings.heygenAvatarId || !genSettings.heygenVoiceId)) {
@@ -2175,6 +2213,11 @@ export default function BriefComposer(_props: BriefComposerProps) {
       if (isCustomScriptMode && referenceImageFile) {
         const asset = await assetsApi.upload(referenceImageFile, undefined, 'reference_image')
         referenceImageUrl = asset.file_url
+      } else if (
+        isCustomScriptMode &&
+        avatarExportSnapshot.statsImageUrls.length > 0
+      ) {
+        referenceImageUrl = avatarExportSnapshot.statsImageUrls[0]
       }
 
       let brandId = (d.brand_id || '').trim()
@@ -2403,7 +2446,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
     (brandSource === 'website' && !websiteBrand && !(watch('brand_id') || '').trim()) ||
     !catalog ||
     (isPdfScriptMode && !pdfFile) ||
-    (isCustomScriptMode && (!customPrompt.trim() || !referenceImageFile)) ||
+    (isCustomScriptMode && !customPrompt.trim()) ||
     (isWebsiteScriptMode && !websiteUrl.trim()) ||
     needsApprovedScript
 
@@ -2442,12 +2485,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
       {/* Image / Video / Creative Studio tabs */}
       <div className="sticky top-[65px] z-10 border-b border-border bg-white/90 backdrop-blur-md">
         <div className="w-full max-w-[1600px] mx-auto px-6 md:px-8 flex gap-1">
-          {([
-            { id: 'image' as const,            label: 'Image',           hint: 'Static & carousel ads' },
-            { id: 'video' as const,            label: 'Video',           hint: 'Portrait & landscape' },
-            { id: 'hero_ai_image' as const,   label: UI.imageAdFromPhoto, hint: UI.addTextToImage },
-            { id: 'creative_studio' as const,  label: UI.aiAssistant, hint: 'Chat playground · Seedance', badge: 'NEW' },
-          ]).map((tab) => (
+          {composerMediaTabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
@@ -2481,6 +2519,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
           brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
           productName={watch('product_name') || ''}
           briefTitle={watch('title') || undefined}
+          seedance25Only={cs25Only}
         />
       )}
 
@@ -2520,7 +2559,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
             </div>
           )}
 
-          <BriefSection title="Industry & Brand" step="1">
+          <BriefSection title={isHeyGenVideoTab ? 'Brand' : 'Industry & Brand'} step="1">
+            {mediaType !== 'video' && (
             <div className="rounded-xl border border-dashed border-accent/50 bg-accent/5 p-4 space-y-2">
               <p className="text-xs font-bold text-navy uppercase tracking-wide">
                 Upload strategy file (.md, .docx)
@@ -2574,15 +2614,25 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 </p>
               )}
             </div>
+            )}
 
+            {isHeyGenVideoTab ? (
+              <Input
+                label="Campaign name"
+                placeholder="e.g. Traffic Radius 30s ad"
+                error={errors.title?.message}
+                {...register('title')}
+              />
+            ) : (
+              <Input
+                label="Industry"
+                placeholder="e.g. Mortgage Broking, Dental, Digital Marketing"
+                error={errors.title?.message}
+                {...register('title')}
+              />
+            )}
             <Input
-              label="Industry"
-              placeholder="e.g. Mortgage Broking, Dental, Digital Marketing"
-              error={errors.title?.message}
-              {...register('title')}
-            />
-            <Input
-              label="Niche"
+              label={isHeyGenVideoTab ? 'Niche (optional — for AI script draft)' : 'Niche'}
               placeholder="e.g. First home buyers, Refinance, Investment loans"
               error={errors.niche?.message}
               {...register('niche')}
@@ -3148,6 +3198,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
               </div>
             )}
 
+            {!isHeyGenVideoTab && (
+              <>
             <Select
               label="Objective"
               options={objectiveOptions}
@@ -3166,8 +3218,43 @@ export default function BriefComposer(_props: BriefComposerProps) {
               error={errors.target_variant_count?.message}
               {...register('target_variant_count')}
             />
+              </>
+            )}
           </BriefSection>
 
+          {isHeyGenVideoTab && catalog && (
+            <HeyGenSimpleVideoTab
+              script={customPrompt}
+              onScriptChange={setCustomPrompt}
+              durationSeconds={genSettings.videoDurationSeconds}
+              onDurationChange={(seconds) =>
+                setGenSettings({ ...genSettings, videoDurationSeconds: seconds })
+              }
+              durationOptions={durationOptions}
+              avatarId={genSettings.heygenAvatarId}
+              voiceId={genSettings.heygenVoiceId}
+              avatarLabel={avatarLabel}
+              voiceLabel={voiceLabel}
+              onAvatarChange={(id) => setGenSettings({ ...genSettings, heygenAvatarId: id })}
+              onVoiceChange={(id) => setGenSettings({ ...genSettings, heygenVoiceId: id })}
+              settings={heygenSettings}
+              onSettingsChange={setHeygenSettings}
+              avatarOptions={catalog.heygen_avatar_options ?? []}
+              avatarFeatured={catalog.heygen_avatar_featured}
+              heygenCatalog={catalog}
+              voiceOptions={catalog.heygen_voice_options ?? []}
+              brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
+              productName={formValues.product_name ?? ''}
+              niche={formValues.niche ?? ''}
+              onExportSnapshotChange={setAvatarExportSnapshot}
+              scriptMode={scriptBuildMode === 'pdf' ? 'pdf' : 'custom'}
+              onScriptModeChange={(mode) => setScriptBuildMode(mode)}
+              pdfFile={pdfFile}
+              onPdfFileChange={setPdfFile}
+            />
+          )}
+
+          {mediaType !== 'video' && (
           <BriefSection title="Creative formats & models" step="2">
 
             {/* ── Creative format chips ── */}
@@ -3182,13 +3269,8 @@ export default function BriefComposer(_props: BriefComposerProps) {
                   <strong>Video</strong> tab above for Portrait/Landscape.
                 </p>
               )}
-              {mediaType === 'video' && !wantsVideo && (selectedFormats ?? []).length > 0 && (
-                <p className="text-xs text-teal-800 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 mb-3">
-                  Select <strong>Landscape</strong> or <strong>Portrait</strong> to enable video generation (up to 4 minutes).
-                </p>
-              )}
               <ChipToggleGroup
-                options={mediaType === 'image' ? formatOptions.filter((f) => !isVideoFormat(f.id)) : formatOptions}
+                options={formatOptions.filter((f) => !isVideoFormat(f.id))}
                 selected={selectedFormats ?? []}
                 exclusive={false}
                 onChange={(next) => {
@@ -3312,348 +3394,6 @@ export default function BriefComposer(_props: BriefComposerProps) {
               </div>
             )}
 
-            {mediaType === 'video' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <p className="text-xs font-bold text-navy uppercase tracking-wide mb-1">Aspect Ratio</p>
-                <p className="text-sm text-mid bg-light border border-border rounded-lg px-3 py-2">{aspectHint}</p>
-              </div>
-              {wantsVideo && (
-                <div>
-                  <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Duration</p>
-                  <div className="flex flex-wrap gap-2">
-                    {durationOptions.map((opt) => (
-                      <ChipToggle
-                        key={opt.id}
-                        label={opt.label}
-                        selected={String(genSettings.videoDurationSeconds) === opt.id}
-                        onToggle={() =>
-                          setGenSettings({ ...genSettings, videoDurationSeconds: Number(opt.id) })
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            )}
-            {isHiggsfieldVideo && mediaType === 'video' && (
-              <p className="text-xs text-mid bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
-                <strong>Higgsfield:</strong>{' '}
-                {isSeedanceVideo ? (
-                  <>
-                    <strong>Seedance</strong> builds ads up to <strong>1m 30s</strong> as multiple{' '}
-                    <strong>15s supporting scenes</strong> (from your scene directions), then stitches
-                    them. Add supporting scenes in the script step for best results. Voiceover/captions
-                    are added after render.
-                  </>
-                ) : (
-                  <>
-                    Veo/DoP models are only <strong>5 seconds</strong> per clip. For longer ads
-                    choose <strong>Kling v3.0</strong>, <strong>Marketing Studio Video</strong>, or{' '}
-                    <strong>HeyGen</strong> (up to 4 minutes). Text/captions are added after
-                    generation (not inside the AI video) so they stay readable.
-                  </>
-                )}
-              </p>
-            )}
-
-            {mediaType === 'video' && (
-            <div className="mt-4 pt-4 border-t border-violet-200 rounded-lg bg-violet-50/40 p-4">
-              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">
-                Script source
-              </p>
-              {!wantsVideo && (
-                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-                  Select <strong>Landscape</strong> or <strong>Portrait</strong> above to unlock PDF
-                  upload and HeyGen avatar video.
-                </p>
-              )}
-              {wantsVideo && !isHeyGen && (
-                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
-                  Set <strong>Video Provider</strong> to <strong>HeyGen</strong> above to use PDF
-                  script upload.
-                </p>
-              )}
-              <p className="text-xs text-mid mb-3">
-                <strong>Manual</strong> — fill campaign fields and use AI for script.{' '}
-                <strong>PDF</strong> — upload a PDF; only avatar + voice are chosen here.{' '}
-                <strong>Paste prompt &amp; image</strong> — supply your own script and reference image.{' '}
-                <strong>Website URL</strong> — paste your webpage and AI writes the script using the best framework for your chosen duration.
-              </p>
-              <div className="flex flex-wrap gap-2 mb-3">
-                <ChipToggle
-                  label="Manual campaign & AI"
-                  selected={scriptBuildMode === 'manual'}
-                  disabled={!wantsVideo}
-                  onToggle={() => setScriptBuildMode('manual')}
-                />
-                <ChipToggle
-                  label="Upload PDF script"
-                  selected={scriptBuildMode === 'pdf'}
-                  disabled={!wantsVideo}
-                  onToggle={() => {
-                    setScriptBuildMode('pdf')
-                    if (!isHeyGen) {
-                      setGenSettings((prev) => ({ ...prev, videoModel: 'heygen-video-agent' }))
-                    }
-                  }}
-                />
-                <ChipToggle
-                  label="Paste prompt & image"
-                  selected={scriptBuildMode === 'custom'}
-                  disabled={!wantsVideo}
-                  onToggle={() => setScriptBuildMode('custom')}
-                />
-                <ChipToggle
-                  label="Website URL → AI script"
-                  selected={scriptBuildMode === 'website'}
-                  disabled={!wantsVideo}
-                  onToggle={() => setScriptBuildMode('website')}
-                />
-              </div>
-              {scriptBuildMode === 'pdf' && wantsVideo && !isHeyGen && (
-                <p className="text-[11px] text-mid mb-2">Switching provider to HeyGen for PDF mode…</p>
-              )}
-              {isPdfScriptMode && (
-                <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-2">
-                  <label className="block text-xs font-bold text-navy uppercase tracking-wide">
-                    Upload script PDF
-                  </label>
-                  <input
-                    type="file"
-                    accept=".pdf,application/pdf"
-                    className="text-sm w-full file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-teal file:text-white"
-                    onChange={(e) => setPdfFile(e.target.files?.[0] ?? null)}
-                  />
-                  {pdfFile ? (
-                    <p className="text-xs text-navy">
-                      Selected: <strong>{pdfFile.name}</strong>
-                    </p>
-                  ) : (
-                    <p className="text-xs text-amber-700">Choose a PDF before Create &amp; Generate.</p>
-                  )}
-                  <p className="text-[11px] text-mid">
-                    Full script text is extracted when you save (max ~10 MB). You only pick avatar,
-                    voice, and duration below — the video follows the PDF.
-                  </p>
-                </div>
-              )}
-              {isCustomScriptMode && (
-                <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-3">
-                  <div>
-                    <label
-                      htmlFor="custom-video-prompt"
-                      className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5"
-                    >
-                      Video prompt / script
-                    </label>
-                    <TextArea
-                      id="custom-video-prompt"
-                      rows={5}
-                      placeholder="Paste your full video script, scene directions, or creative prompt here…"
-                      value={customPrompt}
-                      onChange={(e) => setCustomPrompt(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5">
-                      Reference image
-                    </label>
-                    <div
-                      tabIndex={0}
-                      onPaste={handleReferenceImagePaste}
-                      className="rounded-xl border-2 border-dashed border-border bg-light p-4 focus:outline-none focus:border-accent/50"
-                    >
-                      {referenceImagePreview ? (
-                        <div className="space-y-2">
-                          <img
-                            src={referenceImagePreview}
-                            alt="Reference preview"
-                            className="max-h-40 rounded-lg object-contain mx-auto"
-                          />
-                          <p className="text-xs text-navy text-center">
-                            <strong>{referenceImageFile?.name}</strong>
-                          </p>
-                          <button
-                            type="button"
-                            className="text-xs text-mid hover:text-charcoal underline block mx-auto"
-                            onClick={() => applyReferenceImageFile(null)}
-                          >
-                            Remove image
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-center space-y-2">
-                          <p className="text-xs text-mid">
-                            Upload or <strong>paste</strong> an image (Ctrl+V) to use as the video seed.
-                          </p>
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            className="text-sm w-full file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-teal file:text-white"
-                            onChange={(e) => applyReferenceImageFile(e.target.files?.[0] ?? null)}
-                          />
-                        </div>
-                      )}
-                    </div>
-                    {!referenceImageFile && (
-                      <p className="text-xs text-amber-700 mt-2">
-                        Add a reference image before Create &amp; Generate.
-                      </p>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-mid">
-                    Your prompt drives the spoken script and scene plan. The reference image is used
-                    as the seed still for video generation. Pick avatar, voice, and duration below.
-                  </p>
-                </div>
-              )}
-              {isWebsiteScriptMode && (
-                <div className="rounded-lg border-2 border-violet-300 bg-white p-3 space-y-3">
-                  <div>
-                    <label
-                      htmlFor="website-url-input"
-                      className="block text-xs font-bold text-navy uppercase tracking-wide mb-1.5"
-                    >
-                      Website page URL
-                    </label>
-                    <input
-                      id="website-url-input"
-                      type="url"
-                      className="w-full rounded-lg border border-border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent/40"
-                      placeholder="https://yourwebsite.com/service-page"
-                      value={websiteUrl}
-                      onChange={(e) => setWebsiteUrl(e.target.value)}
-                    />
-                    {!websiteUrl.trim() && (
-                      <p className="text-xs text-amber-700 mt-1.5">
-                        Paste your page URL — AI will read it and write the script.
-                      </p>
-                    )}
-                  </div>
-                  <div className="rounded-lg bg-violet-50 border border-violet-200 px-3 py-2 space-y-1">
-                    <p className="text-[11px] font-semibold text-violet-800">Framework auto-selected by duration:</p>
-                    <p className="text-[11px] text-violet-700">
-                      {genSettings.videoDurationSeconds <= 20 && '⚡ Hook + CTA — punchy single-message ad'}
-                      {genSettings.videoDurationSeconds > 20 && genSettings.videoDurationSeconds <= 45 && '▶ Hook → Benefit → CTA'}
-                      {genSettings.videoDurationSeconds > 45 && genSettings.videoDurationSeconds <= 90 && '▶ Problem → Solution → CTA'}
-                      {genSettings.videoDurationSeconds > 90 && genSettings.videoDurationSeconds <= 150 && '▶ Problem → Agitate → Solution → CTA'}
-                      {genSettings.videoDurationSeconds > 150 && '▶ Story Arc — Before / Struggle / Discovery / Results / CTA'}
-                    </p>
-                    <p className="text-[10px] text-violet-600">Change duration above to switch framework.</p>
-                  </div>
-                  <p className="text-[11px] text-mid">
-                    The AI fetches your page, extracts key content, and writes a fully timed script.
-                    Pick avatar, voice, and duration above — the script is generated in Step 8.
-                  </p>
-                </div>
-              )}
-            </div>
-            )}
-
-          </BriefSection>
-
-          {!hideCampaignDetailSteps && mediaType === 'video' && (
-            <>
-          <BriefSection title="Audience & Tone" step="3">
-            <Input
-              label="Target Audience"
-              placeholder="e.g. Adults 28–55 interested in cosmetic dentistry"
-              error={errors.audience_type?.message}
-              {...register('audience_type')}
-            />
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <Input label="Geography" placeholder="e.g. Perth WA, Sydney NSW" error={errors.geography?.message} {...register('geography')} />
-              <Input label="Age Range" placeholder="28 – 55" error={errors.age_range?.message} {...register('age_range')} />
-              <Input label="Languages" placeholder="English" error={errors.languages?.message} {...register('languages')} />
-            </div>
-            <Input
-              label="Tone of Voice"
-              placeholder="e.g. Friendly & Trustworthy, Professional"
-              error={errors.ad_copy_tone?.message}
-              {...register('ad_copy_tone')}
-            />
-          </BriefSection>
-
-          <BriefSection title="Platform & Placement" step="4">
-            <div>
-              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Platforms / Placements</p>
-              <ChipToggleGroup
-                options={placementOptions}
-                selected={selectedPlacements ?? []}
-                onChange={(next) => setValue('placements', next, { shouldValidate: true })}
-                disabled={!catalog}
-              />
-              {errors.placements && <p className="mt-1 text-xs text-red-500">{errors.placements.message}</p>}
-            </div>
-            <div>
-              <p className="text-xs font-bold text-navy uppercase tracking-wide mb-2">Hook Frameworks (optional)</p>
-              <ChipToggleGroup
-                options={hookFrameworkOptions}
-                selected={selectedFrameworks ?? []}
-                onChange={(next) => setValue('hook_frameworks', next)}
-              />
-            </div>
-          </BriefSection>
-
-          </>
-          )}
-
-          {!hideCampaignDetailSteps && mediaType === 'video' && (
-          <BriefSection title="Script & Content" step="5">
-            <Input
-              label={`${UI.productOrService} (optional)`}
-              placeholder="e.g. General & Cosmetic Dentistry"
-              error={errors.product_name?.message}
-              {...register('product_name')}
-            />
-            <Input
-              label="Offer / Key Message (optional)"
-              placeholder="e.g. Free consultation for new patients"
-              error={errors.offer?.message}
-              {...register('offer')}
-            />
-            <div>
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                <label
-                  htmlFor="script-brief-notes"
-                  className="block text-xs font-bold text-navy uppercase tracking-wide"
-                >
-                  {wantsVideo && isHeyGen ? 'Creative brief (optional talking points)' : 'Script / Brief Notes (optional)'}
-                </label>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="primary"
-                  isLoading={generatingNotes}
-                  onClick={() => void handleGenerateScriptNotes()}
-                >
-                  {UI.draftScriptForAudience}
-                </Button>
-              </div>
-              <TextArea
-                id="script-brief-notes"
-                rows={4}
-                placeholder={
-                  wantsVideo && isHeyGen
-                    ? 'Writer directions: themes, tone, what to mention — not the words the avatar speaks aloud.'
-                    : `What should the ad say? Paste script ideas or talking points — or click ${UI.draftScriptForAudience} above.`
-                }
-                error={errors.notes?.message}
-                {...register('notes')}
-              />
-              <p className="mt-1 text-[11px] text-mid">
-                {wantsVideo && isHeyGen ? (
-                  <>
-                    Optional — skip if you paste your full script in <strong>step 8</strong>. Otherwise use{' '}
-                    <strong>{UI.draftScriptForAudience}</strong> here, then <strong>Approve</strong> in step 8.
-                  </>
-                ) : (
-                  'Optional. Builds an ICP from audience + offer when those fields are filled.'
-                )}
-              </p>
-            </div>
           </BriefSection>
           )}
 
@@ -3702,7 +3442,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
             </BriefSection>
           )}
 
-          {wantsVideo && isHeyGen && (
+          {wantsVideo && isHeyGen && !isHeyGenVideoTab && (
             <HeyGenProductionPipeline
               pdfScriptOnly={isPdfScriptMode || isCustomScriptMode}
               durationSeconds={genSettings.videoDurationSeconds}
@@ -3774,6 +3514,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
             />
           )}
 
+          {!isHeyGenVideoTab && (
           <BriefSection title="Call to Action" step="7">
             {mediaType === 'image' ? (
               <>
@@ -3798,8 +3539,10 @@ export default function BriefComposer(_props: BriefComposerProps) {
               />
             )}
           </BriefSection>
+          )}
 
           {/* ── Model Selector — bottom of form after all inputs ─────── */}
+          {!isHeyGenVideoTab && (
           <BriefSection title="AI Models" step="9">
             <p className="text-xs text-mid -mt-1 mb-1">
               {mediaType === 'image' ? (
@@ -3840,8 +3583,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
               })}
             />
           </BriefSection>
+          )}
 
-          {mediaType === 'video' && (
+          {mediaType === 'video' && !isHeyGenVideoTab && (
             <StrategyPreviewPanel
               canBuild={Boolean(catalog && hasBrands)}
               onPreviewChange={setStrategyPreview}

@@ -39,12 +39,17 @@ def chapter_quality_report(
 ) -> dict[str, Any]:
     duration = probe_video_duration(video_path)
     checks: list[dict[str, Any]] = []
-    duration_ok = duration is not None and abs(float(duration) - float(expected_duration)) <= 0.35
+    # Allow ±10% or ±3s whichever is larger — Seedance clips naturally vary slightly
+    # in length and the old 0.35s cap caused almost every chapter to fail needlessly.
+    _exp = float(expected_duration)
+    _tol = max(3.0, _exp * 0.10)
+    duration_ok = duration is not None and abs(float(duration) - _exp) <= _tol
     checks.append({
         "id": "duration",
         "passed": duration_ok,
-        "expected_seconds": float(expected_duration),
+        "expected_seconds": _exp,
         "observed_seconds": round(float(duration), 3) if duration is not None else None,
+        "tolerance_seconds": round(_tol, 2),
     })
     checks.append({"id": "reference_manifest", "passed": bool(references_locked)})
 

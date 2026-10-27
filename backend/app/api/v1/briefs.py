@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Qu
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.product_scope import require_brief_media_type, require_full_studio_access
 from app.core.security import get_current_user
 from app.models.brief import Brief
 from app.schemas.brief import BriefCreate, BriefListResponse, BriefResponse, BriefUpdate, GenerationRequest
@@ -32,6 +33,8 @@ async def create_brief(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    kb = data.key_benefits if isinstance(data.key_benefits, dict) else {}
+    require_brief_media_type(current_user, kb.get("media_type"))
     return await BriefService.create_brief(db, current_user.tenant_id, current_user.id, data)
 
 
@@ -63,6 +66,9 @@ async def update_brief(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if data.key_benefits is not None:
+        kb = data.key_benefits if isinstance(data.key_benefits, dict) else {}
+        require_brief_media_type(current_user, kb.get("media_type"))
     return await BriefService.update_brief(db, brief_id, current_user.tenant_id, data)
 
 
@@ -92,6 +98,7 @@ async def upload_script_pdf(
     db: AsyncSession = Depends(get_db),
 ):
     """Extract full script from PDF; HeyGen uses this as the only spoken script (avatar + voice from UI)."""
+    require_full_studio_access(current_user)
     brief = await BriefService.get_brief(db, brief_id, current_user.tenant_id)
     fname = (file.filename or "").strip().lower()
     if not fname.endswith(".pdf"):
@@ -126,6 +133,7 @@ async def clear_script_pdf(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    require_full_studio_access(current_user)
     brief = await BriefService.get_brief(db, brief_id, current_user.tenant_id)
     kb = dict(brief.key_benefits) if isinstance(brief.key_benefits, dict) else {}
     for key in ("pdf_filename", "pdf_script_text", "avatar_script"):
@@ -150,6 +158,7 @@ async def preview_production_script(
     db: AsyncSession = Depends(get_db),
 ):
     """Preview filled 30s skeleton before generating video."""
+    require_full_studio_access(current_user)
     from app.services.video_script_skeleton import (
         build_veo_prompt_from_skeleton,
         ensure_production_skeleton,
@@ -216,6 +225,7 @@ async def generate_variants(
     browsers to show "Network Error" even though HeyGen finished. The brief stays
     RUNNING; the UI polls until variants appear.
     """
+    require_full_studio_access(current_user)
     brief = await BriefService.get_brief(db, brief_id, current_user.tenant_id)
     await BrandService.get_brand(db, brief.brand_id, current_user.tenant_id)
 

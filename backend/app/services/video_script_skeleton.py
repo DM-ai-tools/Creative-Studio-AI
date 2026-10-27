@@ -393,6 +393,7 @@ def detect_insert_stat_segments_by_image_index(
     stats_count: int,
     *,
     duration: int = 30,
+    preserve_explicit_times: bool = False,
 ) -> list[tuple[float, float] | None]:
     """Map each stat image index to its [INSERT STAT IMAGE N] voice beat timestamp."""
     lines = parse_spoken_lines(spoken_script, duration=duration)
@@ -407,7 +408,11 @@ def detect_insert_stat_segments_by_image_index(
             e = float(min(_timestamp_to_seconds(end), duration))
             if e <= s:
                 e = min(float(duration), s + MIN_STAT_SLIDE_SEC)
-            result[idx] = _extend_stat_segment(s, e, float(duration))
+            result[idx] = (
+                (s, e)
+                if preserve_explicit_times
+                else _extend_stat_segment(s, e, float(duration))
+            )
     return result
 
 
