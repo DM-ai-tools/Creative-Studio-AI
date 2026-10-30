@@ -66,6 +66,8 @@ export interface UsageEventRow {
   error?: string | null
   client?: string | null
   created_at?: string | null
+  media_url?: string | null
+  variant_url?: string | null
 }
 
 export interface UsageDailyPoint {
@@ -86,6 +88,8 @@ export interface SeedanceUsageClip {
   recovered?: boolean
   client?: string | null
   created_at?: string | null
+  media_url?: string | null
+  variant_url?: string | null
 }
 
 export interface SeedanceUsageModelRow {
@@ -144,12 +148,15 @@ export interface AdminUsage {
   }
   by_provider: UsageBucket[]
   by_model: UsageBucket[]
+  by_user?: (UsageBucket & { user_id?: string | null })[]
+  by_media_type?: UsageBucket[]
   seedance?: SeedanceUsageSummary
   recent: UsageEventRow[]
   daily_cost?: UsageDailyPoint[]
   daily_requests?: UsageDailyPoint[]
   chart_models?: string[]
   period_days?: number
+  filter_user_id?: string | null
 }
 
 export interface Tenant {

@@ -32,7 +32,7 @@ import { CS25_DEFAULT_VIDEO_MODEL, isCsSeedance25Only } from '@/lib/productScope
 type ChatMode = 'auto' | 'ask' | 'generate'
 type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
 type AspectId = '9/16' | '1/1' | '16/9' | '4/3' | '4/5'
-type ResolutionId = '480p' | '720p' | '1080p'
+type ResolutionId = '360p' | '480p' | '720p' | '1080p' | '4k'
 type SpeechMode = 'native_presenter' | 'external_voiceover'
 type ContinuationReferenceMode = 'continuity' | 'first_frame'
 type PipelineAction = CsPipelineAction
@@ -76,6 +76,13 @@ const RESOLUTIONS: { id: ResolutionId; label: string }[] = [
   { id: '480p', label: '480p' },
   { id: '720p', label: '720p' },
   { id: '1080p', label: '1080p · Full HD' },
+]
+
+const GEMINI_OMNI_RESOLUTIONS: { id: ResolutionId; label: string }[] = [
+  { id: '360p', label: '360p' },
+  { id: '720p', label: '720p' },
+  { id: '1080p', label: '1080p · upscaled Full HD' },
+  { id: '4k', label: '4K · upscaled' },
 ]
 
 const MODES: { id: ChatMode; label: string; hint: string }[] = [
@@ -123,13 +130,18 @@ const ACTION_LABELS: Record<string, string> = {
   approve_all_broll: 'Approve all B-roll → lock for Seedance',
 }
 
-function chapterHandoffLabel(m: ChatMessage, clipCap: number, projectDurationSeconds: number) {
+function chapterHandoffLabel(
+  m: ChatMessage,
+  clipCap: number,
+  projectDurationSeconds: number,
+  providerLabel = 'Seedance',
+) {
   const nextChapter =
     m.continuationMeta?.chapter_index ??
     (isChapterHandoffReady(m, projectDurationSeconds, clipCap) ? 1 : 0)
   return nextChapter >= 1
-    ? `Start chapter ${nextChapter + 1} → Seedance`
-    : ACTION_LABELS.approve_next
+    ? `Start chapter ${nextChapter + 1} → ${providerLabel}`
+    : `Approve & Next → ${providerLabel} video`
 }
 
 function uid() {
@@ -235,11 +247,17 @@ function isMasterProductionBrief(text: string): boolean {
 }
 
 function seedanceClipCap(modelId: string) {
+  if (/gemini-omni/i.test(modelId)) return 10
   return /2-5|2\.5/i.test(modelId) ? 30 : 15
 }
 
 function seedanceModelLabel(modelId: string) {
+  if (/gemini-omni/i.test(modelId)) return 'Gemini Omni 1.1 Flash'
   return seedanceClipCap(modelId) >= 30 ? 'Seedance 2.5' : 'Seedance 2.0'
+}
+
+function isGeminiOmniModel(modelId: string) {
+  return /gemini-omni/i.test(modelId)
 }
 
 function imageModelLabel(modelId: string) {
@@ -517,6 +535,7 @@ export default function CreativeStudioTab({
     [csModels],
   )
   const clipCap = seedanceClipCap(videoModel)
+  const isGeminiOmni = isGeminiOmniModel(videoModel)
   const imageModelLabelText = imageModelLabel(imageModel)
   const projectDurationSeconds = duration === 'auto' ? 90 : Number(duration)
   const videoModelLabel = seedanceModelLabel(videoModel)
@@ -550,6 +569,15 @@ export default function CreativeStudioTab({
         : CS25_DEFAULT_VIDEO_MODEL
     setVideoModel(preferred)
   }, [seedance25Only, csModels?.video_model_default])
+
+  useEffect(() => {
+    if (isGeminiOmni) {
+      if (!['9/16', '16/9'].includes(aspect)) setAspect('16/9')
+      if (resolution === '480p') setResolution('720p')
+      return
+    }
+    if (resolution === '360p' || resolution === '4k') setResolution('1080p')
+  }, [isGeminiOmni, aspect, resolution])
 
   const applySession = useCallback((session: CsChatSession) => {
     const storedMessages = session.messages || []
@@ -956,6 +984,8 @@ export default function CreativeStudioTab({
           sound_on: soundOn,
           speech_mode: speechMode,
           brand_name: effectiveBrandName,
+          brand_id: brandId,
+          brief_id: briefId,
           product_name: productName || '',
           action: 'regenerate_broll_image',
           image_model: imageModel,
@@ -1400,7 +1430,14 @@ export default function CreativeStudioTab({
     for (const message of messages) {
       if (
         message.jobId &&
-        (message.status === 'queued' || message.status === 'running')
+        (
+          message.status === 'queued' ||
+          message.status === 'running' ||
+          // Recheck a failed Gemini continuation once after chat hydration.
+          // The backend can recover the accepted previous interaction and
+          // expose Generate next part without rerunning Chapter 1.
+          (isGeminiOmni && message.mediaMode === 'video' && message.status === 'failed')
+        )
       ) {
         void pollJobIntoMessage(
           message.jobId,
@@ -1414,6 +1451,7 @@ export default function CreativeStudioTab({
     brandId,
     briefId,
     hydrated,
+    isGeminiOmni,
     messages,
     pollJobIntoMessage,
   ])
@@ -1830,6 +1868,8 @@ export default function CreativeStudioTab({
           ? [turnProductRef, ...userAttachments.map((a) => a.url).filter((u) => u !== turnProductRef)]
           : userAttachments.map((a) => a.url),
         brand_name: effectiveBrandName,
+        brand_id: brandId,
+        brief_id: briefId,
         product_name: productName || '',
         action,
         image_prompt: imgP,
@@ -1972,6 +2012,12 @@ export default function CreativeStudioTab({
       toast.error('The reviewed video part is missing its continuation job')
       return
     }
+    // Continue with the provider/model that created this reviewed chapter.
+    // The global selector may have been reset while chat history was restored,
+    // but it must never relabel or reroute an existing Gemini production.
+    const continuationModel = fromMsg.model || videoModel
+    const continuationIsGeminiOmni = isGeminiOmniModel(continuationModel)
+    const continuationModelLabel = seedanceModelLabel(continuationModel)
     const firstImage = draftAttachments.find(
       (asset) =>
         (asset.mime || '').startsWith('image') ||
@@ -2002,8 +2048,10 @@ export default function CreativeStudioTab({
       role: 'assistant',
       content:
         continuationReferenceMode === 'first_frame'
-          ? 'Starting the next Seedance chapter from the newly attached exact first frame…'
-          : 'Starting the next Seedance chapter with the previous approved video and new references…',
+          ? `Starting the next ${continuationModelLabel} chapter from the newly attached exact first frame…`
+          : continuationIsGeminiOmni
+            ? 'Continuing the previous Gemini video interaction with this next chapter prompt and references…'
+            : 'Starting the next Seedance chapter with the previous approved video and new references…',
       mediaMode: 'video',
       status: 'queued',
       progress: 'Queued…',
@@ -2039,7 +2087,7 @@ export default function CreativeStudioTab({
             completed_segments: fromMsg.continuationMeta?.completed_segments ?? 1,
             segment_count:
               fromMsg.continuationMeta?.segment_count ??
-              Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(videoModel))),
+              Math.max(2, Math.ceil(requestedTotal / seedanceClipCap(continuationModel))),
             generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
             continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
             production_id: fromMsg.continuationMeta?.production_id,
@@ -2047,7 +2095,7 @@ export default function CreativeStudioTab({
               fromMsg.continuationMeta?.continuity_video_reference_url,
             payload: buildContinuationRecoveryPayload({
               sessionId: activeChatId,
-              videoModel,
+              videoModel: continuationModel,
               videoPrompt: fromMsg.videoPrompt || videoPrompt,
               duration,
               aspect,
@@ -2672,7 +2720,9 @@ export default function CreativeStudioTab({
             </select>
           </div>
           <p className="text-[9px] text-white/45">
-            Preserve continuity keeps the previous presenter/video and uses new uploads as visual references. Exact first frame starts from the new image and resets previous-video continuity because BytePlus cannot accept both in one request.
+            {isGeminiOmni
+              ? "Gemini continuity reuses Google's stored interaction. New uploads guide this chapter without discarding the previous video state."
+              : 'Preserve continuity keeps the previous presenter/video and uses new uploads as visual references. Exact first frame starts from the new image and resets previous-video continuity because BytePlus cannot accept both in one request.'}
           </p>
         </div>
       ) : null}
@@ -2889,7 +2939,9 @@ export default function CreativeStudioTab({
             {' '}
             · {videoModelLabel} · {aspect.replace('/', ':')} ·{' '}
             {duration === 'auto' ? 'Auto length' : `${duration}s`}
-            {promptOnlyVideo ? ' · Direct Seedance' : ` · ${imageModelLabelText} → Seedance`}
+            {promptOnlyVideo
+              ? ` · Direct ${videoModelLabel}`
+              : ` · ${imageModelLabelText} → ${videoModelLabel}`}
             {soundOn
               ? speechMode === 'native_presenter'
                 ? ' · Native presenter speech'
@@ -2938,12 +2990,13 @@ export default function CreativeStudioTab({
             value={videoModel}
             onChange={(e) => setVideoModel(e.target.value)}
             className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[220px]"
-            title="Seedance video model"
-            aria-label="Seedance video model"
+            title="Video generation model"
+            aria-label="Video generation model"
           >
             {(videoModels.length ? videoModels : [
               { id: 'ark-seedance-2-0', label: 'Seedance 2.0 · 15s clips' },
               { id: 'ark-seedance-2-5', label: 'Seedance 2.5 · 30s clips' },
+              { id: 'gemini-omni-1.1-flash', label: 'Gemini Omni 1.1 Flash · 3–10s stateful chapters' },
             ]).map((model) => (
               <option key={model.id} value={model.id} className="bg-[#121316]">
                 Video · {model.label}
@@ -2995,9 +3048,9 @@ export default function CreativeStudioTab({
                 ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
                 : 'text-white/55 hover:text-white/80'
             }`}
-            title="Send the timed prompt and uploaded references directly to Seedance"
+            title={`Send the timed prompt and uploaded references directly to ${videoModelLabel}`}
           >
-            Direct Seedance
+            Direct {videoModelLabel}
           </button>
           <button
             type="button"
@@ -3011,9 +3064,9 @@ export default function CreativeStudioTab({
                 ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
                 : 'text-white/55 hover:text-white/80'
             }`}
-            title="Generate and review a GPT Image 2 starting scene, then animate the approved still with Seedance"
+            title={`Generate and review a GPT Image 2 starting scene, then animate it with ${videoModelLabel}`}
           >
-            GPT Image 2 → Seedance
+            GPT Image 2 → {videoModelLabel}
           </button>
           <button
             type="button"
@@ -3101,13 +3154,22 @@ export default function CreativeStudioTab({
           <span
             className="rounded-full border border-[#b8f000]/30 bg-[#b8f000]/10 px-2.5 py-1 text-[#6f9000]"
             title={promptOnlyVideo
-              ? 'Independent Seedance chapters use uploaded references as general visual guidance and are stitched after every chapter completes.'
+              ? isGeminiOmni
+                ? "Stateful Gemini chapters reuse the previous interaction, so the next prompt continues the reviewed video state."
+                : 'Independent Seedance chapters use uploaded references as general visual guidance and are stitched after every chapter completes.'
               : "Each chapter starts from the previous chapter's final frame and keeps the cast reference locked."}
           >
             {Math.ceil(Number(duration) / clipCap)} {promptOnlyVideo ? 'upload-guided chapters' : 'continuity-linked chapters'}
           </span>
         ) : null}
-        {clipCap >= 30 ? (
+        {isGeminiOmni ? (
+          <span
+            className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/60"
+            title="Gemini Omni supports 3–10 second chapters and 360p, 720p, upscaled 1080p or upscaled 4K output"
+          >
+            Omni 1.1 · 10s · up to 4K
+          </span>
+        ) : clipCap >= 30 ? (
           <span
             className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/60"
             title="Seedance 2.5 supports up to 1080p per clip"
@@ -3115,7 +3177,7 @@ export default function CreativeStudioTab({
             2.5 · 1080p max
           </span>
         ) : null}
-        {aspect === '4/5' ? (
+        {!isGeminiOmni && aspect === '4/5' ? (
           <span
             className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-200/90"
             title="BytePlus Seedance does not accept 4:5; we generate at 3:4 and you can crop to 4:5 in post"
@@ -3133,7 +3195,7 @@ export default function CreativeStudioTab({
               : undefined
           }
         >
-          {ASPECTS.map((a) => (
+          {(isGeminiOmni ? ASPECTS.filter((a) => a.id === '9/16' || a.id === '16/9') : ASPECTS).map((a) => (
             <option key={a.id} value={a.id} className="bg-[#121316]">
               {a.label}
               {a.id === '4/5' ? ' · uses 3:4' : ''}
@@ -3147,7 +3209,7 @@ export default function CreativeStudioTab({
           title="Video resolution"
           aria-label="Video resolution"
         >
-          {RESOLUTIONS.map((r) => (
+          {(isGeminiOmni ? GEMINI_OMNI_RESOLUTIONS : RESOLUTIONS).map((r) => (
             <option key={r.id} value={r.id} className="bg-[#121316]">
               {r.label}
             </option>
@@ -3797,7 +3859,12 @@ export default function CreativeStudioTab({
                               }`}
                             >
                               {a === 'approve_next'
-                                ? chapterHandoffLabel(m, clipCap, messageProjectDuration)
+                                ? chapterHandoffLabel(
+                                    m,
+                                    clipCap,
+                                    messageProjectDuration,
+                                    seedanceModelLabel(m.model || videoModel),
+                                  )
                                 : ACTION_LABELS[a] || a}
                             </button>
                           ))}

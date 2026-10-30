@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
 import Topbar from '@/components/layout/Topbar'
@@ -69,6 +69,23 @@ export default function VariantsPage() {
     if (briefFilter !== 'all' && variant.brief_id !== briefFilter) return false
     return true
   })
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const variantId = new URLSearchParams(window.location.search).get('variant')?.trim()
+    if (!variantId) return
+    const fromList = (variants ?? []).find((v) => v.id === variantId)
+    if (fromList) {
+      setSelectedVariant(fromList)
+      return
+    }
+    void variantsApi
+      .get(variantId)
+      .then((v) => setSelectedVariant(v))
+      .catch(() => {
+        toast.error('Could not open that creative — it may have been deleted.')
+      })
+  }, [variants])
 
   const selectedBrief = briefs?.find((brief) => brief.id === briefFilter)
   const readyBriefs = (briefs ?? []).filter((b) => (b.completed_variants ?? 0) > 0)

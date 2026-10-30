@@ -83,6 +83,81 @@ def _seedance_segment_durations(total_seconds: int, clip_cap: int = 15) -> list[
     return [base + (1 if i < remainder else 0) for i in range(count)]
 
 
+def _rebalance_segment_durations(
+    durations: list[int], total: int, cap: int
+) -> list[int]:
+    """Keep every segment within provider limits while summing exactly to *total*."""
+    parts = [max(3, min(cap, int(d))) for d in durations if int(d) > 0]
+    if not parts:
+        return _seedance_segment_durations(total, cap)
+    diff = int(total) - sum(parts)
+    index = len(parts) - 1
+    guard = 0
+    while diff != 0 and parts and guard < 512:
+        guard += 1
+        step = 1 if diff > 0 else -1
+        candidate = parts[index] + step
+        if 3 <= candidate <= cap:
+            parts[index] = candidate
+            diff -= step
+        else:
+            index = (index - 1) if index > 0 else len(parts) - 1
+    if sum(parts) != int(total):
+        return _seedance_segment_durations(total, cap)
+    return parts
+
+
+def _gemini_chapter_durations(prompt: str, total_seconds: int, clip_cap: int = 10) -> list[int]:
+    """Split any runtime into valid Omni chapters (3–clip_cap seconds each).
+
+    - If the brief contains timed scenes/parts, chapter boundaries follow that
+      authored timeline (merged up to *clip_cap*, then split if a beat is longer).
+    - Otherwise uses the same fair split as Seedance (works for 23s, 26s, 31s, …).
+    """
+    from app.services.creative_studio_production_memory import _chapter_windows
+    from app.services.creative_studio_timeline import explicit_shot_windows
+
+    total = max(5, min(600, int(total_seconds or 15)))
+    cap = max(3, int(clip_cap or 10))
+    text = str(prompt or "")
+    authored: list[tuple[float, float]] = []
+    try:
+        authored = explicit_shot_windows(text, total=total)
+    except ValueError:
+        authored = []
+    if not authored:
+        try:
+            authored = explicit_shot_windows(text)
+        except ValueError:
+            authored = []
+    if authored:
+        windows = _chapter_windows(text, total, cap, storyboard_count=0)
+        parts: list[int] = []
+        for start, end in windows:
+            remaining = float(end) - float(start)
+            while remaining > float(cap) + 0.05:
+                parts.append(cap)
+                remaining -= cap
+            if remaining >= 2.99:
+                parts.append(max(3, min(cap, int(round(remaining)))))
+        return _rebalance_segment_durations(parts, total, cap)
+    return _seedance_segment_durations(total, cap)
+
+
+def _character_reference_url(
+    reference_assets: list[dict[str, Any]] | None,
+) -> str | None:
+    for asset in reference_assets or []:
+        if not isinstance(asset, dict):
+            continue
+        if str(asset.get("role") or "").strip().lower() != "character":
+            continue
+        url = str(asset.get("url") or "").strip()
+        if url:
+            return url
+    return None
+
+
 def _chapter_timeline_window(
     data: dict[str, Any],
     production_memory: dict[str, Any] | None,
@@ -270,6 +345,8 @@ def _video_job_result_payload(
         "quality_gate",
         "broll_segment_count",
         "next_job_id",
+        "gemini_interaction_id",
+        "gemini_previous_interaction_id",
     ):
         if key not in (result or {}):
             continue
@@ -885,6 +962,45 @@ def is_job_cancel_requested(job_id: str | None) -> bool:
     return bool(job and job.get("cancel_requested"))
 
 
+def _restore_failed_gemini_continuation(job: dict[str, Any]) -> dict[str, Any]:
+    """Make a failed follow-up retryable from its last accepted Omni turn.
+
+    Older failed jobs may not contain public continuation metadata because the
+    provider rejected the follow-up before producing a video. The queued job's
+    private payload still has the accepted ``previous_interaction_id`` and
+    chapter index, which are sufficient to retry only the unfinished chapter.
+    """
+    result = dict(job.get("result") or {})
+    payload = dict(job.get("payload") or {})
+    if str(job.get("status") or "") != "failed":
+        return result
+    previous_id = str(payload.get("gemini_previous_interaction_id") or "").strip()
+    chapter_index = max(0, int(payload.get("gemini_chapter_index") or 0))
+    if not previous_id or chapter_index < 1:
+        return result
+    requested = max(3, int(payload.get("duration_seconds") or 10))
+    segment_count = len(_seedance_segment_durations(requested, clip_cap=10))
+    result.update({
+        "model": str(result.get("model") or payload.get("model") or ""),
+        "requested_duration_seconds": requested,
+        "segment_count": segment_count,
+        "completed_segments": chapter_index,
+        "chapter_index": chapter_index,
+        "generated_duration_seconds": int(
+            payload.get("generated_duration_seconds") or 0
+        ),
+        "gemini_interaction_id": previous_id,
+        "gemini_previous_interaction_id": previous_id,
+        "continuation_available": True,
+        "partial": True,
+        "note": (
+            "The accepted Gemini chapter is preserved. Retry continues from its stored "
+            "interaction and generates only the unfinished chapter."
+        ),
+    })
+    return result
+
+
 async def cancel_job(job_id: str, *, tenant_id: str) -> dict[str, Any] | None:
     """User kill-switch — mark cancelled and try to delete BytePlus task if known."""
     provider_task_id: str | None = None
@@ -936,6 +1052,11 @@ async def get_job(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any
         job = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
         if not job:
             return None
+        repaired_result = _restore_failed_gemini_continuation(job)
+        if repaired_result != dict(job.get("result") or {}):
+            job["result"] = repaired_result
+            job["updated_at"] = _now()
+            _persist_job_unlocked(job)
         # Don't expose internal payload on poll
         return {
             "job_id": job["job_id"],
@@ -944,7 +1065,7 @@ async def get_job(job_id: str, *, tenant_id: str | None = None) -> dict[str, Any
             "error": job.get("error"),
             "created_at": job.get("created_at"),
             "updated_at": job.get("updated_at"),
-            **(job.get("result") or {}),
+            **repaired_result,
         }
 
 
@@ -1095,12 +1216,18 @@ async def create_continuation_job(
     tenant_id: str,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Queue the next reviewed Seedance chapter for a staged long video."""
+    """Queue the next reviewed provider chapter for a staged long video."""
+    from app.services.media.gemini_omni_provider import is_gemini_omni_model
+
     async with _LOCK:
         parent = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
         if not parent:
             return None
-        result = parent.get("result") if isinstance(parent.get("result"), dict) else {}
+        result = _restore_failed_gemini_continuation(parent)
+        if result != dict(parent.get("result") or {}):
+            parent["result"] = result
+            parent["updated_at"] = _now()
+            _persist_job_unlocked(parent)
         if not result.get("continuation_available"):
             return {
                 "job_id": job_id,
@@ -1118,19 +1245,35 @@ async def create_continuation_job(
                 }
             result.pop("next_job_id", None)
 
+        parent_model = str(
+            result.get("model") or (parent.get("payload") or {}).get("model") or ""
+        ).strip()
+        use_gemini = is_gemini_omni_model(parent_model)
+        gemini_previous_interaction_id = str(
+            result.get("gemini_interaction_id") or result.get("interaction_id") or ""
+        ).strip()
         approved_video_reference = str(
             result.get("continuity_video_reference_url") or ""
         ).strip()
         approved_frame_reference = str(
             result.get("continuity_reference_url") or ""
         ).strip()
-        if not approved_video_reference and not approved_frame_reference:
+        if use_gemini and not gemini_previous_interaction_id:
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "error": (
+                    "The approved Gemini chapter has no saved interaction ID. The next "
+                    "Gemini request was not submitted, so no continuation credits were used."
+                ),
+            }
+        if not use_gemini and not approved_video_reference and not approved_frame_reference:
             return {
                 "job_id": job_id,
                 "status": "failed",
                 "error": (
                     "The approved chapter has no saved video or final-frame reference. The next "
-                    "Seedance call was not submitted, so no continuation credits were used."
+                    "video call was not submitted, so no continuation credits were used."
                 ),
             }
         next_id = str(uuid.uuid4())
@@ -1146,13 +1289,21 @@ async def create_continuation_job(
                 result.get("continuity_privacy_fallback_count") or 0
             ),
             "generated_duration_seconds": int(result.get("generated_duration_seconds") or 0),
+            "gemini_previous_interaction_id": (
+                gemini_previous_interaction_id if use_gemini else None
+            ),
+            "gemini_chapter_index": int(result.get("completed_segments") or 0),
         })
         _apply_continuation_overrides(payload, overrides)
         next_job = {
             "job_id": next_id,
             "tenant_id": tenant_id,
             "status": "queued",
-            "progress": "Queued — starting next Seedance part…",
+            "progress": (
+                "Queued — continuing the Gemini video state…"
+                if use_gemini
+                else "Queued — starting next Seedance part…"
+            ),
             "created_at": _now(),
             "updated_at": _now(),
             "payload": payload,
@@ -1173,7 +1324,11 @@ async def create_continuation_job(
     return {
         "job_id": next_id,
         "status": "queued",
-        "progress": "Queued — starting next Seedance part…",
+        "progress": (
+            "Queued — continuing the Gemini video state…"
+            if use_gemini
+            else "Queued — starting next Seedance part…"
+        ),
     }
 
 
@@ -1186,6 +1341,10 @@ async def run_creative_studio_job(job_id: str) -> None:
     )
     from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
     from app.services.media.byteplus_seedance_provider import is_byteplus_seedance_model
+    from app.services.media.gemini_omni_provider import (
+        clamp_gemini_omni_duration,
+        is_gemini_omni_model,
+    )
     from app.services.media.higgsfield_models import (
         higgsfield_configured,
         is_higgsfield_video_model,
@@ -1199,8 +1358,15 @@ async def run_creative_studio_job(job_id: str) -> None:
         job = _get_job_record_unlocked(job_id)
     if not job:
         return
-    data = job["payload"]
+    data = {**job["payload"], "tenant_id": job["tenant_id"]}
     tenant_id = job["tenant_id"]
+    from app.services.usage_tracker import bind_usage_job_context
+
+    bind_usage_job_context(
+        data,
+        job_id=job_id,
+        operation=f"creative_studio_{str(data.get('media_mode') or 'job')}",
+    )
 
     def _format_from_aspect(aspect: str) -> str:
         a = (aspect or "9/16").replace(":", "/")
@@ -1396,6 +1562,37 @@ async def run_creative_studio_job(job_id: str) -> None:
             )
             if clone_mode and generated_character_url:
                 note = "Created a reusable Character portrait, then generated the clone scene from that identity."
+            from app.services.usage_tracker import record_media_generation
+
+            out_url = str((result or {}).get("url") or "").strip()
+            img_ok = str((result or {}).get("status") or "") in {"done", "mock"} and bool(out_url)
+            record_media_generation(
+                provider=str((result or {}).get("provider") or "openai"),
+                model=model,
+                operation="creative_studio_image",
+                success=img_ok,
+                error=str((result or {}).get("error") or "")[:2000] or None,
+                extra={
+                    "media_type": "image",
+                    "job_id": job_id,
+                    "broll_index": data.get("broll_index"),
+                    **({"output_urls": [out_url]} if out_url else {}),
+                },
+                tenant_id=tenant_id,
+            )
+            if clone_mode and generated_character_url and img_ok:
+                record_media_generation(
+                    provider=str((identity_result or {}).get("provider") or "openai"),
+                    model=model,
+                    operation="creative_studio_character_portrait",
+                    success=True,
+                    extra={
+                        "media_type": "image",
+                        "job_id": job_id,
+                        "output_urls": [generated_character_url],
+                    },
+                    tenant_id=tenant_id,
+                )
             await update_job(
                 job_id,
                 status=str((result or {}).get("status") or "failed"),
@@ -1820,18 +2017,30 @@ async def run_creative_studio_job(job_id: str) -> None:
 
         seed_url: str | None = None
         use_byteplus = is_byteplus_seedance_model(model)
-        clip_cap = seedance_clip_cap_seconds(model) if use_byteplus else 15
+        use_gemini = is_gemini_omni_model(model)
+        clip_cap = (
+            10 if use_gemini else seedance_clip_cap_seconds(model) if use_byteplus else 15
+        )
         seedance_label = "Seedance 2.5" if clip_cap >= 30 else "Seedance 2.0"
-        prompt_only_video = prompt_only_requested and use_byteplus
+        prompt_only_video = prompt_only_requested and (use_byteplus or use_gemini)
         video_spec = resolve_video_spec(model) if is_higgsfield_video_model(model) else None
         # Chat / uploads can supply a reference frame for Seedance.
         attached_seed = None if prompt_only_video else str(data.get("seed_image_url") or "").strip() or None
+        if use_gemini and str(data.get("chapter_seed_image_url") or "").strip():
+            attached_seed = str(data.get("chapter_seed_image_url") or "").strip()
+        presenter_reference_url = _character_reference_url(
+            list(data.get("reference_assets") or [])
+        )
+        if use_gemini and presenter_reference_url and not attached_seed:
+            # Prompt-only Gemini jobs still need the uploaded avatar as a visual anchor.
+            attached_seed = presenter_reference_url
         if attached_seed:
             seed_url = attached_seed
         # BytePlus Seedance supports text-to-video — seed frame optional (faster path).
         needs_seed = (
             bool(video_spec and video_spec.requires_image)
             and not use_byteplus
+            and not use_gemini
             and not seed_url
         )
         requested_duration = max(5, min(600, int(data.get("duration_seconds") or 15)))
@@ -1841,9 +2050,9 @@ async def run_creative_studio_job(job_id: str) -> None:
             if chapter_image_staging
             else requested_duration
         )
-        if use_byteplus and memory_duration > 120:
+        if (use_byteplus or use_gemini) and memory_duration > 120:
             raise ValueError(
-                "Creative Studio Seedance long-video mode supports up to 120 seconds. "
+                "Creative Studio chapter mode supports up to 120 seconds. "
                 "Choose 2m or shorter."
             )
         sound_on = bool(data.get("sound_on", True))
@@ -1858,8 +2067,10 @@ async def run_creative_studio_job(job_id: str) -> None:
             voiceover_requested,
         )
         from app.services.creative_studio_timeline import (
-            segment_motion_prompt, validate_video_prompt, explicit_shot_windows,
-            select_complete_timeline_prompt,
+            segment_motion_prompt,
+            validate_video_prompt,
+            explicit_shot_windows,
+            normalize_video_timeline_prompt,
         )
 
         finishing_brief = str(data.get("source_brief") or visual_prompt or "")
@@ -1880,15 +2091,11 @@ async def run_creative_studio_job(job_id: str) -> None:
             # revised per-chapter prompt must never erase cast/style/story context.
             finishing_brief = str(existing_production.get("canonical_prompt") or finishing_brief)
             visual_prompt = finishing_brief
-        if use_byteplus and requested_duration > clip_cap:
-            # The user's timed brief is authoritative. A later planning rewrite
-            # can round its final timestamp (for example 26s to 25s/30s); choose
-            # the candidate that actually covers the requested duration.
-            visual_prompt = select_complete_timeline_prompt(
-                finishing_brief,
-                visual_prompt,
-                total=requested_duration,
-            )
+        visual_prompt = normalize_video_timeline_prompt(
+            finishing_brief,
+            visual_prompt,
+            total=float(requested_duration),
+        )
         voice_events = extract_voiceover_events(
             finishing_brief, duration_seconds=memory_duration
         )
@@ -2036,7 +2243,16 @@ async def run_creative_studio_job(job_id: str) -> None:
         if use_byteplus:
             from app.services.creative_studio_picture import compile_picture_prompt
             visual_prompt = compile_picture_prompt(visual_prompt, duration=requested_duration)
-        if use_byteplus:
+        if use_gemini:
+            api_duration = clamp_gemini_omni_duration(min(requested_duration, clip_cap))
+            total_chapters = len(_seedance_segment_durations(requested_duration, clip_cap))
+            duration_warning = (
+                f"{requested_duration}s is handled as {total_chapters} stateful "
+                "Gemini Omni chapters. Review each chapter before continuing."
+                if requested_duration > clip_cap
+                else None
+            )
+        elif use_byteplus:
             # Seedance limits one task to clip_cap seconds. Long Creative Studio
             # videos are generated as valid segments and stitched below.
             api_duration = requested_duration
@@ -2079,7 +2295,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             )
         # Short marketing VO only for Higgsfield TTS path — Seedance uses native generate_audio.
         spoken = ""
-        if sound_on and not use_byteplus:
+        if sound_on and not use_byteplus and not use_gemini:
             spoken = build_spoken_voiceover(
                 visual_prompt, duration_seconds=generate_duration
             )
@@ -2132,7 +2348,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                 result={"seed_image_url": seed_url},
             )
 
-        provider_label = "BytePlus Seedance" if use_byteplus else "Higgsfield"
+        provider_label = (
+            "Gemini Omni"
+            if use_gemini
+            else "BytePlus Seedance" if use_byteplus else "Higgsfield"
+        )
         await update_job(
             job_id,
             progress=(
@@ -2145,7 +2365,7 @@ async def run_creative_studio_job(job_id: str) -> None:
         # synthesize speech can change narrator identity at every seam. When exact
         # timed narration has been prepared, keep every provider clip silent and mix
         # the single locked voice across the completed timeline in post-production.
-        if use_byteplus:
+        if use_byteplus or use_gemini:
             skip_vo = not sound_on or timed_tts
         else:
             skip_vo = not sound_on or not spoken
@@ -2249,6 +2469,9 @@ async def run_creative_studio_job(job_id: str) -> None:
             "production_id": production_memory["production_id"],
             "logo_reference_url": str(data.get("logo_reference_url") or "").strip() or None,
             "prompt_only_video": prompt_only_video,
+            "gemini_previous_interaction_id": str(
+                data.get("gemini_previous_interaction_id") or ""
+            ).strip() or None,
         }
         copy = {
             "hook": (spoken[:120] if spoken else ""),
@@ -3366,6 +3589,265 @@ async def run_creative_studio_job(job_id: str) -> None:
                 result["quality_gate"] = final_chapter_quality
                 result["production_id"] = production_memory["production_id"]
                 result["production_report"] = public_production_report(production_memory)
+        elif use_gemini:
+            segment_durations = _gemini_chapter_durations(
+                finishing_brief, requested_duration, clip_cap
+            )
+            interactive_staging = bool(data.get("interactive_staging")) and len(
+                segment_durations
+            ) > 1
+            chapter_prompt_override = str(data.get("chapter_prompt_override") or "").strip()
+            strict_presenter = bool(
+                presenter_reference_url
+                or brief.get("strict_character_reference")
+            )
+
+            def _gemini_chapter_prompt(
+                *,
+                chapter_index: int,
+                chapter_duration: int,
+                chapter_start: float,
+                chapter_end: float,
+                previous_interaction_id: str,
+            ) -> str:
+                if chapter_prompt_override:
+                    body = validate_video_prompt(chapter_prompt_override)
+                    narration = ""
+                else:
+                    body = segment_motion_prompt(
+                        finishing_brief,
+                        start=chapter_start,
+                        end=min(float(requested_duration), chapter_end),
+                        total=float(requested_duration),
+                    )
+                    body = body.replace("Seedance", "Gemini Omni")
+                    narration = native_narration(
+                        chapter_start,
+                        min(float(requested_duration), chapter_end),
+                    )
+                continuity_instruction = (
+                    "This is the first chapter. Establish the authored cast, voice, wardrobe, "
+                    "location, camera language and visual style once."
+                    if not previous_interaction_id
+                    else
+                    "Continue directly from the previous stored video interaction. Preserve the "
+                    "same cast, face, voice, wardrobe, location logic, lighting and camera style. "
+                    "Advance the story; do not replay or recap an earlier chapter."
+                )
+                proof_note = ""
+                if re.search(
+                    r"(?i)proof composite|uploaded proof card|exact uploaded proof",
+                    body,
+                ):
+                    proof_note = (
+                        "\nPROOF HANDOFF: Do not redraw or invent dashboard graphics. "
+                        "If this chapter mentions proof cards, keep presenter or neutral "
+                        "motion only; the exact uploaded proof image is composited in post.\n"
+                    )
+                presenter_note = ""
+                if strict_presenter and presenter_reference_url:
+                    presenter_note = (
+                        "\nCHARACTER IDENTITY LOCK: An attached reference photo is the "
+                        "authorised presenter. Match this exact face, hair, age, skin tone, "
+                        "wardrobe and office. Do not cast a different person.\n"
+                    )
+                return validate_video_prompt(
+                    presenter_note
+                    + body
+                    + proof_note
+                    + "\n\nSTATEFUL CHAPTER LOCK: "
+                    + continuity_instruction
+                    + "\nRender only this chapter and keep its native audio synchronized.\n"
+                    + narration
+                )
+
+            async def _run_gemini_chapter(
+                *,
+                chapter_index: int,
+                chapter_duration: int,
+                chapter_start: float,
+                previous_interaction_id: str,
+                chapter_seed: str | None,
+            ) -> dict[str, Any]:
+                chapter_end = chapter_start + float(chapter_duration)
+                gemini_prompt = _gemini_chapter_prompt(
+                    chapter_index=chapter_index,
+                    chapter_duration=chapter_duration,
+                    chapter_start=chapter_start,
+                    chapter_end=chapter_end,
+                    previous_interaction_id=previous_interaction_id,
+                )
+                api_seed = chapter_seed
+                if (
+                    strict_presenter
+                    and presenter_reference_url
+                    and not previous_interaction_id
+                    and chapter_index == 0
+                ):
+                    api_seed = presenter_reference_url
+                return await vid_provider.generate(
+                    prompt=gemini_prompt,
+                    brief={
+                        **brief,
+                        "creative_studio_prompt": gemini_prompt,
+                        "video_duration_seconds": chapter_duration,
+                        "gemini_previous_interaction_id": previous_interaction_id or None,
+                        "presenter_reference_url": presenter_reference_url,
+                    },
+                    copy=copy,
+                    format_type=format_type,
+                    model=model,
+                    tenant_id=tenant_id,
+                    source_image_url=api_seed,
+                    duration_seconds=chapter_duration,
+                )
+
+            if not interactive_staging and len(segment_durations) > 1:
+                from app.services.file_service import file_service
+                from app.services.ffmpeg_util import probe_video_duration
+                from app.services.logo_overlay import file_url_to_local_path
+                from app.services.media.seedance_multiscene import (
+                    concat_video_files,
+                    trim_video_to_duration,
+                )
+
+                interaction_id = str(
+                    data.get("gemini_previous_interaction_id") or ""
+                ).strip()
+                segment_paths: list[Path] = []
+                segment_results: list[dict[str, Any]] = []
+                chapter_seed = seed_url
+                for chapter_index, raw_dur in enumerate(segment_durations):
+                    chapter_duration = clamp_gemini_omni_duration(raw_dur)
+                    chapter_start = float(sum(segment_durations[:chapter_index]))
+                    chapter_result = await _run_gemini_chapter(
+                        chapter_index=chapter_index,
+                        chapter_duration=chapter_duration,
+                        chapter_start=chapter_start,
+                        previous_interaction_id=interaction_id,
+                        chapter_seed=(
+                            chapter_seed
+                            if chapter_index == 0 and not interaction_id
+                            else None
+                        ),
+                    )
+                    if str(chapter_result.get("status") or "") != "done":
+                        result = chapter_result
+                        break
+                    interaction_id = str(chapter_result.get("interaction_id") or "")
+                    chapter_seed = None
+                    local_path = file_url_to_local_path(str(chapter_result.get("url") or ""))
+                    if not local_path:
+                        raise RuntimeError(
+                            "Gemini Omni returned a chapter without a readable local file."
+                        )
+                    segment_paths.append(Path(local_path))
+                    segment_results.append(chapter_result)
+                else:
+                    if len(segment_paths) == 1:
+                        final_path = segment_paths[0]
+                    else:
+                        stitch_dir = (
+                            Path(file_service.upload_dir)
+                            / tenant_id
+                            / "generated"
+                            / "seedance-stitch"
+                        ).resolve()
+                        stitch_dir.mkdir(parents=True, exist_ok=True)
+                        stitched_path = stitch_dir / f"cs-gemini-{job_id[:12]}.mp4"
+                        concat_video_files(segment_paths, stitched_path)
+                        trimmed = trim_video_to_duration(
+                            stitched_path, float(requested_duration)
+                        )
+                        final_path = trimmed or stitched_path
+                    actual_duration = probe_video_duration(final_path) or float(
+                        requested_duration
+                    )
+                    saved = file_service.save_bytes(
+                        content=final_path.read_bytes(),
+                        tenant_id=tenant_id,
+                        subfolder="generated",
+                        suffix=".mp4",
+                        content_type="video/mp4",
+                    )
+                    generated_seconds = int(sum(segment_durations))
+                    result = {
+                        "status": "done",
+                        "model": model,
+                        "provider": "google",
+                        "url": saved["file_url"],
+                        "duration_seconds": int(round(actual_duration)),
+                        "requested_duration_seconds": requested_duration,
+                        "segment_count": len(segment_paths),
+                        "generated_duration_seconds": generated_seconds,
+                        "continuation_available": False,
+                        "partial": False,
+                        "gemini_interaction_id": interaction_id,
+                        "provider_usage": [
+                            usage
+                            for part in segment_results
+                            for usage in (part.get("provider_usage") or [])
+                        ],
+                        "note": (
+                            f"Generated {len(segment_paths)} Gemini Omni chapters and stitched "
+                            f"them into one {requested_duration}s video."
+                        ),
+                        "voiceover": {
+                            "status": "skipped",
+                            "reason": "Gemini native audio" if sound_on else "Sound off",
+                        },
+                    }
+            else:
+                chapter_index = max(0, int(data.get("gemini_chapter_index") or 0))
+                if chapter_index < len(segment_durations):
+                    chapter_duration = clamp_gemini_omni_duration(
+                        segment_durations[chapter_index]
+                    )
+                    chapter_start = float(sum(segment_durations[:chapter_index]))
+                else:
+                    chapter_duration = clamp_gemini_omni_duration(generate_duration)
+                    chapter_start = float(data.get("generated_duration_seconds") or 0)
+                previous_interaction_id = str(
+                    data.get("gemini_previous_interaction_id") or ""
+                ).strip()
+                result = await _run_gemini_chapter(
+                    chapter_index=chapter_index,
+                    chapter_duration=chapter_duration,
+                    chapter_start=chapter_start,
+                    previous_interaction_id=previous_interaction_id,
+                    chapter_seed=(
+                        seed_url if chapter_index == 0 and not previous_interaction_id else None
+                    ),
+                )
+                if isinstance(result, dict) and result.get("status") == "done":
+                    completed = chapter_index + 1
+                    generated_seconds = int(
+                        data.get("generated_duration_seconds") or 0
+                    ) + int(result.get("duration_seconds") or chapter_duration)
+                    planned_more = completed < len(segment_durations)
+                    multi_part = len(segment_durations) > 1
+                    result.update({
+                        "gemini_interaction_id": str(result.get("interaction_id") or ""),
+                        "gemini_previous_interaction_id": previous_interaction_id or None,
+                        "completed_segments": completed,
+                        "chapter_index": completed,
+                        "requested_duration_seconds": requested_duration,
+                        "segment_count": len(segment_durations) if multi_part else None,
+                        "generated_duration_seconds": generated_seconds,
+                        "continuation_available": bool(interactive_staging and planned_more),
+                        "partial": bool(interactive_staging and planned_more),
+                        "note": (
+                            f"Part {completed}/{len(segment_durations)} is ready. Review this "
+                            "chapter, then generate the next part. The next Gemini Omni call "
+                            "continues Google's stored video state from this approved chapter."
+                            if interactive_staging and planned_more
+                            else (
+                                f"Gemini Omni — one {chapter_duration}s clip is ready."
+                                if not multi_part
+                                else f"Part {completed}/{len(segment_durations)} is ready."
+                            )
+                        ),
+                    })
         else:
             result = await vid_provider.generate(
                 prompt=validate_video_prompt(motion_prompt + "\n" + native_narration(0, generate_duration)),
@@ -3394,6 +3876,24 @@ async def run_creative_studio_job(job_id: str) -> None:
             finishing_brief = str(data.get("source_brief") or visual_prompt or "")
             current_url = str(result["url"])
             overlay_events = extract_overlay_events(finishing_brief)
+            if use_gemini and interactive_staging:
+                # Gemini returns the current chapter as a standalone clip even
+                # though its interaction state continues the same production.
+                # Authoring events use the full-film clock, so rebase only the
+                # active 8s/7s chapter before post-production. This keeps the
+                # final CTA at local 4-7s in Part 2 instead of global 12-15s.
+                active_start = float(chapter_start)
+                active_end = active_start + float(chapter_duration)
+                voice_events = _localize_timed_events(
+                    voice_events,
+                    start=active_start,
+                    end=active_end,
+                )
+                overlay_events = _localize_timed_events(
+                    overlay_events,
+                    start=active_start,
+                    end=active_end,
+                )
             defer_finishing_for_staged_film = bool(
                 data.get("chapter_image_staging")
                 and int(data.get("film_total_chapters") or 1) > 1
@@ -3535,13 +4035,23 @@ async def run_creative_studio_job(job_id: str) -> None:
             audio_path = _ensure_local_video(current_url, tenant_id=tenant_id)
             final_duration = probe_video_duration(audio_path) if audio_path else None
             if final_duration and final_duration > 0:
-                result["duration_seconds"] = int(round(final_duration))
                 expected_duration = float(
                     (result or {}).get("requested_duration_seconds")
                     or generate_duration
                     or 0
                 )
-                if expected_duration and final_duration + 0.75 < expected_duration:
+                generated_timeline = float(
+                    (result or {}).get("generated_duration_seconds") or 0
+                )
+                probe_short = bool(
+                    expected_duration and final_duration + 0.75 < expected_duration
+                )
+                timeline_met = bool(
+                    expected_duration and generated_timeline + 0.5 >= expected_duration
+                )
+                if not (probe_short and timeline_met):
+                    result["duration_seconds"] = int(round(final_duration))
+                if probe_short and not timeline_met:
                     result["partial"] = True
                     result["duration_warning"] = (
                         f"Final output is {final_duration:.1f}s, shorter than the "
@@ -3619,6 +4129,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                     )
             else:
                 stitch_note = f"BytePlus Dreamina {seedance_label} — one continuous clip."
+        elif use_gemini:
+            stitch_note = str(
+                (result or {}).get("note")
+                or "Gemini Omni stateful chapter is ready for review."
+            )
         if out_warn:
             stitch_note += f" Warning: {out_warn}"
         if sound_on:
@@ -3647,8 +4162,11 @@ async def run_creative_studio_job(job_id: str) -> None:
         if (result or {}).get("logo_applied"):
             stitch_note += " Brand logo applied."
         provider_usage = (result or {}).get("provider_usage") or []
-        if provider_usage:
-            measured_tokens = sum(int(u.get("total_tokens") or u.get("completion_tokens") or 0) for u in provider_usage)
+        if provider_usage and use_byteplus:
+            measured_tokens = sum(
+                int(u.get("total_tokens") or u.get("completion_tokens") or 0)
+                for u in provider_usage
+            )
             stitch_note += (
                 f" Provider-reported video tokens: {measured_tokens:,}."
                 " Exact USD charge is unavailable in the task response; check BytePlus billing."

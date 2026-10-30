@@ -12,6 +12,7 @@ from app.services.media.base import VideoGenerationProvider
 from app.services.media.byteplus_seedance_client import (
     ark_configured,
     ark_configured_for_model,
+    ark_seedance_model,
     clamp_seedance_duration,
     create_video_task,
     extract_video_url,
@@ -173,16 +174,6 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         from app.services.usage_tracker import record_usage
 
         provider_usage = video_task_usage(task, task_id=task_id, model=api_model)
-        record_usage(
-            provider="byteplus",
-            model=api_model,
-            operation="video_generation",
-            prompt_tokens=provider_usage.get("prompt_tokens") or 0,
-            completion_tokens=provider_usage.get("completion_tokens") or 0,
-            total_tokens=provider_usage.get("total_tokens") or 0,
-            tenant_id=tenant_id,
-            extra=provider_usage,
-        )
         if not remote_url:
             raise RuntimeError(f"BytePlus Seedance returned no video URL: {task!r}"[:400])
 
@@ -205,6 +196,22 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 f"The provider URL was preserved for download recovery: {exc}"
             )
         final_url = saved["url"]
+        record_usage(
+            provider="byteplus",
+            model=api_model,
+            operation="video_generation",
+            prompt_tokens=provider_usage.get("prompt_tokens") or 0,
+            completion_tokens=provider_usage.get("completion_tokens") or 0,
+            total_tokens=provider_usage.get("total_tokens") or 0,
+            tenant_id=tenant_id,
+            success=True,
+            extra={
+                **provider_usage,
+                "media_type": "video",
+                "duration_seconds": int(task.get("duration") or duration or 0),
+                "output_urls": [final_url],
+            },
+        )
 
         if cancel_check():
             return {
@@ -684,16 +691,6 @@ async def recover_byteplus_seedance_task(
         from app.services.usage_tracker import record_usage
 
         provider_usage = video_task_usage(task, task_id=tid, model=api_model)
-        record_usage(
-            provider="byteplus",
-            model=api_model,
-            operation="video_generation",
-            prompt_tokens=provider_usage.get("prompt_tokens") or 0,
-            completion_tokens=provider_usage.get("completion_tokens") or 0,
-            total_tokens=provider_usage.get("total_tokens") or 0,
-            tenant_id=tenant_id,
-            extra={**provider_usage, "recovered": True},
-        )
 
         download_warning: str | None = None
         try:
@@ -710,6 +707,24 @@ async def recover_byteplus_seedance_task(
                 "Recovered the Seedance output URL, but local download failed: "
                 f"{exc}"[:300]
             )
+
+        final_url = saved["url"]
+        record_usage(
+            provider="byteplus",
+            model=api_model,
+            operation="video_generation",
+            prompt_tokens=provider_usage.get("prompt_tokens") or 0,
+            completion_tokens=provider_usage.get("completion_tokens") or 0,
+            total_tokens=provider_usage.get("total_tokens") or 0,
+            tenant_id=tenant_id,
+            success=True,
+            extra={
+                **provider_usage,
+                "recovered": True,
+                "media_type": "video",
+                "output_urls": [final_url],
+            },
+        )
 
         result = {
             "status": "done",

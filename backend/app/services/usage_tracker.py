@@ -48,6 +48,20 @@ def set_usage_context(**kwargs: Any) -> None:
     _ctx.set(current)
 
 
+def bind_usage_job_context(payload: dict[str, Any] | None, *, job_id: str = "", operation: str = "") -> None:
+    """Apply tenant/user/brand from a Creative Studio or generation job payload."""
+    data = payload or {}
+    set_usage_context(
+        tenant_id=data.get("tenant_id"),
+        user_id=data.get("user_id"),
+        brand_id=data.get("brand_id"),
+        brand_name=(str(data.get("brand_name") or "").strip() or None),
+        brief_id=data.get("brief_id"),
+        job_id=job_id or data.get("job_id"),
+        operation=operation or data.get("operation") or "creative_studio_job",
+    )
+
+
 @contextmanager
 def usage_context(**kwargs: Any):
     token = _ctx.set({**get_usage_context(), **kwargs})
@@ -115,6 +129,12 @@ def estimate_media_cost(*, provider: str, model: str, duration_seconds: float = 
         # Video token pricing depends on the model/resolution/account rate.
         # No Runway-equivalent credits or guessed per-second charge.
         return 0.0, 0.0
+
+    if provider == "google" and "gemini-omni" in model:
+        # Fallback only. Successful Omni calls store provider-token pricing
+        # directly; this keeps preflight/report estimates useful when usage
+        # metadata is absent from an individual response.
+        return round((duration or 10) * 0.10, 6), 0.0
 
     if provider == "openai":
         from app.services.media.openai_image_catalog import openai_image_cost_usd
@@ -250,6 +270,10 @@ def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -
     for row in successful[:40]:
         extra = row.extra or {}
         detail = seedance_cost_detail(row) or {"low": 0.0, "high": 0.0, "mid": 0.0}
+        from app.services.public_urls import media_urls_from_extra, variant_library_url
+
+        media_urls = media_urls_from_extra(extra)
+        variant_id = str(extra.get("variant_id") or "").strip()
         recent_clips.append(
             {
                 "id": str(row.id),
@@ -263,6 +287,8 @@ def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -
                 "recovered": bool(extra.get("recovered")),
                 "client": tenant_names.get(row.tenant_id) if row.tenant_id else None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
+                "media_url": media_urls[0] if media_urls else None,
+                "variant_url": variant_library_url(variant_id) if variant_id else None,
             }
         )
 
@@ -277,6 +303,47 @@ def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -
         "by_model": model_rows,
         "recent_clips": recent_clips,
     }
+
+
+_CONTEXT_EXTRA_KEYS = (
+    "brand_id",
+    "brand_name",
+    "brief_id",
+    "variant_id",
+    "job_id",
+    "output_urls",
+    "image_url",
+    "video_url",
+    "duration_seconds",
+    "media_type",
+)
+
+
+def _merge_usage_extra(extra: dict | None) -> dict:
+    merged = dict(extra or {})
+    ctx = get_usage_context()
+    for key in _CONTEXT_EXTRA_KEYS:
+        val = ctx.get(key)
+        if val is None or val == "":
+            continue
+        if key not in merged or merged.get(key) in (None, "", [], {}):
+            merged[key] = val
+    urls: list[str] = []
+    for key in ("output_urls", "image_url", "video_url", "url", "file_url"):
+        raw = merged.get(key)
+        if isinstance(raw, list):
+            urls.extend(str(u).strip() for u in raw if u)
+        elif raw:
+            urls.append(str(raw).strip())
+    if urls:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            if u and u not in seen:
+                seen.add(u)
+                deduped.append(u)
+        merged["output_urls"] = deduped
+    return merged
 
 
 def record_usage(
@@ -309,7 +376,7 @@ def record_usage(
         "cost_usd": float(cost_usd or 0),
         "success": bool(success),
         "error": (error or "")[:2000] or None,
-        "extra": extra or {},
+        "extra": _merge_usage_extra(extra),
     }
     try:
         loop = asyncio.get_running_loop()
@@ -506,6 +573,7 @@ _MODEL_LABELS: dict[str, str] = {
     "gpt-4o": "GPT-4o",
     "gemini-2.5-flash": "Gemini 2.5 Flash",
     "gemini-3.1-flash-image-preview": "Gemini 3.1 Flash",
+    "gemini-omni-1.1-flash": "Gemini Omni 1.1 Flash",
     "gemini_image3.1_flash": "Gemini 3.1 Image",
     "gemini_image3_pro": "Gemini 3 Pro Image",
     "veo3.1": "Veo 3.1",
@@ -616,23 +684,67 @@ def _align_series_to_legend(series: list[dict[str, Any]], legend: list[str]) -> 
     return out
 
 
-async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, Any]:
+async def fetch_usage_events(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime | None = None,
+    user_id: UUID | None = None,
+    limit: int | None = None,
+) -> list[Any]:
     from app.models.usage_event import UsageEvent
-    from app.models.tenant import Tenant
 
     async with AsyncSessionLocal() as db:
-        since = datetime.now(timezone.utc) - timedelta(days=_CHART_DAYS)
         q = select(UsageEvent).where(UsageEvent.created_at >= since)
+        if until is not None:
+            q = q.where(UsageEvent.created_at <= until)
         if not platform and tenant_id:
             q = q.where(UsageEvent.tenant_id == tenant_id)
+        if user_id is not None:
+            q = q.where(UsageEvent.user_id == user_id)
         q = q.order_by(UsageEvent.created_at.desc())
-        rows = list((await db.execute(q)).scalars().all())
+        if limit is not None:
+            q = q.limit(limit)
+        return list((await db.execute(q)).scalars().all())
+
+
+async def usage_summary(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    days: int | None = None,
+    user_id: UUID | None = None,
+) -> dict[str, Any]:
+    from app.models.tenant import Tenant
+    from app.models.user import User
+
+    period_days = max(1, min(int(days or _CHART_DAYS), 366))
+    since = datetime.now(timezone.utc) - timedelta(days=period_days)
+    rows = await fetch_usage_events(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        user_id=user_id,
+    )
+
+    async with AsyncSessionLocal() as db:
 
         tenant_ids = {r.tenant_id for r in rows if r.tenant_id}
         names: dict[UUID, str] = {}
         if tenant_ids:
             trows = await db.execute(select(Tenant.id, Tenant.name).where(Tenant.id.in_(tenant_ids)))
             names = {row.id: row.name for row in trows.all()}
+
+        user_ids = {r.user_id for r in rows if r.user_id}
+        user_labels: dict[UUID, str] = {}
+        if user_ids:
+            urows = await db.execute(
+                select(User.id, User.email, User.full_name).where(User.id.in_(user_ids))
+            )
+            for uid, email, full_name in urows.all():
+                label = (full_name or "").strip() or (email or "").strip() or str(uid)
+                user_labels[uid] = label
 
     totals = {
         "calls": len(rows),
@@ -666,9 +778,14 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
         out.sort(key=lambda x: x["cost_usd"], reverse=True)
         return out
 
+    from app.services.public_urls import media_urls_from_extra, variant_library_url
+
     recent = []
     for r in rows[:120]:
         row_cost = effective_cost_usd(r)
+        extra = r.extra or {}
+        media_urls = media_urls_from_extra(extra)
+        variant_id = str(extra.get("variant_id") or "").strip()
         recent.append(
             {
                 "id": str(r.id),
@@ -680,26 +797,88 @@ async def usage_summary(*, tenant_id: UUID | None, platform: bool) -> dict[str, 
                 "total_tokens": r.total_tokens,
                 "credits": float(r.credits or 0),
                 "cost_usd": row_cost,
-                "cost_estimated": row_cost > 0 and float(r.cost_usd or 0) <= 0 and is_byteplus_seedance_row(r),
+                "cost_estimated": bool(extra.get("cost_estimated")) or (
+                    row_cost > 0
+                    and float(r.cost_usd or 0) <= 0
+                    and is_byteplus_seedance_row(r)
+                ),
                 "success": r.success,
                 "error": r.error,
                 "client": names.get(r.tenant_id) if r.tenant_id else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "media_url": media_urls[0] if media_urls else None,
+                "variant_url": variant_library_url(variant_id) if variant_id else None,
             }
         )
 
-    daily_cost, chart_models = _build_daily_series(rows, value_fn=effective_cost_usd)
-    daily_requests_raw, _ = _build_daily_series(rows, value_fn=lambda r: 1.0)
+    daily_cost, chart_models = _build_daily_series(
+        rows, value_fn=effective_cost_usd, days=period_days
+    )
+    daily_requests_raw, _ = _build_daily_series(rows, value_fn=lambda r: 1.0, days=period_days)
     daily_requests = _align_series_to_legend(daily_requests_raw, chart_models)
+
+    def _user_label(row: Any) -> str:
+        if not row.user_id:
+            return "Unknown user"
+        return user_labels.get(row.user_id) or str(row.user_id)
+
+    def _media_category(row: Any) -> str:
+        extra = row.extra or {}
+        mt = str(extra.get("media_type") or "").strip().lower()
+        if mt in ("image", "video", "audio"):
+            return mt.title()
+        if extra.get("video_url"):
+            return "Video"
+        if extra.get("image_url"):
+            return "Image"
+        op = str(row.operation or "").lower()
+        if "video" in op or is_byteplus_seedance_row(row):
+            return "Video"
+        if "image" in op or "thumbnail" in op:
+            return "Image"
+        return "Other"
+
+    by_user: list[dict[str, Any]] = []
+    user_acc: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        uid = str(r.user_id) if r.user_id else ""
+        label = _user_label(r)
+        key = uid or label
+        slot = user_acc.setdefault(
+            key,
+            {
+                "user_id": uid or None,
+                "name": label,
+                "calls": 0,
+                "tokens": 0,
+                "credits": 0.0,
+                "cost_usd": 0.0,
+                "failed": 0,
+            },
+        )
+        slot["calls"] += 1
+        slot["tokens"] += int(r.total_tokens or 0)
+        slot["credits"] += float(r.credits or 0)
+        slot["cost_usd"] += effective_cost_usd(r)
+        if not r.success:
+            slot["failed"] += 1
+    for slot in user_acc.values():
+        slot["credits"] = round(slot["credits"], 2)
+        slot["cost_usd"] = round(slot["cost_usd"], 4)
+        by_user.append(slot)
+    by_user.sort(key=lambda x: x["cost_usd"], reverse=True)
 
     return {
         "totals": totals,
         "by_provider": _bucket(lambda r: r.provider),
         "by_model": _bucket(lambda r: r.model or r.provider),
+        "by_user": by_user,
+        "by_media_type": _bucket(_media_category),
         "seedance": _build_seedance_summary(rows, tenant_names=names),
         "recent": recent,
         "daily_cost": daily_cost,
         "daily_requests": daily_requests,
         "chart_models": chart_models,
-        "period_days": _CHART_DAYS,
+        "period_days": period_days,
+        "filter_user_id": str(user_id) if user_id else None,
     }

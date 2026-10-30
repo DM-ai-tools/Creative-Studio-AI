@@ -162,9 +162,13 @@ def extract_overlay_events(prompt: str) -> list[tuple[float, float, str]]:
 
     # Generic timed-scene briefs often place copy in a dedicated section inside
     # each scene instead of repeating the timing on every text line.
-    from app.services.creative_studio_timeline import SHOT_HEADER
+    from app.services.creative_studio_timeline import SHOT_HEADER, explicit_shot_windows
 
     headers = list(SHOT_HEADER.finditer(text))
+    try:
+        scoped_windows = explicit_shot_windows(text)
+    except ValueError:
+        scoped_windows = []
     for index, header in enumerate(headers):
         timing = re.search(_RANGE, header.group())
         if not timing:
@@ -189,7 +193,12 @@ def extract_overlay_events(prompt: str) -> list[tuple[float, float, str]]:
                 and len(row.strip()) <= 100
             ]
         if lines:
-            events.append((float(timing.group(1)), float(timing.group(2)), r"\N".join(lines[:4])))
+            start, end = (
+                scoped_windows[index]
+                if index < len(scoped_windows)
+                else (float(timing.group(1)), float(timing.group(2)))
+            )
+            events.append((start, end, r"\N".join(lines[:4])))
     if events:
         return events[:12]
 
@@ -206,6 +215,13 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
     """Extract exact narrator lines and their requested windows."""
     text = prompt or ""
     events: list[tuple[float, float, str]] = []
+    from app.services.creative_studio_timeline import SHOT_HEADER, explicit_shot_windows
+
+    scene_headers = list(SHOT_HEADER.finditer(text))
+    try:
+        scoped_scene_windows = explicit_shot_windows(text)
+    except ValueError:
+        scoped_scene_windows = []
     for match in re.finditer(
         r"(?is)Voiceover\s*,?\s*" + _RANGE + r"\s*seconds?\s*:\s*\n?\s*" + _QUOTED,
         text,
@@ -247,14 +263,19 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
         timing = re.search(_RANGE, timing_text or "")
         if not timing:
             # A narration line inside a timed scene inherits that scene's window.
-            headers = list(re.finditer(
-                r"(?im)^\s*(?:#{1,6}\s*)?(?:Scene|CLIP)\s*\d+[^\n]*",
-                text[:match.start()],
-            ))
-            if headers:
+            previous_indexes = [
+                index for index, header in enumerate(scene_headers)
+                if header.start() < match.start()
+            ]
+            if previous_indexes:
+                scene_index = previous_indexes[-1]
+                if scene_index < len(scoped_scene_windows):
+                    a, b = scoped_scene_windows[scene_index]
+                    events.append((a, b, line))
+                    continue
                 heading = re.sub(
                     r"(?i)^\s*(?:#{1,6}\s*)?(?:Scene|CLIP)\s*\d+\b",
-                    "", headers[-1].group(),
+                    "", scene_headers[scene_index].group(),
                 )
                 timing = re.search(_RANGE, heading)
         if timing:
@@ -488,14 +509,21 @@ async def apply_timed_voiceover(
         if source_audio is None:
             return video_url, {"status": "failed", "error": "Could not inspect the source audio"}
         if source_audio:
-            # Duck only around spoken lines, with short ramps; keep sound in the pauses.
+            # A generated provider clip can already contain speech. Keeping even a
+            # quiet copy beneath the locked narration produces doubled consonants,
+            # false pronunciations and mid-word glitches. Fully remove source audio
+            # inside narration windows, with short ramps so ambience returns cleanly
+            # between lines.
+            ramp = 0.08
             envelopes = [
-                f"min(1,max(0,(t-{max(0, a - 0.12):.6f})/0.12))"
-                f"*min(1,max(0,({b + 0.12:.6f}-t)/0.12))"
+                f"min(1,max(0,(t-{max(0, a - ramp):.6f})/{ramp:.6f}))"
+                f"*min(1,max(0,({b + ramp:.6f}-t)/{ramp:.6f}))"
                 for a, b, _ in events
             ]
             filters.append(
-                "[0:a]volume='1-0.72*min(1," + "+".join(envelopes) + ")':eval=frame[base]"
+                "[0:a]aresample=48000:async=1:first_pts=0,"
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                "volume='1-min(1," + "+".join(envelopes) + ")':eval=frame[base]"
             )
             mix_labels.append("[base]")
         for index, ((start, end, _), audio_path) in enumerate(zip(events, audio_paths), start=1):
@@ -517,14 +545,26 @@ async def apply_timed_voiceover(
                     "status": "failed",
                     "error": f"Narration at {start:g}s is too long for its {window:g}s window; shorten the line or extend the scene.",
                 }
+            # Keep only real speech samples. Padding each line to the entire scene
+            # window creates a hard digital-silence edge before the next line. A
+            # 12 ms edge fade removes clicks without changing the spoken cadence.
+            fitted_duration = min(window, spoken_duration / speed)
+            fade = min(0.012, fitted_duration / 4)
+            fade_out = max(0.0, fitted_duration - fade)
+            delay_samples = max(0, int(round(start * 48000)))
             filters.append(
-                f"[{index}:a]aresample=48000,atempo={speed:.6f},"
-                f"apad,atrim=duration={window:.6f},adelay={delay}:all=1,volume=1.0[{label}]"
+                f"[{index}:a]aresample=48000:async=1:first_pts=0,"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                f"atempo={speed:.6f},atrim=duration={fitted_duration:.6f},"
+                f"afade=t=in:st=0:d={fade:.6f},"
+                f"afade=t=out:st={fade_out:.6f}:d={fade:.6f},"
+                f"adelay=delays={delay_samples}S:all=1[{label}]"
             )
             mix_labels.append(f"[{label}]")
         filters.append(
             "".join(mix_labels)
-            + f"amix=inputs={len(mix_labels)}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[mix]"
+            + f"amix=inputs={len(mix_labels)}:duration=first:dropout_transition=0:normalize=0,"
+            "aresample=48000:async=1:first_pts=0,alimiter=limit=0.95[mix]"
         )
         duration = probe_video_duration(source) or max(end for _, end, _ in events)
         cmd.extend([

@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     ARK_SEEDREAM_50_FLASH_MODEL: str = "dola-seedream-5-0-flash-260915"
     ARK_POLL_MAX_WAIT_SECONDS: int = 1800
 
+    # Gemini Developer API — Gemini Omni 1.1 Flash video/continuation.
+    GEMINI_API_KEY: str = ""
+
     # Firecrawl — scrape website → brand colors, logo, industry
     # Official: POST https://api.firecrawl.dev/v2/scrape with formats=["branding"]
     # https://docs.firecrawl.dev/features/scrape#extract-brand-identity
@@ -120,6 +123,8 @@ class Settings(BaseSettings):
     # Accept either JSON array (e.g. '["https://x.com"]') or comma-separated list
     # (e.g. 'https://x.com,https://y.com').
     CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    # Public site URL (Excel/media links). On AWS set to https://your-domain — same as PUBLIC_ORIGIN in deploy/aws/.env.
+    PUBLIC_APP_URL: str = ""
 
     @staticmethod
     def _parse_list_env(v: object) -> List[str]:
@@ -159,6 +164,7 @@ class Settings(BaseSettings):
         "OPENROUTER_MODEL_STRATEGY_PARSE",
         "ARK_API_KEY",
         "ARK_API_KEY_25",
+        "GEMINI_API_KEY",
         "ARK_SEEDANCE_MODEL",
         "ARK_BASE_URL",
         mode="before",

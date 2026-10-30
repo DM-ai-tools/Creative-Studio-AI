@@ -4,6 +4,10 @@ from app.services.media.byteplus_seedance_provider import (
     is_byteplus_seedance_model,
 )
 from app.services.media.heygen_provider import HeyGenVideoProvider, is_heygen_video_model
+from app.services.media.gemini_omni_provider import (
+    GeminiOmniVideoProvider,
+    is_gemini_omni_model,
+)
 from app.services.media.higgsfield_models import (
     is_higgsfield_image_model,
     is_higgsfield_video_model,
@@ -41,6 +45,10 @@ def get_image_provider(model: str | None = None) -> ImageGenerationProvider:
 
 
 def get_video_provider(model: str | None = None) -> VideoGenerationProvider:
+    if is_gemini_omni_model(model):
+        if "gemini_omni" not in _video_providers:
+            _video_providers["gemini_omni"] = GeminiOmniVideoProvider()
+        return _video_providers["gemini_omni"]
     if is_heygen_video_model(model):
         if "heygen" not in _video_providers:
             _video_providers["heygen"] = HeyGenVideoProvider()

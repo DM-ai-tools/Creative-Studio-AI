@@ -682,6 +682,9 @@ export const generationApi = {
     sound_on?: boolean
     speech_mode?: 'native_presenter' | 'external_voiceover'
     negative_prompt?: string
+    brand_name?: string
+    brand_id?: string
+    brief_id?: string
   }) =>
     api
       .post<{
@@ -858,6 +861,8 @@ export const generationApi = {
     speech_mode?: 'native_presenter' | 'external_voiceover'
     attachment_urls?: string[]
     brand_name?: string
+    brand_id?: string
+    brief_id?: string
     product_name?: string
     action?:
       | 'continue'
@@ -975,7 +980,14 @@ export const adminApi = {
 
   getStats: () => api.get<AdminStats>('/admin/stats').then((r) => r.data),
 
-  getUsage: () => api.get<AdminUsage>('/admin/usage').then((r) => r.data),
+  getUsage: (params?: { days?: number; user_id?: string }) =>
+    api.get<AdminUsage>('/admin/usage', { params }).then((r) => r.data),
+
+  exportUsageReport: (params: { days?: number; from?: string; to?: string; user_id?: string }) =>
+    api.get<Blob>('/admin/usage/export', {
+      params,
+      responseType: 'blob',
+    }),
 
   checkSeedanceCredits: () =>
     api.post<SeedanceCreditsCheck>('/admin/seedance/check-credits').then((r) => r.data),

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.creative_studio_timeline import SHOT_HEADER, explicit_shot_windows, validate_video_prompt
+from app.services.creative_studio_timeline import (
+    SHOT_HEADER,
+    explicit_shot_windows,
+    normalize_video_timeline_prompt,
+    validate_video_prompt,
+)
 
 
 def validate_video_preflight(
@@ -18,13 +23,17 @@ def validate_video_preflight(
     is_chapter: bool = False,
 ) -> dict[str, Any]:
     """Build a reviewable asset/shot lock and block structurally invalid jobs."""
-    validate_video_prompt(prompt)
     duration = int(duration_seconds)
     if duration < 5 or duration > 120:
         raise ValueError("Creative Studio video duration must be between 5 and 120 seconds.")
+    prompt = normalize_video_timeline_prompt(prompt, prompt, total=float(duration))
+    validate_video_prompt(prompt)
     boards = [str(url).strip() for url in (storyboard_image_urls or []) if str(url).strip()]
     assets = [asset for asset in (reference_assets or []) if isinstance(asset, dict)]
-    windows = explicit_shot_windows(prompt, total=duration)
+    try:
+        windows = explicit_shot_windows(prompt, total=duration)
+    except ValueError:
+        windows = []
     scene_count = max(len(list(SHOT_HEADER.finditer(prompt))), len(windows))
     errors: list[str] = []
     warnings: list[str] = []

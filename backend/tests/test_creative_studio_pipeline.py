@@ -441,6 +441,23 @@ class PromptTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             explicit_shot_windows(brief, total=30)
 
+    def test_short_ui_duration_scales_a_longer_authored_timeline(self):
+        from app.services.creative_studio_timeline import (
+            compress_authored_timeline_to_duration,
+            select_complete_timeline_prompt,
+        )
+
+        brief = (
+            "SCENE 1 — OPEN | 0–13 seconds\nShow the garage.\n"
+            "SCENE 2 — CLOSE | 13–26 seconds\nShow the CTA."
+        )
+        with self.assertRaises(ValueError):
+            explicit_shot_windows(brief, total=15)
+        scaled = compress_authored_timeline_to_duration(brief, 15)
+        self.assertEqual(explicit_shot_windows(scaled, total=15)[-1][1], 15.0)
+        selected = select_complete_timeline_prompt(brief, brief, total=15)
+        self.assertEqual(explicit_shot_windows(selected, total=15)[-1][1], 15.0)
+
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_logo_is_never_promoted_to_product_reference(self):
@@ -1567,6 +1584,38 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tts.call_args.kwargs["script"], "Hello there.")
         self.assertTrue(probe_has_audio(output))
         self.assertAlmostEqual(probe_video_duration(output), 2, delta=0.15)
+
+        # The source contains a 440 Hz provider voice surrogate and the locked
+        # narration contains 700 Hz. During the narration window the provider
+        # track must be fully removed, otherwise doubled syllables remain audible.
+        pcm = self.work / "mixed-window.wav"
+        subprocess.run(
+            [
+                self.ffmpeg, "-v", "error", "-y", "-ss", "0.65", "-t", "0.5",
+                "-i", str(output), "-vn", "-ac", "1", "-ar", "48000",
+                "-c:a", "pcm_s16le", str(pcm),
+            ],
+            capture_output=True, check=True, timeout=30,
+        )
+        with wave.open(str(pcm), "rb") as stream:
+            samples = struct.unpack(
+                "<" + "h" * stream.getnframes(),
+                stream.readframes(stream.getnframes()),
+            )
+
+        def tone_power(frequency):
+            count = len(samples)
+            real = sum(
+                sample * math.cos(2 * math.pi * frequency * i / 48000)
+                for i, sample in enumerate(samples)
+            )
+            imag = sum(
+                sample * math.sin(2 * math.pi * frequency * i / 48000)
+                for i, sample in enumerate(samples)
+            )
+            return (real * real + imag * imag) / max(1, count * count)
+
+        self.assertGreater(tone_power(700), tone_power(440) * 25)
 
 
 if __name__ == "__main__":

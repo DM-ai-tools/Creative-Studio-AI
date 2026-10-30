@@ -134,18 +134,37 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 tenant_id=tenant_id,
             )
             raise
-        from app.services.usage_tracker import record_media_generation
+        from app.services.usage_tracker import get_usage_context, record_media_generation
 
         ok = (result or {}).get("status") in {"done", "ready", "ok", None} and not (result or {}).get("error")
         if (result or {}).get("status") == "failed":
             ok = False
+        out_url = str(
+            (result or {}).get("url")
+            or (result or {}).get("image_url")
+            or (result or {}).get("file_url")
+            or ""
+        ).strip()
+        ctx = get_usage_context()
         record_media_generation(
             provider=str((result or {}).get("provider") or getattr(provider, "provider_id", "image")),
             model=model,
             operation="generate_image",
             success=ok,
             error=str((result or {}).get("error") or "")[:2000] or None,
-            extra={"format": format_type},
+            extra={
+                "format": format_type,
+                "media_type": "image",
+                **({"output_urls": [out_url]} if out_url else {}),
+                **(
+                    {
+                        "brand_id": ctx.get("brand_id"),
+                        "brand_name": ctx.get("brand_name"),
+                    }
+                    if ctx.get("brand_id") or ctx.get("brand_name")
+                    else {}
+                ),
+            },
             tenant_id=tenant_id,
         )
         return result
@@ -259,7 +278,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
             duration_seconds=duration_seconds,
         )
         try:
-            from app.services.usage_tracker import record_media_generation
+            from app.services.usage_tracker import get_usage_context, record_media_generation
 
             vid_provider = str((result or {}).get("provider") or "")
             ml = (model or "").lower()
@@ -271,6 +290,10 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 else:
                     vid_provider = "runway"
             ok = (result or {}).get("status") == "done"
+            vid_url = str((result or {}).get("url") or (result or {}).get("video_url") or "").strip()
+            ctx = get_usage_context()
+            brand_id = ctx.get("brand_id") or brief.get("brand_id")
+            brand_name = ctx.get("brand_name") or brief.get("brand_name")
             record_media_generation(
                 provider=vid_provider,
                 model=model,
@@ -278,7 +301,18 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 success=ok,
                 duration_seconds=float(duration or duration_seconds or 0),
                 error=str((result or {}).get("error") or "")[:2000] or None,
-                extra={"format": format_type},
+                extra={
+                    "format": format_type,
+                    "media_type": "video",
+                    "duration_seconds": float(duration or duration_seconds or 0),
+                    **({"output_urls": [vid_url]} if vid_url else {}),
+                    **(
+                        {"brand_id": brand_id, "brand_name": brand_name}
+                        if brand_id or brand_name
+                        else {}
+                    ),
+                    **({"brief_id": ctx.get("brief_id")} if ctx.get("brief_id") else {}),
+                },
                 tenant_id=tenant_id,
             )
         except Exception:

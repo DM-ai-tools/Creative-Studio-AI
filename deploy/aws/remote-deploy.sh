@@ -53,6 +53,12 @@ else
   echo "$CORS_LINE" >> backend/.env
 fi
 
+if grep -q '^PUBLIC_APP_URL=' backend/.env; then
+  sed -i "s|^PUBLIC_APP_URL=.*|PUBLIC_APP_URL=${PUBLIC_ORIGIN}|" backend/.env
+else
+  echo "PUBLIC_APP_URL=${PUBLIC_ORIGIN}" >> backend/.env
+fi
+
 sudo docker compose -f deploy/aws/docker-compose.prod.yml --env-file deploy/aws/.env up -d --build
 sudo docker compose -f deploy/aws/docker-compose.prod.yml ps
 

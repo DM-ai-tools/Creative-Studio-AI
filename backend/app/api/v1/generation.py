@@ -184,6 +184,15 @@ async def analyze_reference_image(
             brand_uuid = None
 
     if brand_uuid:
+        from app.services.usage_tracker import set_usage_context
+
+        set_usage_context(
+            user_id=str(current_user.id),
+            tenant_id=str(current_user.tenant_id),
+            brand_id=str(brand_uuid),
+            brand_name=brand_name.strip() or None,
+            operation="analyze_reference_image",
+        )
         suffix, content_type = image_suffix_and_type(
             raw,
             fallback_suffix=(file.filename or "").rsplit(".", 1)[-1] if "." in (file.filename or "") else "",
@@ -892,6 +901,16 @@ async def icp_image_plan(
         except HTTPException:
             social_profile = social_profile
             competitor_insights = competitor_insights
+        if brand:
+            from app.services.usage_tracker import set_usage_context
+
+            set_usage_context(
+                user_id=str(current_user.id),
+                tenant_id=str(current_user.tenant_id),
+                brand_id=str(brand.id),
+                brand_name=brand.name,
+                operation="icp_image_plan",
+            )
 
     if not data.use_competitor_insights:
         competitor_insights = []
@@ -1382,6 +1401,9 @@ class CreativeStudioGenerateRequest(BaseModel):
     sound_on: bool = True
     speech_mode: Literal["native_presenter", "external_voiceover"] = "external_voiceover"
     negative_prompt: str = ""
+    brand_name: str = ""
+    brand_id: str = ""
+    brief_id: str = ""
 
 
 class CreativeStudioGenerateResponse(BaseModel):
@@ -1498,6 +1520,11 @@ class CreativeStudioChatRequest(BaseModel):
     speech_mode: Literal["native_presenter", "external_voiceover"] = "native_presenter"
     attachment_urls: list[str] = Field(default_factory=list)
     brand_name: str = ""
+    brand_id: str = Field(
+        default="",
+        description="Brand Kit id — attached to usage/cost reporting for this session.",
+    )
+    brief_id: str = Field(default="", description="Optional brief id for usage reporting.")
     product_name: str = ""
     # Supercomputer pipeline
     action: str = Field(
@@ -1591,6 +1618,8 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
         higgsfield_video_catalog_options,
     )
     from app.services.media.higgsfield_models import higgsfield_configured
+    from app.services.media.gemini_omni_catalog import gemini_omni_video_catalog_options
+    from app.services.media.gemini_omni_provider import gemini_omni_configured
     from app.services.media.openai_image_catalog import (
         openai_configured,
         openai_image_catalog_options,
@@ -1605,6 +1634,7 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
     oai_ok = openai_configured()
     video_models = []
     video_models.extend(byteplus_seedance_video_catalog_options())
+    video_models.extend(gemini_omni_video_catalog_options())
     if hf_ok and not is_creative_studio_seedance25_only(current_user):
         video_models.extend(higgsfield_video_catalog_options())
     video_models = filter_video_catalog_for_user(current_user, video_models)
@@ -1625,11 +1655,19 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
         messages.append(
             "Set ARK_API_KEY (Seedance 2.0) and/or ARK_API_KEY_25 (Seedance 2.5)."
         )
+    if not gemini_omni_configured():
+        messages.append("Set GEMINI_API_KEY to generate with Gemini Omni 1.1 Flash.")
     if not hf_ok:
         messages.append("Optional: HIGGSFIELD keys for extra image/video models.")
 
     return {
-        "configured": bool(settings.OPENROUTER_API_KEY) or ark_ok or hf_ok or oai_ok,
+        "configured": (
+            bool(settings.OPENROUTER_API_KEY)
+            or ark_ok
+            or hf_ok
+            or oai_ok
+            or gemini_omni_configured()
+        ),
         "chat_models": chat_models,
         "default_chat_model": default_prompt_llm_model(),
         "image_model_default": "openai-gpt-image-2",
@@ -1668,9 +1706,22 @@ async def creative_studio_chat(
     }:
         raise HTTPException(status_code=422, detail="messages required")
     video_model = coerce_creative_studio_video_model(current_user, data.video_model)
+    from app.services.usage_tracker import set_usage_context
+
+    set_usage_context(
+        user_id=str(current_user.id),
+        tenant_id=str(current_user.tenant_id),
+        brand_id=(data.brand_id or "").strip() or None,
+        brand_name=(data.brand_name or "").strip() or None,
+        brief_id=(data.brief_id or "").strip() or None,
+        operation="creative_studio_chat",
+    )
     try:
         result = await run_creative_studio_chat_turn(
             tenant_id=str(current_user.tenant_id),
+            user_id=str(current_user.id),
+            brand_id=(data.brand_id or "").strip(),
+            brief_id=(data.brief_id or "").strip(),
             messages=msgs,
         session_id=data.session_id,
         mode=data.mode,
@@ -1805,6 +1856,10 @@ async def creative_studio_generate(
             "sound_on": data.sound_on,
             "speech_mode": data.speech_mode,
             "negative_prompt": data.negative_prompt,
+            "user_id": str(current_user.id),
+            "brand_name": data.brand_name.strip(),
+            "brand_id": data.brand_id.strip() or None,
+            "brief_id": data.brief_id.strip() or None,
         },
     )
     asyncio.create_task(run_creative_studio_job(job_id))

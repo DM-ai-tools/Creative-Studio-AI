@@ -12,6 +12,10 @@ from app.services.prompt_llm_catalog import (
     default_prompt_llm_model,
     resolve_prompt_llm_model,
 )
+from app.services.media.gemini_omni_provider import (
+    gemini_omni_configured,
+    is_gemini_omni_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +27,7 @@ def _resolve_video_model(video_model: str | None) -> str:
     from app.services.media.byteplus_seedance_provider import is_byteplus_seedance_model
 
     candidate = (video_model or SEEDANCE_VIDEO_MODEL).strip()
-    if is_byteplus_seedance_model(candidate):
+    if is_byteplus_seedance_model(candidate) or is_gemini_omni_model(candidate):
         return candidate
     return SEEDANCE_VIDEO_MODEL
 
@@ -31,7 +35,15 @@ def _resolve_video_model(video_model: str | None) -> str:
 def _seedance_model_label(model: str) -> str:
     from app.services.media.byteplus_seedance_client import is_seedance_25_model
 
+    if is_gemini_omni_model(model):
+        return "Gemini Omni 1.1 Flash"
     return "Seedance 2.5" if is_seedance_25_model(model) else "Seedance 2.0"
+
+
+def _video_clip_cap_seconds(model: str) -> int:
+    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
+
+    return 10 if is_gemini_omni_model(model) else seedance_clip_cap_seconds(model)
 
 # Explicit UI / client actions (approve-before-video, like Higgsfield Supercomputer)
 ACTIONS = frozenset(
@@ -384,7 +396,6 @@ def _default_image_model() -> str:
     if seedream_configured():
         return "ark-seedream-5-0-lite"
     from app.services.media.higgsfield_models import higgsfield_configured
-
     if higgsfield_configured():
         return "hf-text2image-soul-v2"
     return DEFAULT_IMAGE_MODEL
@@ -522,6 +533,9 @@ async def _start_job(
     seed_image_role: str = "first_frame",
     product_name: str = "",
     brand_name: str = "",
+    brand_id: str = "",
+    brief_id: str = "",
+    user_id: str = "",
     product_reference_url: str | None = None,
     logo_reference_url: str | None = None,
     additional_reference_urls: list[str] | None = None,
@@ -555,9 +569,19 @@ async def _start_job(
         create_job,
         run_creative_studio_job,
     )
-    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
+    from app.services.usage_tracker import get_usage_context
 
-    clip_cap = seedance_clip_cap_seconds(model)
+    ctx = get_usage_context()
+    if not brand_id:
+        brand_id = str(ctx.get("brand_id") or "")
+    if not brief_id:
+        brief_id = str(ctx.get("brief_id") or "")
+    if not user_id:
+        user_id = str(ctx.get("user_id") or "")
+    if not brand_name:
+        brand_name = str(ctx.get("brand_name") or "")
+
+    clip_cap = _video_clip_cap_seconds(model)
 
     job_id = await create_job(
         tenant_id=tenant_id,
@@ -576,6 +600,9 @@ async def _start_job(
             ),
             "product_name": product_name or "",
             "brand_name": brand_name or "",
+            "brand_id": str(brand_id or "").strip() or None,
+            "brief_id": str(brief_id or "").strip() or None,
+            "user_id": str(user_id or "").strip() or None,
             # Video overlays are intentional campaign copy; do not globally ban text.
             "negative_prompt": "watermark, random unreadable text, UI chrome",
             "seed_image_url": seed_image_url,
@@ -722,6 +749,9 @@ async def run_creative_studio_chat_turn(
     speech_mode: str = "native_presenter",
     attachment_urls: list[str] | None = None,
     brand_name: str = "",
+    brand_id: str = "",
+    brief_id: str = "",
+    user_id: str = "",
     product_name: str = "",
     action: str = "continue",
     image_prompt: str = "",
@@ -753,6 +783,16 @@ async def run_creative_studio_chat_turn(
     Creative Studio production turn. Direct Seedance is the default frontend
     workflow; callers may opt into a reviewed GPT Image 2 start frame.
     """
+    from app.services.usage_tracker import set_usage_context
+
+    set_usage_context(
+        tenant_id=tenant_id,
+        user_id=user_id or None,
+        brand_id=brand_id or None,
+        brand_name=(brand_name or "").strip() or None,
+        brief_id=brief_id or None,
+        operation="creative_studio_chat",
+    )
     from app.services.media.byteplus_seedance_client import (
         ark_configured,
         ark_configured_for_model,
@@ -895,9 +935,7 @@ async def run_creative_studio_chat_turn(
     )
     out_duration = requested_duration
     out_aspect = _normalize_aspect(aspect, "9/16")
-    from app.services.media.byteplus_seedance_client import seedance_clip_cap_seconds
-
-    clip_cap = seedance_clip_cap_seconds(active_video_model)
+    clip_cap = _video_clip_cap_seconds(active_video_model)
     chapter_staging = _needs_chapter_image_staging(
         prompt_only_video=bool(prompt_only_video),
         duration_seconds=out_duration,
@@ -920,9 +958,17 @@ async def run_creative_studio_chat_turn(
         )
         from app.services.creative_studio_video_finishing import extract_voiceover_events
 
+        session_key = (session_id or "").strip() or "draft"
+
+        def _stamp_session(mem: dict[str, Any]) -> dict[str, Any]:
+            if mem and not str(mem.get("session_id") or "").strip():
+                mem["session_id"] = session_key
+            return mem
+
         existing = load_production_memory(tenant_id, session_id)
         plan = parse_broll_images(full_brief)
         if existing:
+            _stamp_session(existing)
             if plan and not existing.get("broll_plan"):
                 ensure_broll_plan(existing, plan)
                 save_production_memory(tenant_id, existing)
@@ -959,6 +1005,7 @@ async def run_creative_studio_chat_turn(
             references=refs,
         )
         ensure_broll_plan(memory, plan)
+        _stamp_session(memory)
         if plan and not (existing and existing.get("broll_plan")):
             save_production_memory(tenant_id, memory)
         return memory
@@ -1237,6 +1284,8 @@ async def run_creative_studio_chat_turn(
                     changed = True
             if changed:
                 ensure_broll_plan(memory, plan)
+                if not str(memory.get("session_id") or "").strip():
+                    memory["session_id"] = (session_id or "").strip() or "draft"
                 save_production_memory(tenant_id, memory)
 
         # If this is a master brief, store the full scene plan and lock any
@@ -1257,6 +1306,8 @@ async def run_creative_studio_chat_turn(
             if proof_assets and not memory.get("proof_assets"):
                 memory["proof_assets"] = proof_assets
 
+            if not str(memory.get("session_id") or "").strip():
+                memory["session_id"] = (session_id or "").strip() or "draft"
             save_production_memory(tenant_id, memory)
         if not plan:
             return {
@@ -2053,10 +2104,18 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
                 "error": None,
             }
-        if not ark_configured_for_model(active_video_model):
+        gemini_selected = is_gemini_omni_model(active_video_model)
+        provider_configured = (
+            gemini_omni_configured()
+            if gemini_selected
+            else ark_configured_for_model(active_video_model)
+        )
+        if not provider_configured:
             return {
                 "assistant_message": (
-                    "Seedance isn’t configured — set ARK_API_KEY (2.0) and/or "
+                    "Gemini Omni isn’t configured — set GEMINI_API_KEY in backend .env."
+                    if gemini_selected
+                    else "Seedance isn’t configured — set ARK_API_KEY (2.0) and/or "
                     "ARK_API_KEY_25 (2.5) in backend .env."
                 ),
                 "intent": "reply",
@@ -2092,54 +2151,35 @@ async def run_creative_studio_chat_turn(
             if len(board) >= 2:
                 # The complete authored brief is authoritative, including product/cast
                 # constraints before the first timestamp and the closing narration.
-                from app.services.creative_studio_timeline import explicit_shot_windows
+                from app.services.creative_studio_timeline import (
+                    explicit_shot_windows,
+                    normalize_video_timeline_prompt,
+                )
 
                 try:
                     authored_windows = explicit_shot_windows(brief_for_motion)
                     if authored_windows:
-                        # Duration presets are coarse (for example 30s), while an authored
-                        # brief can end at an exact time such as 26s. Generate the authored
-                        # timeline instead of rejecting the harmless preset mismatch.
                         out_duration = max(
                             5, min(120, int(round(authored_windows[-1][1])))
                         )
-                    motion = (
-                        brief_for_motion
-                        if explicit_shot_windows(brief_for_motion, total=out_duration)
-                        else build_storyboard_video_prompt(
-                            board, duration_seconds=out_duration,
-                            sound_on=sound_on, product_name=product_name or "",
-                        )
+                    motion = normalize_video_timeline_prompt(
+                        brief_for_motion,
+                        brief_for_motion,
+                        total=float(out_duration),
                     )
-                except ValueError as exc:
-                    if prompt_only_video:
-                        motion = brief_for_motion
-                    else:
-                        return {
-                            "assistant_message": (
-                                "Your scene timings could not be parsed. Check that each "
-                                "SCENE line uses continuous times in order (for example "
-                                "0:00–0:10, 0:10–0:15, … ending at your target length). "
-                                f"Details: {str(exc)[:220]}"
-                            ),
-                            "intent": "reply",
-                            "phase": "awaiting_video",
-                            "suggested_actions": ["generate_video"],
-                            "chat_model": model_slug,
-                            "image_model": img_model,
-                            "video_model": active_video_model,
-                            "image_prompt": image_prompt or None,
-                            "video_prompt": brief_for_motion or motion or None,
-                            "approved_image_url": seed or None,
-                            "product_reference_url": product_ref or None,
-                            "status": "failed",
-                            "error": str(exc)[:300],
-                            "job_id": None,
-                            "media_mode": None,
-                            "model": None,
-                            "duration_seconds": out_duration,
-                            "aspect": out_aspect,
-                        }
+                    if not explicit_shot_windows(motion, total=out_duration):
+                        motion = build_storyboard_video_prompt(
+                            board,
+                            duration_seconds=out_duration,
+                            sound_on=sound_on,
+                            product_name=product_name or "",
+                        )
+                except ValueError:
+                    motion = normalize_video_timeline_prompt(
+                        brief_for_motion,
+                        brief_for_motion,
+                        total=float(out_duration),
+                    )
 
         if len(brief_for_motion) < 80:
             brief_for_motion = f"{image_prompt}\n{video_prompt}\n{last_user}".strip()
@@ -2388,7 +2428,10 @@ async def run_creative_studio_chat_turn(
             speech_mode=speech_mode,
             seed_image_url=(
                 None
-                if prompt_only_video or broll_segments
+                if (prompt_only_video and not is_gemini_omni_model(active_video_model))
+                or broll_segments
+                else (selected_character_url or seed or None)
+                if is_gemini_omni_model(active_video_model)
                 else seed or None
             ),
             # The image the user approved is the exact opening composition for

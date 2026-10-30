@@ -7,11 +7,12 @@ import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
 import UsageAnalyticsDashboard from '@/components/usage/UsageAnalyticsDashboard'
+import UsageExportPanel from '@/components/usage/UsageExportPanel'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { timeAgo } from '@/lib/utils'
-import type { AdminUsage, SeedanceCreditsCheck } from '@/types'
+import type { AdminUsage, SeedanceCreditsCheck, User } from '@/types'
 
 function money(n: number | null | undefined, estimated = false) {
   if (n == null || Number.isNaN(n)) return '—'
@@ -59,7 +60,17 @@ function seedanceStatusBadge(status: SeedanceCreditsCheck['status']) {
 export default function UsagePage() {
   const router = useRouter()
   const { user } = useAuth()
-  const { data, isLoading, refetch } = useApi(() => adminApi.getUsage(), [])
+  const [periodDays, setPeriodDays] = useState(30)
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const { data: users } = useApi(() => adminApi.listUsers(), [])
+  const { data, isLoading, refetch } = useApi(
+    () =>
+      adminApi.getUsage({
+        days: periodDays,
+        ...(selectedUserId ? { user_id: selectedUserId } : {}),
+      }),
+    [periodDays, selectedUserId]
+  )
   const [seedanceCheck, setSeedanceCheck] = useState<SeedanceCreditsCheck | null>(null)
   const [seedanceChecking, setSeedanceChecking] = useState(false)
   const [seedanceCheckError, setSeedanceCheckError] = useState<string | null>(null)
@@ -93,18 +104,72 @@ export default function UsagePage() {
   const seedance = usage?.seedance
   const hasSeedance = (seedance?.successful_clips ?? 0) > 0 || (seedance?.failed_calls ?? 0) > 0
 
+  const userList = (users ?? []) as User[]
+  const selectedUser = selectedUserId
+    ? userList.find((u) => u.id === selectedUserId)
+    : null
+  const selectedUserLabel = selectedUser
+    ? selectedUser.full_name?.trim() || selectedUser.email
+    : null
+
+  const mediaSpend = (name: string) =>
+    usage?.by_media_type?.find((r) => r.name.toLowerCase() === name.toLowerCase())?.cost_usd ?? 0
+
+  const scopeLabel = selectedUserLabel
+    ? `${selectedUserLabel} — last ${periodDays} days`
+    : `All users — last ${periodDays} days`
+
   return (
     <div>
       <Topbar
         title="Usage & costs"
-        subtitle="API spend, request volume, and model breakdown — last 30 days"
+        subtitle={
+          selectedUserLabel
+            ? `Spend and activity for ${selectedUserLabel} — last ${periodDays} days`
+            : `API spend, request volume, and model breakdown — last ${periodDays} days`
+        }
       />
 
       <div className="p-5 space-y-5">
+        <Card>
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3 justify-between">
+            <div className="flex-1 min-w-[200px] max-w-md">
+              <label htmlFor="usage-user-filter" className="block text-[10px] font-bold text-lt uppercase tracking-wide mb-1.5">
+                User
+              </label>
+              <select
+                id="usage-user-filter"
+                value={selectedUserId}
+                onChange={(e) => setSelectedUserId(e.target.value)}
+                className="w-full rounded-lg border border-border px-3 py-2.5 text-sm text-charcoal bg-white"
+              >
+                <option value="">All users (workspace total)</option>
+                {userList.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.full_name?.trim() ? `${u.full_name} (${u.email})` : u.email}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted mt-2">
+                {selectedUserId
+                  ? 'Cards, charts, and export below reflect this user only.'
+                  : 'Choose a user to see individual image/video spend and API usage.'}
+              </p>
+            </div>
+            {selectedUserId ? (
+              <Button size="sm" variant="secondary" onClick={() => setSelectedUserId('')}>
+                Clear user filter
+              </Button>
+            ) : null}
+          </div>
+        </Card>
+
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 flex-1">
+          <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3 flex-1">
             {[
-              { label: 'Total spend', value: isLoading ? '—' : money(totals?.cost_usd) },
+              { label: selectedUserId ? 'User spend' : 'Total spend', value: isLoading ? '—' : money(totals?.cost_usd) },
+              { label: 'Image spend', value: isLoading ? '—' : money(mediaSpend('Image')) },
+              { label: 'Video spend', value: isLoading ? '—' : money(mediaSpend('Video')) },
               { label: 'API calls', value: isLoading ? '—' : totals?.calls },
               { label: 'Tokens', value: isLoading ? '—' : tokens(totals?.total_tokens) },
               { label: 'Credits', value: isLoading ? '—' : (totals?.credits ?? 0).toFixed(1) },
@@ -123,6 +188,12 @@ export default function UsagePage() {
         </div>
 
         <UsageAnalyticsDashboard usage={usage ?? { totals: { calls: 0, failed_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, credits: 0, cost_usd: 0 }, by_provider: [], by_model: [], recent: [] }} loading={isLoading} />
+
+        <UsageExportPanel
+          periodDays={periodDays}
+          onPeriodDaysChange={setPeriodDays}
+          userId={selectedUserId || undefined}
+        />
 
         <Card title="Seedance / BytePlus billing">
           <div className="space-y-4">
@@ -277,7 +348,7 @@ export default function UsagePage() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className={`${theadRowClass} sticky top-0 z-10`}>
-                      {['When', 'Client', 'Task ID', 'Model', 'Tokens', 'Est. spend', 'Notes'].map((h) => (
+                      {['When', 'Client', 'Task ID', 'Model', 'Tokens', 'Est. spend', 'Open', 'Notes'].map((h) => (
                         <th key={h} className={thClass}>{h}</th>
                       ))}
                     </tr>
@@ -285,7 +356,7 @@ export default function UsagePage() {
                   <tbody>
                     {(seedance?.recent_clips ?? []).length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-4 py-6 text-center text-mid">
+                        <td colSpan={8} className="px-4 py-6 text-center text-mid">
                           No successful Seedance clips in this period.
                         </td>
                       </tr>
@@ -305,6 +376,33 @@ export default function UsagePage() {
                             {moneyRange(row.cost_usd_low, row.cost_usd_high)}
                           </td>
                           <td className={tdClass}>
+                            {row.media_url ? (
+                              <a
+                                href={row.media_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-accent font-semibold underline"
+                              >
+                                Video
+                              </a>
+                            ) : (
+                              '—'
+                            )}
+                            {row.variant_url ? (
+                              <>
+                                {' · '}
+                                <a
+                                  href={row.variant_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-accent font-semibold underline"
+                                >
+                                  Library
+                                </a>
+                              </>
+                            ) : null}
+                          </td>
+                          <td className={tdClass}>
                             {row.recovered ? (
                               <Badge variant="blue">Recovered</Badge>
                             ) : (
@@ -318,6 +416,45 @@ export default function UsagePage() {
                 </table>
               </div>
             </div>
+          </Card>
+        )}
+
+        {!selectedUserId && (usage?.by_user?.length ?? 0) > 0 && (
+          <Card title="Spend by user" padding={false}>
+            <p className="px-4 pt-3 text-xs text-muted">{scopeLabel} — select a row to drill down.</p>
+            <table className="w-full text-xs mt-2">
+              <thead>
+                <tr className={theadRowClass}>
+                  {['User', 'Calls', 'Tokens', 'Credits', 'Spend', ''].map((h) => (
+                    <th key={h || 'action'} className={thClass}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(usage?.by_user ?? []).map((row) => (
+                  <tr key={row.user_id ?? row.name} className={tbodyRowClass}>
+                    <td className={`${tdClass} font-semibold text-navy`}>{row.name}</td>
+                    <td className={tdClass}>{row.calls}</td>
+                    <td className={tdClass}>{tokens(row.tokens)}</td>
+                    <td className={tdClass}>{row.credits.toFixed(1)}</td>
+                    <td className={`${tdClass} font-semibold text-navy`}>{money(row.cost_usd)}</td>
+                    <td className={tdClass}>
+                      {row.user_id ? (
+                        <button
+                          type="button"
+                          className="text-accent font-semibold underline"
+                          onClick={() => setSelectedUserId(row.user_id!)}
+                        >
+                          View
+                        </button>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </Card>
         )}
 
@@ -382,7 +519,7 @@ export default function UsagePage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className={`${theadRowClass} sticky top-0 z-10`}>
-                  {['When', 'Client', 'Provider', 'Model', 'Operation', 'Tokens', 'Credits', 'Spend', 'Status'].map((h) => (
+                  {['When', 'Client', 'Provider', 'Model', 'Operation', 'Tokens', 'Credits', 'Spend', 'Media', 'Status'].map((h) => (
                     <th key={h} className={thClass}>{h}</th>
                   ))}
                 </tr>
@@ -399,6 +536,33 @@ export default function UsagePage() {
                     <td className={tdClass}>{Number(row.credits || 0).toFixed(1)}</td>
                     <td className={`${tdClass} font-semibold text-navy`}>
                       {money(row.cost_usd, row.cost_estimated)}
+                    </td>
+                    <td className={tdClass}>
+                      {row.media_url ? (
+                        <a
+                          href={row.media_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent font-semibold underline"
+                        >
+                          Open file
+                        </a>
+                      ) : (
+                        '—'
+                      )}
+                      {row.variant_url ? (
+                        <>
+                          {' · '}
+                          <a
+                            href={row.variant_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-accent font-semibold underline"
+                          >
+                            Variant
+                          </a>
+                        </>
+                      ) : null}
                     </td>
                     <td className={tdClass}>
                       <Badge variant={row.success ? 'green' : 'red'}>{row.success ? 'OK' : 'Failed'}</Badge>

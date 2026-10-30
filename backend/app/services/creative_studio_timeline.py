@@ -21,6 +21,11 @@ _RANGE = re.compile(
     rf"({_TIME_VALUE})\s*(?:s(?:econds?)?)?\b",
     re.I,
 )
+_PART_HEADER = re.compile(
+    rf"(?im)^[ \t]*(?:#{{1,6}}[ \t]*)?PART[ \t]+(\d+)[^\n]*?"
+    rf"\(\s*({_TIME_VALUE})\s*[–—-]\s*({_TIME_VALUE})"
+    r"\s*(?:SECONDS?|S)?\s*\)[^\n]*$"
+)
 _SESSION_HEADER = re.compile(
     r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:STEP\s+\d+\s*[—–-]\s*)?"
     r"SESSION\s+([A-Za-z0-9]+)\s*\|\s*"
@@ -45,6 +50,63 @@ def _session_windows(prompt: str) -> list[tuple[float, float]]:
     ]
 
 
+def _part_scoped_shot_windows(prompt: str) -> list[tuple[float, float]]:
+    """Convert chapter-local scene clocks to one global production timeline.
+
+    Prompts commonly define ``PART 2 (8–15 SECONDS)`` and then use local
+    scene clocks such as ``0–4`` and ``4–7``. Those are valid authoring clocks,
+    not an overlap with Part 1. A section is treated as local only when its
+    first scene starts at zero and all of its scene windows fit inside that
+    part's declared duration. Global clocks remain unchanged.
+    """
+    headers = list(SHOT_HEADER.finditer(prompt or ""))
+    if not headers:
+        return []
+    raw: list[tuple[float, float]] = []
+    for header in headers:
+        heading = re.sub(
+            r"(?i)^\s*(?:#{1,6}\s*)?(?:(?:CLIP|Scene)\s*\d+|S\d+[A-Za-z]?)\b",
+            "",
+            header.group(),
+        )
+        timing = _RANGE.search(heading)
+        if not timing:
+            return []
+        raw.append((_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2))))
+
+    parts = list(_PART_HEADER.finditer(prompt or ""))
+    if not parts:
+        return raw
+    scoped = list(raw)
+    for part_index, part in enumerate(parts):
+        section_start = part.end()
+        section_end = parts[part_index + 1].start() if part_index + 1 < len(parts) else len(prompt)
+        global_start = _clock_seconds(part.group(2))
+        global_end = _clock_seconds(part.group(3))
+        part_duration = global_end - global_start
+        member_indexes = [
+            index
+            for index, header in enumerate(headers)
+            if section_start <= header.start() < section_end
+        ]
+        if not member_indexes or part_duration <= 0:
+            continue
+        member_windows = [raw[index] for index in member_indexes]
+        local_clock = (
+            global_start > 0.05
+            and abs(member_windows[0][0]) <= 0.05
+            and all(
+                a >= -0.05 and b > a and b <= part_duration + 0.05
+                for a, b in member_windows
+            )
+        )
+        if local_clock:
+            for index in member_indexes:
+                a, b = raw[index]
+                scoped[index] = (global_start + a, global_start + b)
+    return scoped
+
+
 def explicit_shot_windows(prompt: str, *, total: float | None = None) -> list[tuple[float, float]]:
     """Return a contiguous authored edit, or leave unstructured briefs as one clip."""
     sessions = _session_windows(prompt)
@@ -59,17 +121,7 @@ def explicit_shot_windows(prompt: str, *, total: float | None = None) -> list[tu
         if total is not None and abs(previous - total) > 0.05:
             raise ValueError("The session timeline does not cover the requested video duration.")
         return sessions
-    windows = []
-    for header in SHOT_HEADER.finditer(prompt):
-        heading = re.sub(
-            r"(?i)^\s*(?:#{1,6}\s*)?(?:(?:CLIP|Scene)\s*\d+|S\d+[A-Za-z]?)\b",
-            "",
-            header.group(),
-        )
-        timing = _RANGE.search(heading)
-        if not timing:
-            return []
-        windows.append((_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2))))
+    windows = _part_scoped_shot_windows(prompt)
     if len(windows) < 2:
         return []
     repaired: list[tuple[float, float]] = []
@@ -98,6 +150,69 @@ def explicit_shot_windows(prompt: str, *, total: float | None = None) -> list[tu
             a += 15
         pieces.append((a, b))
     return pieces
+
+
+def compress_authored_timeline_to_duration(prompt: str, total: float) -> str:
+    """Scale a contiguous authored timeline to a shorter selected runtime.
+
+    Creative Studio often keeps a long script (for example 26s) while the UI
+    preset is shorter (15s). Gemini and Seedance chapter mode still need a
+    valid 0..total timeline before generation starts.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        raise ValueError("A video prompt is required")
+    try:
+        windows = explicit_shot_windows(text)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if not windows:
+        raise ValueError("No timed multi-scene brief found to compress.")
+    authored_end = float(windows[-1][1])
+    target = float(total)
+    if authored_end <= target + 0.05:
+        if explicit_shot_windows(text, total=target):
+            return text
+        raise ValueError(
+            "Shot timings must be continuous, ordered, and within the requested duration."
+        )
+    scale = target / authored_end
+    headers = list(SHOT_HEADER.finditer(text))
+    if len(headers) < len(windows):
+        raise ValueError("Timed scene headers could not be matched to the authored timeline.")
+    pieces: list[str] = []
+    cursor = 0
+    for index, header in enumerate(headers[: len(windows)]):
+        a, b = windows[index]
+        na, nb = a * scale, b * scale
+        heading = header.group()
+        stripped = re.sub(
+            r"(?i)^\s*(?:#{1,6}\s*)?(?:(?:CLIP|Scene)\s*\d+|S\d+[A-Za-z]?)\b",
+            "",
+            heading,
+        )
+        timing = _RANGE.search(stripped)
+        if not timing:
+            raise ValueError("Timed scene headers could not be matched to the authored timeline.")
+        marker = timing.group(0)
+        start = heading.find(marker)
+        if start < 0:
+            raise ValueError("Timed scene headers could not be matched to the authored timeline.")
+        new_heading = (
+            heading[:start]
+            + f"{na:g}–{nb:g} seconds"
+            + heading[start + len(marker) :]
+        )
+        pieces.append(text[cursor : header.start()])
+        pieces.append(new_heading)
+        cursor = header.end()
+    pieces.append(text[cursor:])
+    compressed = "".join(pieces)
+    if not explicit_shot_windows(compressed, total=target):
+        raise ValueError(
+            "Shot timings must be continuous, ordered, and within the requested duration."
+        )
+    return compressed
 
 
 def validate_video_prompt(prompt: str) -> str:
@@ -196,9 +311,45 @@ def select_complete_timeline_prompt(
     if rounded:
         rounded.sort(key=lambda item: item[0])
         return rounded[0][1]
+    for candidate in candidates:
+        try:
+            compressed = compress_authored_timeline_to_duration(candidate, total)
+            if explicit_shot_windows(compressed, total=total):
+                return compressed
+        except ValueError:
+            continue
     if first_error:
         raise first_error
     raise ValueError("Long Seedance videos require an explicit timed multi-scene plan.")
+
+
+def normalize_video_timeline_prompt(
+    source_prompt: str,
+    motion_prompt: str,
+    *,
+    total: float,
+) -> str:
+    """Align a brief to the selected runtime without surfacing timing parser errors.
+
+    Gemini/Seedance chapter mode can still run when the script has no timed
+    scenes. When scenes exist but the UI duration differs slightly, scale or
+    extend the timeline instead of blocking generation.
+    """
+    source = (source_prompt or "").strip()
+    motion = (motion_prompt or "").strip()
+    try:
+        return select_complete_timeline_prompt(source, motion, total=total)
+    except ValueError:
+        pass
+    for candidate in (source, motion):
+        if not candidate:
+            continue
+        try:
+            if explicit_shot_windows(candidate, total=total):
+                return candidate
+        except ValueError:
+            continue
+    return source or motion
 
 
 def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float) -> str:
@@ -235,6 +386,7 @@ def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float
             f"{context}\n\n" + "\n\n".join(selected)
         )
     headers = list(_HEADER.finditer(prompt))
+    scoped_windows = _part_scoped_shot_windows(prompt)
     prefix = prompt[:headers[0].start()].strip() if headers else ""
     suffix = ""
     beats: list[str] = []
@@ -252,8 +404,12 @@ def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float
         )
         timing = _RANGE.search(heading)
         a, b = (
-            (_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2)))
-            if timing else (i * total / len(headers), (i + 1) * total / len(headers))
+            scoped_windows[i]
+            if i < len(scoped_windows)
+            else (
+                (_clock_seconds(timing.group(1)), _clock_seconds(timing.group(2)))
+                if timing else (i * total / len(headers), (i + 1) * total / len(headers))
+            )
         )
         if b <= a or a >= end or b <= start:
             continue

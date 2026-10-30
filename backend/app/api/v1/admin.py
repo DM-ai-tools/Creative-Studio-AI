@@ -1,7 +1,8 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ from app.schemas.admin import (
 )
 from app.services.auth_service import _user_response
 from app.services.seedance_health import check_seedance_credits
+from app.services.usage_export_service import generate_usage_export_xlsx
 from app.services.usage_tracker import usage_summary
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -35,6 +37,21 @@ def _require_admin(current_user=Depends(get_current_user)):
 
 def _is_platform_admin(user: User) -> bool:
     return (user.email or "").strip().lower() == settings.ADMIN_EMAIL.strip().lower()
+
+
+async def _ensure_usage_user_filter(
+    db: AsyncSession,
+    current_user: User,
+    user_id: UUID | None,
+) -> None:
+    if user_id is None:
+        return
+    q = select(User.id).where(User.id == user_id)
+    if not _is_platform_admin(current_user):
+        q = q.where(User.tenant_id == current_user.tenant_id)
+    found = (await db.execute(q)).scalar_one_or_none()
+    if not found:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
 
 @router.get("/users", response_model=list[UserResponse])
@@ -269,12 +286,50 @@ async def admin_stats(
 
 
 @router.get("/usage")
-async def admin_usage(current_user=Depends(_require_admin)):
+async def admin_usage(
+    current_user=Depends(_require_admin),
+    days: int | None = Query(None, ge=1, le=366),
+    user_id: UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     """Tokens, credits, and estimated USD spend across connected APIs."""
+    await _ensure_usage_user_filter(db, current_user, user_id)
     platform = _is_platform_admin(current_user)
     return await usage_summary(
         tenant_id=current_user.tenant_id,
         platform=platform,
+        days=days,
+        user_id=user_id,
+    )
+
+
+@router.get("/usage/export")
+async def admin_usage_export(
+    current_user=Depends(_require_admin),
+    days: int | None = Query(None, ge=1, le=366),
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
+    user_id: UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download usage detail as Excel (.xlsx) for a date range."""
+    await _ensure_usage_user_filter(db, current_user, user_id)
+    platform = _is_platform_admin(current_user)
+    try:
+        content, filename = await generate_usage_export_xlsx(
+            tenant_id=current_user.tenant_id,
+            platform=platform,
+            days=days,
+            date_from=date_from,
+            date_to=date_to,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

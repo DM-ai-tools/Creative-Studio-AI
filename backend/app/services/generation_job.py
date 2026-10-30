@@ -466,12 +466,18 @@ async def run_brief_generation_job(
     data = GenerationRequest.model_validate(request_data)
     from app.services.usage_tracker import set_usage_context
 
-    set_usage_context(tenant_id=str(tenant_id), operation="generation_job")
     async with AsyncSessionLocal() as db:
         try:
             brief = await BriefService.get_brief(db, brief_id, tenant_id)
             brand = await BrandService.get_brand(db, brief.brand_id, tenant_id)
             brand = await BrandService.repair_brand_logo_if_needed(db, brand, tenant_id)
+            set_usage_context(
+                tenant_id=str(tenant_id),
+                operation="generation_job",
+                brand_id=str(brand.id),
+                brand_name=brand.name,
+                brief_id=str(brief.id),
+            )
 
             formats = data.formats or brief.formats or ["static"]
             kb_models = dict(brief.key_benefits) if isinstance(brief.key_benefits, dict) else {}
@@ -1567,6 +1573,12 @@ async def run_regenerate_variant_image(
             variant = await VariantService.get_variant(db, variant_id, tenant_id)
             brief = await BriefService.get_brief(db, variant.brief_id, tenant_id)
             brand = await BrandService.get_brand(db, variant.brand_id, tenant_id)
+            set_usage_context(
+                brand_id=str(brand.id),
+                brand_name=brand.name,
+                brief_id=str(brief.id),
+                variant_id=str(variant.id),
+            )
             kit = None
             try:
                 kit = await BrandService.get_brand_kit(db, brand.id, tenant_id)

@@ -559,18 +559,35 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
     if any(audio_flags) and not all(audio_flags):
         raise RuntimeError("Mixed audio streams must be normalized before encoded concatenation")
     has_audio = bool(all(audio_flags))
+    durations = [probe_video_duration(path) for path in paths]
+    if any(duration is None or duration <= 0 for duration in durations):
+        raise RuntimeError("Cannot determine every clip duration before stitching")
 
     reencode_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
     for path in paths:
         reencode_cmd += ["-i", str(path)]
     filters: list[str] = []
     for index in range(len(paths)):
+        duration = float(durations[index] or 0.0)
         filters.append(
-            f"[{index}:v:0]fps=24,format=yuv420p,setsar=1,setpts=PTS-STARTPTS[v{index}]"
+            f"[{index}:v:0]trim=duration={duration:.6f},fps=24,"
+            f"format=yuv420p,setsar=1,setpts=PTS-STARTPTS[v{index}]"
         )
         if has_audio:
+            edge = min(0.012, duration / 4)
+            audio_chain = (
+                f"[{index}:a:0]aresample=48000:async=1:first_pts=0,"
+                "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                f"apad=pad_dur={duration:.6f},atrim=duration={duration:.6f}"
+            )
+            if index > 0:
+                audio_chain += f",afade=t=in:st=0:d={edge:.6f}"
+            if index + 1 < len(paths):
+                audio_chain += (
+                    f",afade=t=out:st={max(0.0, duration - edge):.6f}:d={edge:.6f}"
+                )
             filters.append(
-                f"[{index}:a:0]aresample=48000,asetpts=PTS-STARTPTS[a{index}]"
+                audio_chain + f",asetpts=PTS-STARTPTS[a{index}]"
             )
     concat_inputs = "".join(
         f"[v{index}][a{index}]" if has_audio else f"[v{index}]"
@@ -592,11 +609,7 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
 
     proc2 = subprocess.run(reencode_cmd, capture_output=True, text=True, timeout=600)
     try:
-        expected_duration = sum(
-            duration
-            for duration in (probe_video_duration(path) for path in paths)
-            if duration is not None
-        )
+        expected_duration = sum(float(duration or 0.0) for duration in durations)
         output_video_duration = (
             probe_video_stream_duration(output_path)
             if output_path.is_file() and output_path.stat().st_size > 0
@@ -618,6 +631,20 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
             raise RuntimeError(
                 "Failed to stitch video clips: "
                 f"{(proc2.stderr or proc2.stdout or 'no FFmpeg diagnostic')[-400:]}"
+            )
+        decode = subprocess.run(
+            [
+                ffmpeg, "-v", "error", "-i", str(output_path),
+                "-map", "0:v:0", "-map", "0:a:0?", "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if decode.returncode != 0:
+            raise RuntimeError(
+                "Stitched output failed full audio/video decode: "
+                f"{(decode.stderr or decode.stdout or 'no FFmpeg diagnostic')[-400:]}"
             )
     except Exception:
         output_path.unlink(missing_ok=True)
