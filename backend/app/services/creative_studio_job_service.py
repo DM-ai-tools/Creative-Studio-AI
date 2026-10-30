@@ -199,6 +199,64 @@ def _localize_timed_events(
     ]
 
 
+def _gemini_explicit_proof_scenes(prompt: str) -> list[dict[str, Any]]:
+    """Read only explicit, timed proof scenes for Gemini post-compositing.
+
+    The legacy scene classifier is intentionally conservative for Seedance and
+    treats any ``do not ... proof`` sentence as a negative. Gemini master briefs
+    commonly contain both a positive proof-composite instruction and safety
+    wording such as ``do not redraw the proof card``. They also append global
+    requirements after the final scene. This provider-scoped reader makes the
+    positive scene instruction authoritative and prevents trailing global rules
+    from turning the final CTA into a proof scene.
+    """
+    text = str(prompt or "")
+    if not text.strip():
+        return []
+
+    from app.services.creative_studio_timeline import SHOT_HEADER, explicit_shot_windows
+
+    headers = list(SHOT_HEADER.finditer(text))
+    try:
+        windows = explicit_shot_windows(text)
+    except ValueError:
+        return []
+    if not headers or len(windows) < len(headers):
+        return []
+
+    global_tail = re.compile(
+        r"^\s*(?:FINAL\s+(?:REQUIREMENTS|PRODUCTION\s+LOCK|LOCK)|"
+        r"GLOBAL\s+(?:REQUIREMENTS|RULES)|QUALITY\s+CONTROL)\s*:?\s*$",
+        re.I | re.M,
+    )
+    explicit_request = re.compile(
+        r"^\s*PROOF\s+COMPOSITE\s*:|"
+        r"\b(?:show|display|use|insert|composite|replace)\b[^\n]{0,80}"
+        r"\b(?:the\s+)?(?:exact\s+|original\s+)?uploaded\s+proof\s+"
+        r"(?:card|image)\b|@proof_[a-z0-9]+",
+        re.I | re.M,
+    )
+
+    scenes: list[dict[str, Any]] = []
+    for index, header in enumerate(headers):
+        stop = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        body = text[header.end():stop]
+        tail = global_tail.search(body)
+        if tail:
+            body = body[:tail.start()]
+        if not explicit_request.search(body):
+            continue
+        number = re.search(r"(?i)\bScene\s+(\d+)\b", header.group())
+        start, end = windows[index]
+        scenes.append({
+            "type": "proof",
+            "scene": int(number.group(1)) if number else index + 1,
+            "start": float(start),
+            "end": float(end),
+        })
+    return scenes
+
+
 def _reference_assets_for_chapter(
     reference_assets: list[dict[str, Any]],
     scene_plan: list[dict[str, Any]],
@@ -2173,9 +2231,14 @@ async def run_creative_studio_job(job_id: str) -> None:
             if parsed_current
             else list((production_memory or {}).get("scene_plan") or [])
         )
-        authored_proof_scenes = [
-            scene for scene in authored_scene_plan if scene.get("type") == "proof"
-        ]
+        authored_proof_scenes = (
+            _gemini_explicit_proof_scenes(finishing_brief)
+            if use_gemini
+            else [
+                scene for scene in authored_scene_plan if scene.get("type") == "proof"
+            ]
+        )
+        provider_request_label = "Gemini Omni" if use_gemini else "Seedance"
         explicit_proof_request = bool(
             re.search(
                 r"(?i)@proof_[a-z0-9]+|uploaded proof (?:card|image)|"
@@ -2187,19 +2250,19 @@ async def run_creative_studio_job(job_id: str) -> None:
             raise ValueError(
                 "This prompt requires exact proof cards, but no upload is assigned the "
                 "Proof (editor only) role. Assign that role to each original proof image "
-                "and retry. No Seedance request was submitted."
+                f"and retry. No {provider_request_label} request was submitted."
             )
         if proof_assets and not authored_proof_scenes:
             raise ValueError(
                 "Proof images are attached, but their timed proof scenes could not be read. "
                 "Use scene headings such as 'Scene 1 — 0:00–0:10' and say 'uploaded proof "
-                "card' in each matching scene. No Seedance request was submitted."
+                f"card' in each matching scene. No {provider_request_label} request was submitted."
             )
         if authored_proof_scenes and len(proof_assets) < len(authored_proof_scenes):
             raise ValueError(
                 f"The prompt contains {len(authored_proof_scenes)} timed proof scenes, but only "
                 f"{len(proof_assets)} image(s) are assigned Proof (editor only). Attach and label "
-                "every original proof card before retrying. No Seedance request was submitted."
+                f"every original proof card before retrying. No {provider_request_label} request was submitted."
             )
         from app.services.creative_studio_preflight import validate_video_preflight
         preflight_report = validate_video_preflight(
@@ -3635,14 +3698,25 @@ async def run_creative_studio_job(job_id: str) -> None:
                     "Advance the story; do not replay or recap an earlier chapter."
                 )
                 proof_note = ""
-                if re.search(
-                    r"(?i)proof composite|uploaded proof card|exact uploaded proof",
-                    body,
-                ):
+                chapter_proof_scenes = [
+                    scene
+                    for scene in authored_proof_scenes
+                    if float(scene.get("start") or 0.0) < chapter_end
+                    and float(scene.get("end") or 0.0) > chapter_start
+                ]
+                if chapter_proof_scenes:
+                    local_windows = ", ".join(
+                        f"LOCAL {max(float(scene.get('start') or 0.0), chapter_start) - chapter_start:g}"
+                        f"-{min(float(scene.get('end') or chapter_end), chapter_end) - chapter_start:g}s"
+                        for scene in chapter_proof_scenes
+                    )
                     proof_note = (
-                        "\nPROOF HANDOFF: Do not redraw or invent dashboard graphics. "
-                        "If this chapter mentions proof cards, keep presenter or neutral "
-                        "motion only; the exact uploaded proof image is composited in post.\n"
+                        "\nPROOF REPLACEMENT OVERRIDE — HIGHEST PRIORITY: During "
+                        f"{local_windows}, generate only a clean neutral charcoal plate with "
+                        "subtle camera motion. Generate no dashboard, chart, report, number, "
+                        "logo, UI or readable text in that window. The exact uploaded proof "
+                        "image is composited by the application after generation. This "
+                        "overrides any lower instruction to display or recreate the proof.\n"
                     )
                 presenter_note = ""
                 if strict_presenter and presenter_reference_url:
@@ -4001,6 +4075,25 @@ async def run_creative_studio_job(job_id: str) -> None:
                                 **scene,
                                 "start": max(0.0, scene_start - chapter_start),
                                 "end": min(chapter_end, scene_end) - chapter_start,
+                            },
+                        ))
+                    proof_assets_for_output = [asset for asset, _ in localized]
+                    proof_scenes_for_output = [scene for _, scene in localized]
+                elif use_gemini and interactive_staging:
+                    active_start = float(chapter_start)
+                    active_end = active_start + float(chapter_duration)
+                    localized = []
+                    for proof_index, scene in enumerate(authored_proof_scenes):
+                        scene_start = float(scene.get("start") or 0.0)
+                        scene_end = float(scene.get("end") or 0.0)
+                        if scene_start >= active_end or scene_end <= active_start:
+                            continue
+                        localized.append((
+                            proof_assets[proof_index],
+                            {
+                                **scene,
+                                "start": max(0.0, scene_start - active_start),
+                                "end": min(active_end, scene_end) - active_start,
                             },
                         ))
                     proof_assets_for_output = [asset for asset, _ in localized]

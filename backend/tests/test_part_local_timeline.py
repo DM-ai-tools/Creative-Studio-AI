@@ -2,7 +2,10 @@ import unittest
 
 from app.services.creative_studio_timeline import explicit_shot_windows, segment_motion_prompt
 from app.services.creative_studio_video_finishing import extract_overlay_events, extract_voiceover_events
-from app.services.creative_studio_job_service import _localize_timed_events
+from app.services.creative_studio_job_service import (
+    _gemini_explicit_proof_scenes,
+    _localize_timed_events,
+)
 
 GARAGE_PROMPT = """15-Second Garage Organization Advertisement
 Total Duration: 15 seconds
@@ -25,6 +28,30 @@ On-screen text:
 "Turn Chaos Into Organized Calm"
 "SHOP GARAGE ESSENTIALS"
 "Fast Aussie Delivery"
+"""
+
+GEMINI_PROOF_PROMPT = """30-second proof advertisement
+
+PART 1 - PRESENTER (0-8 SECONDS)
+Scene 1 - 0:00-0:08
+Presenter speaks to camera.
+
+PART 2 - PROOF (8-16 SECONDS)
+Scene 2 - 0:08-0:16
+PROOF COMPOSITE:
+Show the exact uploaded proof card full-frame.
+Do not redraw, recreate, replace or modify the uploaded proof card.
+
+PART 3 - GUIDANCE (16-24 SECONDS)
+Scene 3 - 0:16-0:24
+Presenter explains the offer.
+
+PART 4 - CTA (24-30 SECONDS)
+Scene 4 - 0:24-0:30
+Show the final CTA.
+
+FINAL REQUIREMENTS:
+Use the exact uploaded proof card during the campaign-results section.
 """
 
 class PartLocalTimelineTests(unittest.TestCase):
@@ -66,6 +93,12 @@ class PartLocalTimelineTests(unittest.TestCase):
             [
                 (4.0, 7.0, r"Turn Chaos Into Organized Calm\NSHOP GARAGE ESSENTIALS\NFast Aussie Delivery"),
             ],
+        )
+
+    def test_gemini_proof_reader_prefers_positive_scene_and_ignores_final_rules(self):
+        self.assertEqual(
+            _gemini_explicit_proof_scenes(GEMINI_PROOF_PROMPT),
+            [{"type": "proof", "scene": 2, "start": 8.0, "end": 16.0}],
         )
 
 if __name__ == "__main__":

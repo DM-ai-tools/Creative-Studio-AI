@@ -2504,7 +2504,7 @@ async def run_creative_studio_chat_turn(
                     if chapter_staging
                     else "Driving the FULL timed story from your brief"
                     + (
-                        " as direct Seedance chapters using uploaded references as general visual "
+                        f" as direct {video_model_label} chapters using uploaded references as general visual "
                         "guidance while generating a fictional character; no GPT-generated storyboard images."
                         if prompt_only_video
                         else (
