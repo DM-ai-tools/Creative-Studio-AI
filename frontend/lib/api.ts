@@ -1016,6 +1016,12 @@ export const adminApi = {
       responseType: 'blob',
     }),
 
+  exportUsageSummaryReport: (params: { days?: number; from?: string; to?: string; user_id?: string }) =>
+    api.get<Blob>('/admin/usage/export/summary', {
+      params,
+      responseType: 'blob',
+    }),
+
   checkSeedanceCredits: () =>
     api.post<SeedanceCreditsCheck>('/admin/seedance/check-credits').then((r) => r.data),
 }

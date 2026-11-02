@@ -36,6 +36,7 @@ export default function UsageExportPanel({
   const [fromDate, setFromDate] = useState(daysAgoIso(30))
   const [toDate, setToDate] = useState(todayIso())
   const [exporting, setExporting] = useState(false)
+  const [exportingSummary, setExportingSummary] = useState(false)
 
   const presetLabel = useMemo(() => {
     if (preset === 'custom') return `${fromDate} → ${toDate}`
@@ -51,26 +52,36 @@ export default function UsageExportPanel({
     setToDate(todayIso())
   }
 
+  const buildExportParams = (): { days?: number; from?: string; to?: string; user_id?: string } => {
+    const params: { days?: number; from?: string; to?: string; user_id?: string } =
+      preset === 'custom'
+        ? { from: fromDate, to: toDate }
+        : { days: Number(preset) || periodDays }
+    if (userId) params.user_id = userId
+    return params
+  }
+
+  const downloadBlobResponse = (
+    response: { data: Blob; headers: Record<string, unknown> },
+    fallbackName: string,
+  ) => {
+    const disposition = response.headers['content-disposition'] as string | undefined
+    const match = disposition?.match(/filename="([^"]+)"/)
+    const filename = match?.[1] ?? fallbackName
+    const url = URL.createObjectURL(response.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleExport = async () => {
     setExporting(true)
     try {
-      const params: { days?: number; from?: string; to?: string; user_id?: string } =
-        preset === 'custom'
-          ? { from: fromDate, to: toDate }
-          : { days: Number(preset) || periodDays }
-      if (userId) params.user_id = userId
-      const response = await adminApi.exportUsageReport(params)
-      const blob = response.data
-      const disposition = response.headers['content-disposition'] as string | undefined
-      const match = disposition?.match(/filename="([^"]+)"/)
-      const filename = match?.[1] ?? `usage-report-${presetLabel.replace(/\s+/g, '-')}.xlsx`
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      a.click()
-      URL.revokeObjectURL(url)
-      toast.success('Usage report downloaded')
+      const response = await adminApi.exportUsageReport(buildExportParams())
+      downloadBlobResponse(response, `usage-report-${presetLabel.replace(/\s+/g, '-')}.xlsx`)
+      toast.success('Full usage report downloaded')
     } catch (err) {
       toast.error(extractApiError(err, 'Could not export usage report'))
     } finally {
@@ -78,18 +89,28 @@ export default function UsageExportPanel({
     }
   }
 
+  const handleExportSummary = async () => {
+    setExportingSummary(true)
+    try {
+      const response = await adminApi.exportUsageSummaryReport(buildExportParams())
+      downloadBlobResponse(response, `usage-summary-${presetLabel.replace(/\s+/g, '-')}.xlsx`)
+      toast.success('Summary report downloaded')
+    } catch (err) {
+      toast.error(extractApiError(err, 'Could not export summary report'))
+    } finally {
+      setExportingSummary(false)
+    }
+  }
+
   return (
     <Card title="Export usage report">
       <div className="space-y-4">
         <p className="text-sm text-mid leading-relaxed">
-          Download Excel for your <strong className="font-semibold text-charcoal">reporting manager</strong>.
-          Send the <strong className="font-semibold text-charcoal">Creatives by brand (manager)</strong> tab:
-          one row per finished image or video with brand name and clickable{' '}
-          <strong className="font-semibold text-charcoal">Image</strong> /{' '}
-          <strong className="font-semibold text-charcoal">Video</strong> links (
-          <code className="text-xs">/files/…</code> on production). Use the User filter above to export one person.
-          The <strong className="font-semibold text-charcoal">Usage detail</strong> tab is the technical API log. Open{' '}
-          <strong className="font-semibold text-charcoal">Read me</strong> first.
+          Two exports: <strong className="font-semibold text-charcoal">Summary Excel</strong> for managers (per user /
+          per brand — image &amp; video counts, clients, spend).{' '}
+          <strong className="font-semibold text-charcoal">Full Excel</strong> adds clickable{' '}
+          <strong className="font-semibold text-charcoal">Creatives by brand</strong> links (
+          <code className="text-xs">/files/…</code>). Use the User filter for one teammate (e.g. last 7 days).
         </p>
         <div>
           <p className="text-[10px] font-bold text-lt uppercase tracking-wide mb-2">Date range</p>
@@ -134,9 +155,14 @@ export default function UsageExportPanel({
         ) : (
           <p className="text-xs text-muted">Dashboard charts use the same range: {presetLabel}.</p>
         )}
-        <Button size="sm" onClick={() => void handleExport()} isLoading={exporting}>
-          Download Excel (.xlsx)
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" onClick={() => void handleExportSummary()} isLoading={exportingSummary}>
+            Download summary Excel
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => void handleExport()} isLoading={exporting}>
+            Download full Excel (with links)
+          </Button>
+        </div>
       </div>
     </Card>
   )

@@ -99,6 +99,9 @@ def is_hosted_creative_file_url(url: str) -> bool:
     low = u.lower().split("?", 1)[0]
     if "/files/" not in low:
         return False
+    # Some stored paths omit extensions; still treat as hosted app media.
+    if "/generated/" in low or "/uploads/" in low:
+        return True
     return _url_looks_like_image(u) or _url_looks_like_video(u)
 
 

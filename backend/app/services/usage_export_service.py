@@ -477,17 +477,191 @@ def _readme_sheet_rows() -> list[list[str]]:
     ]
 
 
-def _pipeline_media_from_variant(params: dict | None) -> tuple[str, str]:
+def _pipeline_block_url(block: Any, *, prefer_video: bool = False) -> str:
+    if not isinstance(block, dict):
+        return ""
+    if str(block.get("status") or "").lower() in {"skipped", "failed"} and not block.get("url"):
+        return ""
+    candidates: list[str] = []
+    for key in ("url", "video_url", "image_url", "file_url", "output_url", "remote_url"):
+        raw = block.get(key)
+        if raw:
+            candidates.append(absolute_media_url(str(raw)))
+    op = "generate_video" if prefer_video else "generate_image"
+    img, vid = pick_image_and_video_links(candidates, operation=op)
+    return vid if prefer_video else img
+
+
+def _pipeline_media_from_variant(
+    params: dict | None,
+    *,
+    asset_urls: list[str] | None = None,
+    usage_image: str = "",
+    usage_video: str = "",
+) -> tuple[str, str]:
     pipe = (params or {}).get("pipeline") if isinstance(params, dict) else None
-    if not isinstance(pipe, dict):
-        return "", ""
-    img = absolute_media_url(str((pipe.get("image") or {}).get("url") or ""))
-    vid = absolute_media_url(str((pipe.get("video") or {}).get("url") or ""))
+    img = _pipeline_block_url(pipe.get("image") if isinstance(pipe, dict) else None)
+    vid = _pipeline_block_url(pipe.get("video") if isinstance(pipe, dict) else None, prefer_video=True)
+    if not img and not vid and isinstance(pipe, dict):
+        # Some builds store the final file on the video step without nested url keys.
+        top = pick_image_and_video_links(
+            [absolute_media_url(str(pipe.get("url") or ""))],
+            operation="generate_video",
+        )
+        vid = top[1] or top[0]
+    if asset_urls:
+        a_img, a_vid = pick_image_and_video_links(
+            asset_urls,
+            operation="generate_video",
+            provider="heygen",
+        )
+        if not img and a_img:
+            img = a_img
+        if not vid and a_vid:
+            vid = a_vid
+    if usage_image and is_hosted_creative_file_url(usage_image):
+        img = img or usage_image
+    if usage_video and is_hosted_creative_file_url(usage_video):
+        vid = vid or usage_video
     if img and not is_hosted_creative_file_url(img):
         img = ""
     if vid and not is_hosted_creative_file_url(vid):
         vid = ""
     return img, vid
+
+
+def _brief_usage_video_fallback(
+    variant: Any,
+    brief_video_events: dict[UUID, list[tuple[datetime, str]]],
+) -> str:
+    events = brief_video_events.get(variant.brief_id) or []
+    if not events or not variant.created_at:
+        return ""
+    best_url = ""
+    best_delta: float | None = None
+    created = variant.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    for ts, url in events:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = abs((created - ts).total_seconds())
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best_url = url
+    if best_url and best_delta is not None and best_delta <= 7200:
+        return best_url
+    return ""
+
+
+async def _brief_usage_video_events(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime,
+) -> dict[UUID, list[tuple[datetime, str]]]:
+    from app.models.usage_event import UsageEvent
+
+    out: dict[UUID, list[tuple[datetime, str]]] = {}
+    async with AsyncSessionLocal() as db:
+        q = select(UsageEvent).where(UsageEvent.created_at >= since).where(UsageEvent.created_at <= until)
+        if not platform and tenant_id:
+            q = q.where(UsageEvent.tenant_id == tenant_id)
+        q = q.where(UsageEvent.success.is_(True))
+        events = list((await db.execute(q)).scalars().all())
+    for ev in events:
+        op = (ev.operation or "").lower()
+        if op != "generate_video" and "generate_video" not in op:
+            continue
+        ex = ev.extra or {}
+        brief_raw = ex.get("brief_id")
+        if not brief_raw:
+            continue
+        try:
+            brief_uuid = UUID(str(brief_raw))
+        except ValueError:
+            continue
+        urls = media_urls_from_extra(ex)
+        _, v_url = pick_image_and_video_links(
+            urls,
+            extra=ex,
+            operation=ev.operation or "",
+            provider=ev.provider or "",
+        )
+        if not v_url or not ev.created_at:
+            continue
+        out.setdefault(brief_uuid, []).append((ev.created_at, v_url))
+    for brief_id in out:
+        out[brief_id].sort(key=lambda x: x[0])
+    return out
+
+
+async def _usage_media_maps_for_variants(
+    variant_ids: set[UUID],
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime,
+) -> tuple[dict[UUID, str], dict[UUID, str]]:
+    """Back-fill image/video URLs from usage_events when pipeline JSON is incomplete."""
+    if not variant_ids:
+        return {}, {}
+    from app.models.usage_event import UsageEvent
+
+    image_by_variant: dict[UUID, str] = {}
+    video_by_variant: dict[UUID, str] = {}
+    async with AsyncSessionLocal() as db:
+        q = select(UsageEvent).where(UsageEvent.created_at >= since).where(UsageEvent.created_at <= until)
+        if not platform and tenant_id:
+            q = q.where(UsageEvent.tenant_id == tenant_id)
+        q = q.where(UsageEvent.success.is_(True))
+        events = list((await db.execute(q)).scalars().all())
+    target = {str(v) for v in variant_ids}
+    for ev in events:
+        ex = ev.extra or {}
+        vid_raw = ex.get("variant_id")
+        if not vid_raw or str(vid_raw) not in target:
+            continue
+        try:
+            vid_uuid = UUID(str(vid_raw))
+        except ValueError:
+            continue
+        urls = media_urls_from_extra(ex)
+        img, v_url = pick_image_and_video_links(
+            urls,
+            extra=ex,
+            operation=ev.operation or "",
+            provider=ev.provider or "",
+        )
+        if img and vid_uuid not in image_by_variant:
+            image_by_variant[vid_uuid] = img
+        if v_url and vid_uuid not in video_by_variant:
+            video_by_variant[vid_uuid] = v_url
+    return image_by_variant, video_by_variant
+
+
+async def _asset_urls_by_variant(variant_ids: set[UUID]) -> dict[UUID, list[str]]:
+    if not variant_ids:
+        return {}
+    out: dict[UUID, list[str]] = {}
+    async with AsyncSessionLocal() as db:
+        rows = await db.execute(
+            select(Asset.variant_id, Asset.file_url)
+            .where(Asset.variant_id.in_(variant_ids), Asset.file_url.is_not(None))
+            .order_by(Asset.created_at.desc())
+        )
+        for variant_id, file_url in rows.all():
+            if not variant_id or not file_url:
+                continue
+            abs_u = absolute_media_url(str(file_url))
+            if not abs_u or not is_hosted_creative_file_url(abs_u):
+                continue
+            slot = out.setdefault(variant_id, [])
+            if abs_u not in slot:
+                slot.append(abs_u)
+    return out
 
 
 def _creative_type_label(fmt: str, image_link: str, video_link: str) -> str:
@@ -530,10 +704,33 @@ async def _load_creatives_by_brand_rows(
     rows_out: list[list[Any]] = []
     async with AsyncSessionLocal() as db:
         result = await db.execute(q)
-        for variant, brand_name, email, full_name in result.all():
-            img, vid = _pipeline_media_from_variant(variant.generation_params)
-            if not img and not vid:
-                continue
+        batch = result.all()
+    variant_ids = {v.id for v, _, _, _ in batch}
+    assets_map = await _asset_urls_by_variant(variant_ids)
+    usage_img_map, usage_vid_map = await _usage_media_maps_for_variants(
+        variant_ids,
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+    )
+    brief_video_events = await _brief_usage_video_events(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+    )
+    for variant, brand_name, email, full_name in batch:
+        img, vid = _pipeline_media_from_variant(
+            variant.generation_params,
+            asset_urls=assets_map.get(variant.id),
+            usage_image=usage_img_map.get(variant.id, ""),
+            usage_video=usage_vid_map.get(variant.id, ""),
+        )
+        if not vid:
+            vid = _brief_usage_video_fallback(variant, brief_video_events)
+        if not img and not vid:
+            continue
             ctype = _creative_type_label(variant.format or "", img, vid)
             created = (
                 variant.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -810,4 +1007,249 @@ async def generate_usage_export_xlsx(
     )
     content = build_usage_workbook(detail, creatives_by_brand=creatives)
     filename = f"usage-report-{label}.xlsx"
+    return content, filename
+
+
+USER_MANAGER_SUMMARY_HEADERS = [
+    "User email",
+    "User name",
+    "Images delivered",
+    "Videos delivered",
+    "Total creatives",
+    "Brands / clients worked",
+    "Est. spend (USD)",
+    "API calls",
+]
+
+BRAND_MANAGER_SUMMARY_HEADERS = [
+    "Brand / client",
+    "Images delivered",
+    "Videos delivered",
+    "Total creatives",
+    "Contributors (emails)",
+    "Est. spend (USD)",
+]
+
+
+def _summary_readme_rows(period_label: str) -> list[list[str]]:
+    return [
+        ["Usage summary — for reporting managers"],
+        [""],
+        ["Period", period_label],
+        ["How to use", "High-level counts per person and per brand/client — no API noise."],
+        ["By user", "How many images/videos each teammate delivered and which clients they touched."],
+        ["By brand", "Deliverables and spend rolled up per brand."],
+        ["Spend", "Estimated USD from API usage (HeyGen, images, LLM, etc.) in this period."],
+        [""],
+        ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
+    ]
+
+
+def build_summary_workbook(
+    *,
+    period_label: str,
+    overview: list[list[Any]],
+    by_user: list[list[Any]],
+    by_brand: list[list[Any]],
+) -> bytes:
+    wb = Workbook()
+    readme = wb.active
+    readme.title = "Read me"
+    for row in _summary_readme_rows(period_label):
+        readme.append(row)
+    readme.column_dimensions["A"].width = 28
+    readme.column_dimensions["B"].width = 72
+
+    ov = wb.create_sheet("Overview", 1)
+    ov.append(["Metric", "Value"])
+    ov.cell(row=1, column=1).font = Font(bold=True)
+    ov.cell(row=1, column=2).font = Font(bold=True)
+    for row in overview:
+        ov.append(row)
+    _autosize_columns(ov, max_width=48)
+
+    us = wb.create_sheet("By user", 2)
+    _write_sheet_headers(us, USER_MANAGER_SUMMARY_HEADERS)
+    for row in by_user:
+        us.append(row)
+    _autosize_columns(us)
+
+    br = wb.create_sheet("By brand", 3)
+    _write_sheet_headers(br, BRAND_MANAGER_SUMMARY_HEADERS)
+    for row in by_brand:
+        br.append(row)
+    _autosize_columns(br)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def _build_manager_summary_tables(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime,
+    period_label: str,
+    user_id: UUID | None = None,
+) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]]]:
+    from collections import defaultdict
+
+    creatives = await _load_creatives_by_brand_rows(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        user_id=user_id,
+    )
+    usage_rows = await fetch_usage_events(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        user_id=user_id,
+        limit=MAX_EXPORT_ROWS + 1,
+    )
+
+    user_ids = {r.user_id for r in usage_rows if r.user_id}
+    async with AsyncSessionLocal() as db:
+        users: dict[UUID, User] = {}
+        if user_ids:
+            urows = await db.execute(select(User).where(User.id.in_(user_ids)))
+            users = {u.id: u for u in urows.scalars().all()}
+
+    user_acc: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "name": "",
+            "images": 0,
+            "videos": 0,
+            "creatives": 0,
+            "brands": set(),
+            "cost": 0.0,
+            "calls": 0,
+        }
+    )
+    brand_acc: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "images": 0,
+            "videos": 0,
+            "creatives": 0,
+            "users": set(),
+            "cost": 0.0,
+        }
+    )
+
+    total_images = 0
+    total_videos = 0
+    for row in creatives:
+        email = str(row[1] or "").strip() or "Unknown user"
+        name = str(row[2] or "").strip()
+        brand = str(row[3] or "").strip() or "(no brand)"
+        img_link = str(row[7] or "").strip()
+        vid_link = str(row[8] or "").strip()
+        slot_u = user_acc[email]
+        slot_u["name"] = slot_u["name"] or name
+        slot_u["brands"].add(brand)
+        slot_b = brand_acc[brand]
+        slot_b["users"].add(email)
+        if img_link or vid_link:
+            slot_u["creatives"] += 1
+            slot_b["creatives"] += 1
+        if img_link:
+            slot_u["images"] += 1
+            slot_b["images"] += 1
+            total_images += 1
+        if vid_link:
+            slot_u["videos"] += 1
+            slot_b["videos"] += 1
+            total_videos += 1
+
+    for ev in usage_rows:
+        email = ""
+        if ev.user_id and ev.user_id in users:
+            email = users[ev.user_id].email or ""
+        email = email or "Unknown user"
+        cost = effective_cost_usd(ev)
+        user_acc[email]["cost"] += cost
+        user_acc[email]["calls"] += 1
+        ex = ev.extra or {}
+        bname = str(ex.get("brand_name") or "").strip()
+        if bname:
+            brand_acc[bname]["cost"] += cost
+
+    total_cost = round(sum(effective_cost_usd(r) for r in usage_rows), 4)
+    overview = [
+        ["Report period", period_label],
+        ["From (UTC)", since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")],
+        ["To (UTC)", until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")],
+        ["Total images delivered", total_images],
+        ["Total videos delivered", total_videos],
+        ["Total finished creatives", len(creatives)],
+        ["Active users (with API usage)", len(user_acc)],
+        ["Est. total spend (USD)", total_cost],
+        ["Total API calls logged", len(usage_rows)],
+    ]
+    # Fix total creatives line - use len(creatives)
+    by_user_rows: list[list[Any]] = []
+    for email, slot in sorted(user_acc.items(), key=lambda x: (-x[1]["cost"], x[0])):
+        brands_list = ", ".join(sorted(b for b in slot["brands"] if b))
+        by_user_rows.append(
+            [
+                email,
+                slot["name"],
+                slot["images"],
+                slot["videos"],
+                slot["creatives"],
+                brands_list,
+                round(slot["cost"], 4),
+                slot["calls"],
+            ]
+        )
+
+    by_brand_rows: list[list[Any]] = []
+    for brand, slot in sorted(brand_acc.items(), key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0])):
+        if brand == "(no brand)" and slot["images"] + slot["videos"] == 0:
+            continue
+        by_brand_rows.append(
+            [
+                brand,
+                slot["images"],
+                slot["videos"],
+                slot["creatives"],
+                ", ".join(sorted(u for u in slot["users"] if u)),
+                round(slot["cost"], 4),
+            ]
+        )
+
+    return overview, by_user_rows, by_brand_rows
+
+
+async def generate_usage_summary_xlsx(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    days: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    user_id: UUID | None = None,
+) -> tuple[bytes, str]:
+    since, until, label = parse_usage_date_range(
+        days=days, date_from=date_from, date_to=date_to
+    )
+    overview, by_user, by_brand = await _build_manager_summary_tables(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        period_label=label.replace("_", " "),
+        user_id=user_id,
+    )
+    content = build_summary_workbook(
+        period_label=label.replace("_", " "),
+        overview=overview,
+        by_user=by_user,
+        by_brand=by_brand,
+    )
+    filename = f"usage-summary-{label}.xlsx"
     return content, filename

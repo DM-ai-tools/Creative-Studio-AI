@@ -23,7 +23,10 @@ from app.schemas.admin import (
 )
 from app.services.auth_service import _user_response
 from app.services.seedance_health import check_seedance_credits
-from app.services.usage_export_service import generate_usage_export_xlsx
+from app.services.usage_export_service import (
+    generate_usage_export_xlsx,
+    generate_usage_summary_xlsx,
+)
 from app.services.usage_tracker import usage_summary
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -317,6 +320,36 @@ async def admin_usage_export(
     platform = _is_platform_admin(current_user)
     try:
         content, filename = await generate_usage_export_xlsx(
+            tenant_id=current_user.tenant_id,
+            platform=platform,
+            days=days,
+            date_from=date_from,
+            date_to=date_to,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/usage/export/summary")
+async def admin_usage_export_summary(
+    current_user=Depends(_require_admin),
+    days: int | None = Query(None, ge=1, le=366),
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
+    user_id: UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a manager-friendly summary Excel (per user / per brand, no API noise)."""
+    await _ensure_usage_user_filter(db, current_user, user_id)
+    platform = _is_platform_admin(current_user)
+    try:
+        content, filename = await generate_usage_summary_xlsx(
             tenant_id=current_user.tenant_id,
             platform=platform,
             days=days,

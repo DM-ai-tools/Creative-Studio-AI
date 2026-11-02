@@ -10,6 +10,7 @@ from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
     _detail_row,
+    build_summary_workbook,
     build_usage_workbook,
     parse_usage_date_range,
 )
@@ -120,6 +121,19 @@ def test_detail_row_recovers_brand_from_asset_path():
         file_url_to_brand={"/files/legacy-image.png": brand_id},
     )
     assert detail[DETAIL_HEADERS.index("Brand name")] == "Recovered brand"
+
+
+def test_summary_workbook_has_user_and_brand_sheets():
+    content = build_summary_workbook(
+        period_label="last 7 days",
+        overview=[["Total videos delivered", 3]],
+        by_user=[["a@test.com", "A", 1, 2, 2, "Brand X", 4.5, 10]],
+        by_brand=[["Brand X", 1, 2, 2, "a@test.com", 4.5]],
+    )
+    workbook = load_workbook(io.BytesIO(content))
+    assert "By user" in workbook.sheetnames
+    assert "By brand" in workbook.sheetnames
+    assert workbook["By user"].cell(row=2, column=4).value == 2
 
 
 def test_workbook_media_urls_are_clickable():
