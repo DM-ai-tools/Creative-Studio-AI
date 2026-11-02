@@ -15,6 +15,7 @@ from app.services.usage_export_service import (
     _usage_delivery_kind,
     _is_automation_service_email,
     _usage_has_successful_media_output,
+    _manager_media_cost_usd,
     _usage_media_cost_usd,
     _variant_delivery_flags,
     build_summary_workbook,
@@ -142,8 +143,9 @@ def test_summary_workbook_has_user_and_brand_sheets():
     workbook = load_workbook(io.BytesIO(content))
     assert "By user" in workbook.sheetnames
     assert "By brand" in workbook.sheetnames
-    assert "No brand detail" in workbook.sheetnames
-    assert "No brand by person" in workbook.sheetnames
+    assert "No brand detail" not in workbook.sheetnames
+    assert "No brand by person" not in workbook.sheetnames
+    assert "API only (no library)" not in workbook.sheetnames
     assert workbook["By user"].cell(row=1, column=1).value == "User"
     assert workbook["By user"].cell(row=2, column=3).value == 2
 
@@ -165,6 +167,19 @@ def test_usage_output_required_for_delivery_count():
             extra={"output_urls": ["/files/clip.mp4"]},
         )
     )
+
+
+def test_manager_media_cost_seedance_flat_per_30s():
+    row = _usage_row(
+        operation="video_generation",
+        provider="byteplus",
+        model="dreamina-seedance-2-5-260628",
+        completion_tokens=2_500_000,
+        total_tokens=2_500_000,
+        cost_usd=0,
+        extra={"output_urls": ["/files/a.mp4"], "duration_seconds": 30},
+    )
+    assert _manager_media_cost_usd(row) == 17.0
 
 
 def test_usage_media_cost_excludes_llm():

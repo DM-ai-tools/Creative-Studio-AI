@@ -35,6 +35,7 @@ from app.services.usage_tracker import (
     effective_cost_usd,
     fetch_usage_events,
     is_byteplus_seedance_row,
+    manager_report_seedance_cost_usd,
 )
 
 
@@ -589,7 +590,9 @@ async def _asset_creator_email_by_variant(variant_ids: set[UUID]) -> dict[UUID, 
         )
         for variant_id, email in rows.all():
             if variant_id and variant_id not in out and email:
-                out[variant_id] = str(email)
+                clean = _sanitize_contributor_email(str(email))
+                if clean:
+                    out[variant_id] = clean
     return out
 
 
@@ -619,6 +622,21 @@ def _normalize_brand_bucket(name: str) -> str:
     if _is_placeholder_brand(name):
         return _NO_BRAND_BUCKET
     return (name or "").strip()
+
+
+def _brand_summary_rollup_key(*, db_brand_label: str, display_brand: str) -> str:
+    """One By brand row per real client — DB brand wins over hook-inferred label."""
+    db = (db_brand_label or "").strip()
+    if db and not _is_placeholder_brand(db):
+        return _normalize_brand_bucket(db)
+    return _normalize_brand_bucket((display_brand or "").strip())
+
+
+def _sanitize_contributor_email(email: str) -> str:
+    e = (email or "").strip()
+    if not e or _is_automation_service_email(e):
+        return ""
+    return e
 
 
 def _brand_hints_from_params(params: dict | None) -> str:
@@ -725,10 +743,18 @@ async def _usage_contributor_maps(
             emails_by_user = {row.id: (row.email or "") for row in urows.all()}
     variant_out: dict[UUID, set[str]] = {}
     for vid, uids in variant_emails.items():
-        variant_out[vid] = {emails_by_user[uid] for uid in uids if uid in emails_by_user and emails_by_user[uid]}
+        variant_out[vid] = {
+            emails_by_user[uid]
+            for uid in uids
+            if uid in emails_by_user and _sanitize_contributor_email(emails_by_user[uid])
+        }
     brief_out: dict[UUID, set[str]] = {}
     for bid, uids in brief_emails.items():
-        brief_out[bid] = {emails_by_user[uid] for uid in uids if uid in emails_by_user and emails_by_user[uid]}
+        brief_out[bid] = {
+            emails_by_user[uid]
+            for uid in uids
+            if uid in emails_by_user and _sanitize_contributor_email(emails_by_user[uid])
+        }
     return variant_out, brief_out, emails_by_user
 
 
@@ -812,6 +838,21 @@ def _resolve_usage_actor(
         if email and not _is_automation_service_email(email):
             return email, (u.full_name or "").strip()
     return "", ""
+
+
+def _manager_media_cost_usd(ev: Any) -> float:
+    """By brand spend: one charge per finished clip, flat Seedance 2.5 when cost_usd missing."""
+    if not getattr(ev, "success", False):
+        return 0.0
+    if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
+        if not _usage_has_successful_media_output(ev):
+            return 0.0
+    media = _usage_media_cost_usd(ev)
+    if media <= 0:
+        return 0.0
+    if is_byteplus_seedance_row(ev) and float(getattr(ev, "cost_usd", 0) or 0) <= 0:
+        return manager_report_seedance_cost_usd(ev)
+    return media
 
 
 def _usage_media_cost_usd(ev: Any) -> float:
@@ -1084,12 +1125,15 @@ async def _load_creatives_by_brand_rows(
         has_img, has_vid = _variant_delivery_flags(variant, img, vid)
         if not has_img and not has_vid:
             continue
-        if not (email or "").strip():
-            email = asset_creator_email.get(variant.id) or ""
-        if not (email or "").strip():
+        email = _sanitize_contributor_email(email or "")
+        if not email:
+            email = _sanitize_contributor_email(asset_creator_email.get(variant.id) or "")
+        if not email:
             extra_emails = variant_user_map.get(variant.id) or brief_user_map.get(variant.brief_id) or set()
-            if extra_emails:
-                email = sorted(extra_emails)[0]
+            human = sorted(_sanitize_contributor_email(e) or "" for e in extra_emails)
+            human = [e for e in human if e]
+            if human:
+                email = human[0]
         ctype = _creative_type_label(variant.format or "", img, vid)
         if not ctype:
             if has_img and has_vid:
@@ -1471,9 +1515,10 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["By user", "People only — Seedance service login rolls into whoever started the job."],
         ["Date range", "Same rules in the report period (default last 30 days)."],
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
-        ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
-        ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
-        ["Spend on By brand", "Media generation only (image/video/HeyGen/Seedance) — not LLM or chat."],
+        [
+            "Spend on By brand",
+            "Successful image/video only; Seedance ≈ USD 17/30s @ 1080p; one charge per job (no retry double-count).",
+        ],
         ["Spend on By user / Overview", "All API usage including LLM, scrapes, and retries."],
         [""],
         ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
@@ -1517,30 +1562,6 @@ def build_summary_workbook(
     for row in by_brand:
         br.append(row)
     _autosize_columns(br)
-
-    sheet_idx = 4
-    if no_brand_by_person:
-        np = wb.create_sheet("No brand by person", sheet_idx)
-        sheet_idx += 1
-        _write_sheet_headers(np, NO_BRAND_BY_PERSON_HEADERS)
-        for row in no_brand_by_person:
-            np.append(row)
-        _autosize_columns(np, max_width=64)
-
-    if unassigned_by_hook:
-        uh = wb.create_sheet("No brand detail", sheet_idx)
-        sheet_idx += 1
-        _write_sheet_headers(uh, UNASSIGNED_DETAIL_HEADERS)
-        for row in unassigned_by_hook:
-            uh.append(row)
-        _autosize_columns(uh, max_width=64)
-
-    if api_only_no_brand:
-        ao = wb.create_sheet("API only (no library)", sheet_idx)
-        _write_sheet_headers(ao, API_ONLY_NO_BRAND_HEADERS)
-        for row in api_only_no_brand:
-            ao.append(row)
-        _autosize_columns(ao, max_width=56)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -1671,14 +1692,17 @@ async def _build_manager_summary_tables(
     api_no_brand_person: dict[str, dict[str, int]] = defaultdict(lambda: {"images": 0, "videos": 0})
     api_no_brand_total = {"images": 0, "videos": 0}
     delivery_dedup_keys: set[str] = set()
+    media_cost_dedup_keys: set[str] = set()
 
     total_images = 0
     total_videos = 0
     total_creatives = 0
     for row in creatives:
-        email = str(row[1] or "").strip() or "Unknown user"
+        email = _sanitize_contributor_email(str(row[1] or "").strip()) or "Unknown user"
         name = str(row[2] or "").strip()
-        brand = _normalize_brand_bucket(str(row[3] or "").strip())
+        db_brand = str(row[12] if len(row) > 12 else "").strip()
+        display_brand = str(row[3] or "").strip()
+        brand = _brand_summary_rollup_key(db_brand_label=db_brand, display_brand=display_brand)
         hook = str(row[6] or "").strip()
         img_link = str(row[7] or "").strip()
         vid_link = str(row[8] or "").strip()
@@ -1690,7 +1714,7 @@ async def _build_manager_summary_tables(
         if brand != _NO_BRAND_BUCKET:
             slot_u["brands"].add(brand)
         slot_b = brand_acc[brand]
-        if email != "Unknown user":
+        if email != "Unknown user" and not _is_automation_service_email(email):
             slot_b["users"].add(email)
         if hook:
             slot_b["hooks"].add(_hook_sample_key(hook))
@@ -1753,7 +1777,7 @@ async def _build_manager_summary_tables(
         if email and actor_name:
             user_acc[email]["name"] = user_acc[email]["name"] or actor_name
         cost = effective_cost_usd(ev)
-        media_cost = _usage_media_cost_usd(ev)
+        media_cost = _manager_media_cost_usd(ev)
         cost_email = email if email and not _is_automation_service_email(email) else ""
         if not cost_email and ev.user_id and ev.user_id in users:
             fallback = (users[ev.user_id].email or "").strip()
@@ -1781,7 +1805,14 @@ async def _build_manager_summary_tables(
             known_brands=known_brands,
         )
         brand_key = _normalize_brand_bucket(resolved or bname)
-        brand_acc[brand_key]["cost"] += media_cost
+        if media_cost > 0:
+            cost_key = _usage_delivery_dedup_key(ev)
+            if cost_key in media_cost_dedup_keys:
+                media_cost = 0.0
+            else:
+                media_cost_dedup_keys.add(cost_key)
+        if media_cost > 0:
+            brand_acc[brand_key]["cost"] += media_cost
 
         kind = _usage_delivery_kind(ev)
         if not kind or not _usage_has_successful_media_output(ev):
@@ -1802,7 +1833,7 @@ async def _build_manager_summary_tables(
         delivery_dedup_keys.add(dedup)
         if brand_key != _NO_BRAND_BUCKET:
             user_acc[email]["brands"].add(brand_key)
-        if email != "Unknown user":
+        if email and email != "Unknown user" and not _is_automation_service_email(email):
             brand_acc[brand_key]["users"].add(email)
         if hook_hint:
             brand_acc[brand_key]["hooks"].add(_hook_sample_key(hook_hint))

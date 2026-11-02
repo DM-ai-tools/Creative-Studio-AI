@@ -7,6 +7,7 @@ from app.services.usage_tracker import (
     effective_cost_usd,
     estimate_byteplus_seedance_cost_usd,
     is_byteplus_seedance_row,
+    manager_report_seedance_cost_usd,
 )
 
 
@@ -37,6 +38,11 @@ def test_estimate_byteplus_seedance_cost_range():
 def test_is_byteplus_seedance_row():
     assert is_byteplus_seedance_row(_row())
     assert not is_byteplus_seedance_row(_row(provider="openrouter", operation="llm", model="gpt-4o"))
+
+
+def test_manager_report_seedance_flat_30s():
+    row = _row(extra={"duration_seconds": 30})
+    assert manager_report_seedance_cost_usd(row) == 17.0
 
 
 def test_effective_cost_usd_uses_estimate_when_provider_cost_missing():

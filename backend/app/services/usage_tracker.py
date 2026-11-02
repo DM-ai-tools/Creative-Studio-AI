@@ -233,6 +233,20 @@ def effective_cost_usd(row: Any) -> float:
     return 0.0
 
 
+def manager_report_seedance_cost_usd(row: Any) -> float:
+    """Manager Excel: ~USD 17 per 30s @ 1080p when BytePlus did not store cost_usd."""
+    if not is_byteplus_seedance_row(row) or not getattr(row, "success", False):
+        return 0.0
+    if float(getattr(row, "cost_usd", 0) or 0) > 0:
+        return float(row.cost_usd)
+    extra = getattr(row, "extra", None) or {}
+    try:
+        duration = float(extra.get("duration_seconds") or extra.get("duration") or 30)
+    except (TypeError, ValueError):
+        duration = 30.0
+    return round(_SEEDANCE_25_USD_PER_30S_1080 * max(duration, 1.0) / 30.0, 4)
+
+
 def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -> dict[str, Any]:
     seedance_rows = [r for r in rows if is_byteplus_seedance_row(r)]
     successful = [r for r in seedance_rows if r.success]
