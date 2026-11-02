@@ -818,6 +818,64 @@ def _usage_delivery_dedup_key(ev: Any) -> str:
     return f"event:{eid}" if eid else f"event:{id(ev)}"
 
 
+def _usage_media_cost_dedup_key(ev: Any) -> str:
+    """One media charge per clip/image — do not collapse whole chat jobs onto one image."""
+    ex = getattr(ev, "extra", None) or {}
+    vid = str(ex.get("variant_id") or "").strip()
+    if vid:
+        return f"variant:{vid}:cost"
+    kind = _usage_delivery_kind(ev)
+    if kind == "image":
+        urls = media_urls_from_extra(ex)
+        if urls:
+            norm = normalize_stored_file_url(urls[0]) or urls[0]
+            return f"image:{norm}"
+        task = str(ex.get("task_id") or "").strip()
+        if task:
+            return f"task:{task}:image"
+        eid = getattr(ev, "id", None)
+        return f"event:{eid}:image" if eid else f"event:{id(ev)}:image"
+    return _usage_delivery_dedup_key(ev)
+
+
+def _resolve_usage_brand_key(
+    ev: Any,
+    *,
+    job_meta: dict[str, str] | None,
+    brands: dict[UUID, str],
+    brief_brands: dict[UUID, UUID],
+    variant_brands: dict[UUID, UUID],
+    known_brands: list[str],
+) -> str:
+    ex = ev.extra or {}
+    bname = _resolve_brand_label(
+        brand_name=str(ex.get("brand_name") or (job_meta or {}).get("brand_name") or ""),
+        brand_id=_uuid_or_none(ex.get("brand_id") or (job_meta or {}).get("brand_id")),
+        brief_id=_uuid_or_none(ex.get("brief_id") or (job_meta or {}).get("brief_id")),
+        brands=brands,
+        brief_brands=brief_brands,
+    )
+    vid = _uuid_or_none(ex.get("variant_id"))
+    if not bname and vid and vid in variant_brands:
+        bid = variant_brands[vid]
+        if bid in brands:
+            bname = brands[bid]
+    brief_id = _uuid_or_none(ex.get("brief_id") or (job_meta or {}).get("brief_id"))
+    if not bname and brief_id and brief_id in brief_brands:
+        bid = brief_brands[brief_id]
+        if bid in brands:
+            bname = brands[bid]
+    hook_hint = str(
+        ex.get("hook") or ex.get("prompt") or ex.get("title") or (job_meta or {}).get("brand_name") or ""
+    )[:120]
+    resolved, _ = _manager_brand_from_context(
+        brand_name=bname,
+        hook=hook_hint,
+        known_brands=known_brands,
+    )
+    return _normalize_brand_bucket(resolved or bname)
+
+
 def _resolve_usage_actor(
     ev: Any,
     *,
@@ -848,11 +906,45 @@ def _manager_media_cost_usd(ev: Any) -> float:
         if not _usage_has_successful_media_output(ev):
             return 0.0
     media = _usage_media_cost_usd(ev)
+    if media <= 0 and _usage_delivery_kind(ev) == "image":
+        if float(getattr(ev, "cost_usd", 0) or 0) > 0:
+            media = float(ev.cost_usd)
+        else:
+            from app.services.usage_tracker import estimate_media_cost
+
+            cost, _ = estimate_media_cost(
+                provider=str(getattr(ev, "provider", "") or ""),
+                model=str(getattr(ev, "model", "") or ""),
+            )
+            media = cost
     if media <= 0:
         return 0.0
     if is_byteplus_seedance_row(ev) and float(getattr(ev, "cost_usd", 0) or 0) <= 0:
         return manager_report_seedance_cost_usd(ev)
     return media
+
+
+def _allocate_user_media_spend_to_brands(
+    brand_acc: dict[str, dict[str, Any]],
+    *,
+    user_brand_units: dict[str, dict[str, int]],
+    user_media_spend: dict[str, float],
+) -> None:
+    """Roll up API media USD to clients — split each person's spend by their deliverable mix."""
+    for slot in brand_acc.values():
+        slot["cost"] = 0.0
+    for email, spend in user_media_spend.items():
+        if spend <= 0:
+            continue
+        weights = user_brand_units.get(email) or {}
+        total = sum(weights.values())
+        if total <= 0:
+            brand_acc[_NO_BRAND_BUCKET]["cost"] += spend
+            continue
+        for brand, units in weights.items():
+            if units <= 0:
+                continue
+            brand_acc[brand]["cost"] += spend * (units / total)
 
 
 def _usage_media_cost_usd(ev: Any) -> float:
@@ -1517,7 +1609,11 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         [
             "Spend on By brand",
-            "Successful image/video only; Seedance ≈ USD 17/30s @ 1080p; one charge per job (no retry double-count).",
+            "Media API only (not LLM). Split each person's media spend by their image/video mix per client.",
+        ],
+        [
+            "Images on By brand",
+            "Typically ~USD 0.04–0.08 per GPT image call; rolled up from API logs to match library counts.",
         ],
         ["Spend on By user / Overview", "All API usage including LLM, scrapes, and retries."],
         [""],
@@ -1633,11 +1729,18 @@ async def _build_manager_summary_tables(
         if brief_id:
             brief_ids.add(brief_id)
     variant_ids_in_creatives: set[UUID] = set()
+    variant_ids_for_brands: set[UUID] = set()
     for row in creatives:
         try:
-            variant_ids_in_creatives.add(UUID(str(row[11])))
+            vid = UUID(str(row[11]))
+            variant_ids_in_creatives.add(vid)
+            variant_ids_for_brands.add(vid)
         except (ValueError, TypeError, IndexError):
             pass
+    for r in usage_rows:
+        vid = _uuid_or_none((r.extra or {}).get("variant_id"))
+        if vid:
+            variant_ids_for_brands.add(vid)
 
     async with AsyncSessionLocal() as db:
         users: dict[UUID, User] = {}
@@ -1655,6 +1758,18 @@ async def _build_manager_summary_tables(
         if brand_ids:
             bnames = await db.execute(select(Brand.id, Brand.name).where(Brand.id.in_(brand_ids)))
             brands = {row.id: row.name for row in bnames.all()}
+        variant_brands: dict[UUID, UUID] = {}
+        if variant_ids_for_brands:
+            vrows = await db.execute(
+                select(Variant.id, Variant.brand_id).where(Variant.id.in_(variant_ids_for_brands))
+            )
+            for vrow in vrows.all():
+                if vrow.brand_id:
+                    variant_brands[vrow.id] = vrow.brand_id
+                    brand_ids.add(vrow.brand_id)
+            if brand_ids:
+                bnames = await db.execute(select(Brand.id, Brand.name).where(Brand.id.in_(brand_ids)))
+                brands = {row.id: row.name for row in bnames.all()}
 
     user_acc: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -1693,6 +1808,8 @@ async def _build_manager_summary_tables(
     api_no_brand_total = {"images": 0, "videos": 0}
     delivery_dedup_keys: set[str] = set()
     media_cost_dedup_keys: set[str] = set()
+    user_brand_units: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    user_media_spend: dict[str, float] = defaultdict(float)
 
     total_images = 0
     total_videos = 0
@@ -1764,6 +1881,10 @@ async def _build_manager_summary_tables(
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
+        if email != "Unknown user":
+            units = (1 if counts_img else 0) + (1 if counts_vid else 0)
+            if units:
+                user_brand_units[email][brand] += units
         try:
             variant_id = UUID(str(row[11]))
         except (ValueError, TypeError, IndexError):
@@ -1789,30 +1910,24 @@ async def _build_manager_summary_tables(
         ex = ev.extra or {}
         jid = str(ex.get("job_id") or "").strip()
         job_meta = job_metadata.get(jid) if jid else None
-        bname = _resolve_brand_label(
-            brand_name=str(ex.get("brand_name") or (job_meta or {}).get("brand_name") or ""),
-            brand_id=_uuid_or_none(ex.get("brand_id") or (job_meta or {}).get("brand_id")),
-            brief_id=_uuid_or_none(ex.get("brief_id") or (job_meta or {}).get("brief_id")),
+        brand_key = _resolve_usage_brand_key(
+            ev,
+            job_meta=job_meta,
             brands=brands,
             brief_brands=brief_brands,
+            variant_brands=variant_brands,
+            known_brands=known_brands,
         )
         hook_hint = str(
             ex.get("hook") or ex.get("prompt") or ex.get("title") or (job_meta or {}).get("brand_name") or ""
         )[:120]
-        resolved, _ = _manager_brand_from_context(
-            brand_name=bname,
-            hook=hook_hint,
-            known_brands=known_brands,
-        )
-        brand_key = _normalize_brand_bucket(resolved or bname)
         if media_cost > 0:
-            cost_key = _usage_delivery_dedup_key(ev)
+            cost_key = _usage_media_cost_dedup_key(ev)
             if cost_key in media_cost_dedup_keys:
                 media_cost = 0.0
             else:
                 media_cost_dedup_keys.add(cost_key)
-        if media_cost > 0:
-            brand_acc[brand_key]["cost"] += media_cost
+                user_media_spend[cost_email] += media_cost
 
         kind = _usage_delivery_kind(ev)
         if not kind or not _usage_has_successful_media_output(ev):
@@ -1850,6 +1965,8 @@ async def _build_manager_summary_tables(
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
+        if email and email != "Unknown user":
+            user_brand_units[email][brand_key] += 1
         if brand_key == _NO_BRAND_BUCKET:
             person = _summary_user_display(user_acc[email]["name"], email)
             if kind == "image":
@@ -1897,6 +2014,12 @@ async def _build_manager_summary_tables(
         email: _summary_user_display(slot["name"], email) for email, slot in user_acc.items()
     }
 
+    _allocate_user_media_spend_to_brands(
+        brand_acc,
+        user_brand_units=user_brand_units,
+        user_media_spend=user_media_spend,
+    )
+
     # Keep (no brand) deliverable totals aligned with «No brand by person» / detail sheets.
     if _NO_BRAND_BUCKET in brand_acc or no_brand_person:
         nb_slot = brand_acc[_NO_BRAND_BUCKET]
@@ -1915,9 +2038,19 @@ async def _build_manager_summary_tables(
             continue
         hook_samples = sorted(slot["hooks"])[:_MAX_HOOK_SAMPLES]
         if brand == _NO_BRAND_BUCKET:
-            people = sorted(no_brand_person.keys())
+            people = sorted(
+                p
+                for p in no_brand_person.keys()
+                if p and "seedance" not in p.lower() and "creativestudio.tools" not in p.lower()
+            )
         else:
-            people = sorted({email_to_person.get(u, u) for u in slot["users"] if u})
+            people = sorted(
+                {
+                    email_to_person.get(u, u)
+                    for u in slot["users"]
+                    if u and not _is_automation_service_email(u)
+                }
+            )
         by_brand_rows.append(
             [
                 brand,

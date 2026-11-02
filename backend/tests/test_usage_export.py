@@ -9,10 +9,12 @@ from openpyxl import load_workbook
 from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
+    _allocate_user_media_spend_to_brands,
     _detail_row,
     _infer_brand_from_text,
     _manager_brand_from_context,
     _usage_delivery_kind,
+    _usage_media_cost_dedup_key,
     _is_automation_service_email,
     _usage_has_successful_media_output,
     _manager_media_cost_usd,
@@ -167,6 +169,36 @@ def test_usage_output_required_for_delivery_count():
             extra={"output_urls": ["/files/clip.mp4"]},
         )
     )
+
+
+def test_image_cost_dedup_keys_differ_per_output():
+    a = _usage_row(
+        operation="generate_image",
+        provider="openai",
+        model="gpt-image-2",
+        extra={"job_id": "shared-job", "output_urls": ["/files/a.png"]},
+    )
+    b = _usage_row(
+        operation="generate_image",
+        provider="openai",
+        model="gpt-image-2",
+        extra={"job_id": "shared-job", "output_urls": ["/files/b.png"]},
+    )
+    assert _usage_media_cost_dedup_key(a) != _usage_media_cost_dedup_key(b)
+
+
+def test_allocate_user_media_spend_splits_by_deliverables():
+    brand_acc = {
+        "Spar Club": {"cost": 0.0, "images": 24, "videos": 0, "creatives": 24, "users": set(), "hooks": set()},
+        "During Days": {"cost": 0.0, "images": 1, "videos": 0, "creatives": 1, "users": set(), "hooks": set()},
+    }
+    _allocate_user_media_spend_to_brands(
+        brand_acc,
+        user_brand_units={"pratiti@x.com": {"Spar Club": 24}, "admin@x.com": {"During Days": 1}},
+        user_media_spend={"pratiti@x.com": 0.96, "admin@x.com": 0.04},
+    )
+    assert round(brand_acc["Spar Club"]["cost"], 2) == 0.96
+    assert round(brand_acc["During Days"]["cost"], 2) == 0.04
 
 
 def test_manager_media_cost_seedance_flat_per_30s():
