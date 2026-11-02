@@ -9,7 +9,6 @@ from openpyxl import load_workbook
 from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
-    _allocate_user_media_spend_to_brands,
     _detail_row,
     _infer_brand_from_text,
     _manager_brand_from_context,
@@ -222,31 +221,30 @@ def test_image_cost_dedup_keys_differ_per_output():
     assert _usage_media_cost_dedup_key(a) != _usage_media_cost_dedup_key(b)
 
 
-def test_allocate_user_media_spend_splits_by_deliverables():
-    brand_acc = {
-        "Spar Club": {"cost": 0.0, "images": 24, "videos": 0, "creatives": 24, "users": set(), "hooks": set()},
-        "During Days": {"cost": 0.0, "images": 1, "videos": 0, "creatives": 1, "users": set(), "hooks": set()},
-    }
-    _allocate_user_media_spend_to_brands(
-        brand_acc,
-        user_brand_units={"pratiti@x.com": {"Spar Club": 24}, "admin@x.com": {"During Days": 1}},
-        user_media_spend={"pratiti@x.com": 0.96, "admin@x.com": 0.04},
+def test_manager_media_cost_seedance_matches_dashboard_tokens():
+    row = _usage_row(
+        operation="video_generation",
+        provider="byteplus",
+        model="dreamina-seedance-2-0-260128",
+        completion_tokens=245_000,
+        total_tokens=245_000,
+        cost_usd=0,
+        extra={"output_urls": ["/files/a.mp4"], "task_id": "cgt-1"},
     )
-    assert round(brand_acc["Spar Club"]["cost"], 2) == 0.96
-    assert round(brand_acc["During Days"]["cost"], 2) == 0.04
+    cost = _manager_media_cost_usd(row)
+    assert 1.0 < cost < 3.0
 
 
-def test_manager_media_cost_seedance_flat_per_30s():
+def test_manager_media_cost_seedance_prefers_stored_cost():
     row = _usage_row(
         operation="video_generation",
         provider="byteplus",
         model="dreamina-seedance-2-5-260628",
         completion_tokens=2_500_000,
-        total_tokens=2_500_000,
-        cost_usd=0,
-        extra={"output_urls": ["/files/a.mp4"], "duration_seconds": 30},
+        cost_usd=12.5,
+        extra={"output_urls": ["/files/a.mp4"]},
     )
-    assert _manager_media_cost_usd(row) == 17.0
+    assert _manager_media_cost_usd(row) == 12.5
 
 
 def test_usage_media_cost_excludes_llm():

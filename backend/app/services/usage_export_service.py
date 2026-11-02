@@ -38,7 +38,7 @@ from app.services.usage_tracker import (
     effective_cost_usd,
     fetch_usage_events,
     is_byteplus_seedance_row,
-    manager_report_seedance_cost_usd,
+    seedance_cost_detail,
 )
 
 
@@ -1003,53 +1003,34 @@ def _resolve_event_job_meta(
     return None
 
 
-def _manager_media_cost_usd(ev: Any) -> float:
-    """By brand spend: one charge per finished clip, flat Seedance 2.5 when cost_usd missing."""
+def _manager_media_cost_usd(ev: Any, *, job_meta: dict[str, str] | None = None) -> float:
+    """By brand: logged media cost only — same Seedance token/duration rules as usage dashboard."""
     if not getattr(ev, "success", False):
         return 0.0
     if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
-        if not _usage_has_successful_media_output(ev):
+        if not _usage_has_successful_media_output(ev, job_meta=job_meta):
             return 0.0
+        stored = float(getattr(ev, "cost_usd", 0) or 0)
+        if stored > 0:
+            return stored
+        if is_byteplus_seedance_row(ev):
+            detail = seedance_cost_detail(ev)
+            return float(detail["mid"]) if detail else 0.0
+        return _usage_media_cost_usd(ev)
+    stored = float(getattr(ev, "cost_usd", 0) or 0)
+    if stored > 0:
+        return stored
+    if _usage_delivery_kind(ev) == "image":
+        from app.services.usage_tracker import estimate_media_cost
+
+        cost, _ = estimate_media_cost(
+            provider=str(getattr(ev, "provider", "") or ""),
+            model=str(getattr(ev, "model", "") or ""),
+        )
+        if cost > 0:
+            return cost
     media = _usage_media_cost_usd(ev)
-    if media <= 0 and _usage_delivery_kind(ev) == "image":
-        if float(getattr(ev, "cost_usd", 0) or 0) > 0:
-            media = float(ev.cost_usd)
-        else:
-            from app.services.usage_tracker import estimate_media_cost
-
-            cost, _ = estimate_media_cost(
-                provider=str(getattr(ev, "provider", "") or ""),
-                model=str(getattr(ev, "model", "") or ""),
-            )
-            media = cost
-    if media <= 0:
-        return 0.0
-    if is_byteplus_seedance_row(ev) and float(getattr(ev, "cost_usd", 0) or 0) <= 0:
-        return manager_report_seedance_cost_usd(ev)
-    return media
-
-
-def _allocate_user_media_spend_to_brands(
-    brand_acc: dict[str, dict[str, Any]],
-    *,
-    user_brand_units: dict[str, dict[str, int]],
-    user_media_spend: dict[str, float],
-) -> None:
-    """Roll up API media USD to clients — split each person's spend by their deliverable mix."""
-    for slot in brand_acc.values():
-        slot["cost"] = 0.0
-    for email, spend in user_media_spend.items():
-        if spend <= 0:
-            continue
-        weights = user_brand_units.get(email) or {}
-        total = sum(weights.values())
-        if total <= 0:
-            brand_acc[_NO_BRAND_BUCKET]["cost"] += spend
-            continue
-        for brand, units in weights.items():
-            if units <= 0:
-                continue
-            brand_acc[brand]["cost"] += spend * (units / total)
+    return media if media > 0 else 0.0
 
 
 def _usage_media_cost_usd(ev: Any) -> float:
@@ -1717,11 +1698,11 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         [
             "Spend on By brand",
-            "Media API only (not LLM). Split each person's media spend by their image/video mix per client.",
+            "Sum of logged image/video API costs per client (brief/variant/job brand) — not LLM, not pooled guesses.",
         ],
         [
-            "Images on By brand",
-            "Typically ~USD 0.04–0.08 per GPT image call; rolled up from API logs to match library counts.",
+            "Seedance on By brand",
+            "Same estimate as usage dashboard (stored cost_usd, else token mid or duration for 2.5).",
         ],
         ["Spend on By user / Overview", "All API usage including LLM, scrapes, and retries."],
         [""],
@@ -1934,8 +1915,6 @@ async def _build_manager_summary_tables(
     api_no_brand_total = {"images": 0, "videos": 0}
     delivery_dedup_keys: set[str] = set()
     media_cost_dedup_keys: set[str] = set()
-    user_brand_units: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    user_media_spend: dict[str, float] = defaultdict(float)
 
     total_images = 0
     total_videos = 0
@@ -2007,10 +1986,6 @@ async def _build_manager_summary_tables(
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
-        if email != "Unknown user":
-            units = (1 if counts_img else 0) + (1 if counts_vid else 0)
-            if units:
-                user_brand_units[email][brand] += units
         try:
             variant_id = UUID(str(row[11]))
         except (ValueError, TypeError, IndexError):
@@ -2035,7 +2010,7 @@ async def _build_manager_summary_tables(
         if email and actor_name:
             user_acc[email]["name"] = user_acc[email]["name"] or actor_name
         cost = effective_cost_usd(ev)
-        media_cost = _manager_media_cost_usd(ev)
+        media_cost = _manager_media_cost_usd(ev, job_meta=event_job_meta)
         cost_email = email if email and not _is_automation_service_email(email) else "Unknown user"
         user_acc[cost_email]["cost"] += cost
         user_acc[cost_email]["calls"] += 1
@@ -2058,7 +2033,7 @@ async def _build_manager_summary_tables(
                 media_cost = 0.0
             else:
                 media_cost_dedup_keys.add(cost_key)
-                user_media_spend[cost_email] += media_cost
+                brand_acc[brand_key]["cost"] += media_cost
 
         kind = _usage_delivery_kind(ev)
         if not kind or not _usage_has_successful_media_output(ev, job_meta=job_meta):
@@ -2096,8 +2071,6 @@ async def _build_manager_summary_tables(
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
-        if email and email != "Unknown user":
-            user_brand_units[email][brand_key] += 1
         if brand_key == _NO_BRAND_BUCKET:
             person = _summary_user_display(user_acc[email]["name"], email)
             if kind == "image":
@@ -2144,12 +2117,6 @@ async def _build_manager_summary_tables(
     email_to_person = {
         email: _summary_user_display(slot["name"], email) for email, slot in user_acc.items()
     }
-
-    _allocate_user_media_spend_to_brands(
-        brand_acc,
-        user_brand_units=user_brand_units,
-        user_media_spend=user_media_spend,
-    )
 
     # Keep (no brand) deliverable totals aligned with «No brand by person» / detail sheets.
     if _NO_BRAND_BUCKET in brand_acc or no_brand_person:
