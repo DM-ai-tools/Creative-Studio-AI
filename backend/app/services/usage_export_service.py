@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import json
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -32,6 +34,7 @@ from app.services.public_urls import (
 )
 from app.services.usage_tracker import (
     _display_model,
+    _row_completion_tokens,
     effective_cost_usd,
     fetch_usage_events,
     is_byteplus_seedance_row,
@@ -136,14 +139,64 @@ def _load_creative_studio_job_metadata(
             continue
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
         result = job.get("result") if isinstance(job.get("result"), dict) else {}
-        out[jid] = {
-            "url": str(result.get("url") or "").strip(),
-            "user_id": str(payload.get("user_id") or "").strip(),
-            "brand_id": str(payload.get("brand_id") or "").strip(),
-            "brand_name": str(payload.get("brand_name") or "").strip(),
-            "brief_id": str(payload.get("brief_id") or "").strip(),
-            "media_mode": str(payload.get("media_mode") or result.get("media_mode") or "").strip(),
-        }
+        out[jid] = _job_meta_from_record(job)
+    return out
+
+
+def _job_meta_from_record(job: dict[str, Any]) -> dict[str, str]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    provider_task = (
+        str(job.get("provider_task_id") or "").strip()
+        or str(result.get("provider_task_id") or "").strip()
+        or str(result.get("task_id") or "").strip()
+    )
+    return {
+        "url": str(result.get("url") or "").strip(),
+        "user_id": str(payload.get("user_id") or job.get("user_id") or "").strip(),
+        "brand_id": str(payload.get("brand_id") or "").strip(),
+        "brand_name": str(payload.get("brand_name") or "").strip(),
+        "brief_id": str(payload.get("brief_id") or "").strip(),
+        "media_mode": str(payload.get("media_mode") or result.get("media_mode") or "").strip(),
+        "provider_task_id": provider_task,
+    }
+
+
+def _load_task_job_metadata(task_tenants: dict[str, str | None]) -> dict[str, dict[str, str]]:
+    """Map BytePlus ``task_id`` (cgt-…) to persisted Creative Studio job payload."""
+    if not task_tenants:
+        return {}
+    root = Path(settings.UPLOAD_DIR).resolve()
+    if not root.is_dir():
+        return {}
+    out: dict[str, dict[str, str]] = {}
+
+    def _scan_dir(jobs_dir: Path) -> None:
+        if not jobs_dir.is_dir():
+            return
+        for path in jobs_dir.glob("*.json"):
+            try:
+                job = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(job, dict):
+                continue
+            meta = _job_meta_from_record(job)
+            tid = str(meta.get("provider_task_id") or "").strip()
+            if tid and tid in task_tenants and tid not in out:
+                out[tid] = meta
+
+    for task_id, tenant_id in task_tenants.items():
+        if task_id in out:
+            continue
+        if tenant_id:
+            _scan_dir(root / str(tenant_id) / "creative-studio-jobs")
+        else:
+            for tenant_dir in sorted(root.iterdir()):
+                if tenant_dir.is_dir():
+                    _scan_dir(tenant_dir / "creative-studio-jobs")
+                    if task_id in out:
+                        break
     return out
 
 
@@ -793,8 +846,8 @@ def _is_automation_service_email(email: str) -> bool:
     return "seedance" in e and "creativestudio.tools" in e
 
 
-def _usage_has_successful_media_output(ev: Any) -> bool:
-    """Count API deliverables only when a file URL was recorded (success with output)."""
+def _usage_has_successful_media_output(ev: Any, *, job_meta: dict[str, str] | None = None) -> bool:
+    """Count API deliverables when output URL exists, or Seedance billed successfully (dashboard parity)."""
     if not getattr(ev, "success", False):
         return False
     ex = getattr(ev, "extra", None) or {}
@@ -805,6 +858,12 @@ def _usage_has_successful_media_output(ev: Any) -> bool:
     raw_urls = ex.get("output_urls")
     if isinstance(raw_urls, list) and any(str(u or "").strip() for u in raw_urls):
         return True
+    if job_meta and str(job_meta.get("url") or "").strip():
+        return True
+    if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
+        task_id = str(ex.get("task_id") or "").strip()
+        if task_id and _row_completion_tokens(ev) > 0:
+            return True
     return False
 
 
@@ -881,21 +940,67 @@ def _resolve_usage_actor(
     *,
     users: dict[UUID, User],
     job_metadata: dict[str, dict[str, str]],
+    task_job_metadata: dict[str, dict[str, str]] | None = None,
+    brief_owners: dict[UUID, UUID] | None = None,
 ) -> tuple[str, str]:
-    """Prefer human user from Creative Studio job payload over service accounts."""
+    """Prefer human from CS job / BytePlus task / brief owner — not Seedance service login."""
     ex = ev.extra or {}
     jid = str(ex.get("job_id") or "").strip()
-    if jid and jid in job_metadata:
-        uid = _uuid_or_none(job_metadata[jid].get("user_id"))
+    job_meta = job_metadata.get(jid) if jid else None
+    task_id = str(ex.get("task_id") or "").strip()
+    if not job_meta and task_id and task_job_metadata:
+        job_meta = task_job_metadata.get(task_id)
+
+    def _user_from_meta(meta: dict[str, str] | None) -> tuple[str, str]:
+        if not meta:
+            return "", ""
+        uid = _uuid_or_none(meta.get("user_id"))
         if uid and uid in users:
             u = users[uid]
-            return (u.email or "").strip(), (u.full_name or "").strip()
+            email = (u.email or "").strip()
+            if email and not _is_automation_service_email(email):
+                return email, (u.full_name or "").strip()
+        return "", ""
+
+    email, name = _user_from_meta(job_meta)
+    if email:
+        return email, name
+    if jid and jid in job_metadata:
+        email, name = _user_from_meta(job_metadata[jid])
+        if email:
+            return email, name
+
+    brief_id = _uuid_or_none(ex.get("brief_id") or (job_meta or {}).get("brief_id"))
+    if brief_id and brief_owners and brief_id in brief_owners:
+        uid = brief_owners[brief_id]
+        if uid in users:
+            u = users[uid]
+            email = (u.email or "").strip()
+            if email and not _is_automation_service_email(email):
+                return email, (u.full_name or "").strip()
+
     if ev.user_id and ev.user_id in users:
         u = users[ev.user_id]
         email = (u.email or "").strip()
         if email and not _is_automation_service_email(email):
             return email, (u.full_name or "").strip()
     return "", ""
+
+
+def _resolve_event_job_meta(
+    ev: Any,
+    *,
+    job_metadata: dict[str, dict[str, str]],
+    task_job_metadata: dict[str, dict[str, str]],
+) -> dict[str, str] | None:
+    ex = ev.extra or {}
+    jid = str(ex.get("job_id") or "").strip()
+    if jid and jid in job_metadata:
+        return job_metadata[jid]
+    task_id = str(ex.get("task_id") or "").strip()
+    if task_id and task_id in task_job_metadata:
+        return task_job_metadata[task_id]
+    return None
 
 
 def _manager_media_cost_usd(ev: Any) -> float:
@@ -985,6 +1090,9 @@ def _usage_delivery_kind(ev: Any) -> str | None:
     if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
         if _usage_has_successful_media_output(ev):
             return "video"
+        task_id = str(ex.get("task_id") or "").strip()
+        if task_id and _row_completion_tokens(ev) > 0:
+            return "video"
         return None
     return None
 
@@ -1031,7 +1139,7 @@ async def _brief_usage_video_events(
         events = list((await db.execute(q)).scalars().all())
     for ev in events:
         op = (ev.operation or "").lower()
-        if op != "generate_video" and "generate_video" not in op:
+        if op != "generate_video" and "generate_video" not in op and not is_byteplus_seedance_row(ev):
             continue
         ex = ev.extra or {}
         brief_raw = ex.get("brief_id")
@@ -1602,7 +1710,7 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["How to use", "Deliverable counts = finished work in Creative library (READY variants only)."],
         [
             "Videos delivered",
-            "Saved in library (READY) OR successful Seedance/Omni/HeyGen with output URL — not both.",
+            "Library READY clips OR successful Seedance/Omni (task billed / output URL) — attributed via job or brief owner.",
         ],
         ["By user", "People only — Seedance service login rolls into whoever started the job."],
         ["Date range", "Same rules in the report period (default last 30 days)."],
@@ -1718,7 +1826,15 @@ async def _build_manager_summary_tables(
             if r.tenant_id:
                 job_tenants[jid] = str(r.tenant_id)
     job_metadata = _load_creative_studio_job_metadata(job_ids, job_tenants=job_tenants)
-    for meta in job_metadata.values():
+    seedance_task_tenants: dict[str, str | None] = {}
+    for r in usage_rows:
+        if not is_byteplus_seedance_row(r):
+            continue
+        tid = str((r.extra or {}).get("task_id") or "").strip()
+        if tid and tid not in seedance_task_tenants:
+            seedance_task_tenants[tid] = str(r.tenant_id) if r.tenant_id else None
+    task_job_metadata = _load_task_job_metadata(seedance_task_tenants)
+    for meta in list(job_metadata.values()) + list(task_job_metadata.values()):
         uid = _uuid_or_none(meta.get("user_id"))
         if uid:
             user_ids.add(uid)
@@ -1726,6 +1842,10 @@ async def _build_manager_summary_tables(
         if bid:
             brand_ids.add(bid)
         brief_id = _uuid_or_none(meta.get("brief_id"))
+        if brief_id:
+            brief_ids.add(brief_id)
+    for r in usage_rows:
+        brief_id = _uuid_or_none((r.extra or {}).get("brief_id"))
         if brief_id:
             brief_ids.add(brief_id)
     variant_ids_in_creatives: set[UUID] = set()
@@ -1742,19 +1862,25 @@ async def _build_manager_summary_tables(
         if vid:
             variant_ids_for_brands.add(vid)
 
+    brief_owners: dict[UUID, UUID] = {}
     async with AsyncSessionLocal() as db:
-        users: dict[UUID, User] = {}
-        if user_ids:
-            urows = await db.execute(select(User).where(User.id.in_(user_ids)))
-            users = {u.id: u for u in urows.scalars().all()}
         brands: dict[UUID, str] = {}
         brief_brands: dict[UUID, UUID] = {}
         if brief_ids:
-            brows = await db.execute(select(Brief.id, Brief.brand_id).where(Brief.id.in_(brief_ids)))
+            brows = await db.execute(
+                select(Brief.id, Brief.brand_id, Brief.created_by).where(Brief.id.in_(brief_ids))
+            )
             for brow in brows.all():
                 brief_brands[brow.id] = brow.brand_id
                 if brow.brand_id:
                     brand_ids.add(brow.brand_id)
+                if brow.created_by:
+                    brief_owners[brow.id] = brow.created_by
+                    user_ids.add(brow.created_by)
+        users: dict[UUID, User] = {}
+        if user_ids:
+            urows = await db.execute(select(User).where(User.id.in_(user_ids)))
+            users = {u.id: u for u in urows.scalars().all()}
         if brand_ids:
             bnames = await db.execute(select(Brand.id, Brand.name).where(Brand.id.in_(brand_ids)))
             brands = {row.id: row.name for row in bnames.all()}
@@ -1893,23 +2019,28 @@ async def _build_manager_summary_tables(
             delivery_dedup_keys.add(f"variant:{variant_id}")
 
     for ev in usage_rows:
-        actor_email, actor_name = _resolve_usage_actor(ev, users=users, job_metadata=job_metadata)
+        event_job_meta = _resolve_event_job_meta(
+            ev,
+            job_metadata=job_metadata,
+            task_job_metadata=task_job_metadata,
+        )
+        actor_email, actor_name = _resolve_usage_actor(
+            ev,
+            users=users,
+            job_metadata=job_metadata,
+            task_job_metadata=task_job_metadata,
+            brief_owners=brief_owners,
+        )
         email = actor_email
         if email and actor_name:
             user_acc[email]["name"] = user_acc[email]["name"] or actor_name
         cost = effective_cost_usd(ev)
         media_cost = _manager_media_cost_usd(ev)
-        cost_email = email if email and not _is_automation_service_email(email) else ""
-        if not cost_email and ev.user_id and ev.user_id in users:
-            fallback = (users[ev.user_id].email or "").strip()
-            if fallback and not _is_automation_service_email(fallback):
-                cost_email = fallback
-        cost_email = cost_email or "Unknown user"
+        cost_email = email if email and not _is_automation_service_email(email) else "Unknown user"
         user_acc[cost_email]["cost"] += cost
         user_acc[cost_email]["calls"] += 1
         ex = ev.extra or {}
-        jid = str(ex.get("job_id") or "").strip()
-        job_meta = job_metadata.get(jid) if jid else None
+        job_meta = event_job_meta
         brand_key = _resolve_usage_brand_key(
             ev,
             job_meta=job_meta,
@@ -1930,7 +2061,7 @@ async def _build_manager_summary_tables(
                 user_media_spend[cost_email] += media_cost
 
         kind = _usage_delivery_kind(ev)
-        if not kind or not _usage_has_successful_media_output(ev):
+        if not kind or not _usage_has_successful_media_output(ev, job_meta=job_meta):
             continue
         if not email or _is_automation_service_email(email):
             continue

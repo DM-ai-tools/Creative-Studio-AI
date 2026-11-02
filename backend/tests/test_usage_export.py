@@ -17,6 +17,7 @@ from app.services.usage_export_service import (
     _usage_media_cost_dedup_key,
     _is_automation_service_email,
     _usage_has_successful_media_output,
+    _resolve_usage_actor,
     _manager_media_cost_usd,
     _usage_media_cost_usd,
     _variant_delivery_flags,
@@ -169,6 +170,40 @@ def test_usage_output_required_for_delivery_count():
             extra={"output_urls": ["/files/clip.mp4"]},
         )
     )
+    assert _usage_has_successful_media_output(
+        _usage_row(
+            operation="video_generation",
+            provider="byteplus",
+            model="dreamina-seedance-2-0-260128",
+            completion_tokens=245_000,
+            extra={"task_id": "cgt-test-123"},
+        )
+    )
+
+
+def test_seedance_actor_from_brief_owner():
+    brief_id = uuid4()
+    owner_id = uuid4()
+    service_id = uuid4()
+    ev = _usage_row(
+        operation="video_generation",
+        provider="byteplus",
+        model="dreamina-seedance-2-0-260128",
+        user_id=service_id,
+        completion_tokens=245_000,
+        extra={"brief_id": str(brief_id), "task_id": "cgt-test-456"},
+    )
+    email, name = _resolve_usage_actor(
+        ev,
+        users={
+            owner_id: SimpleNamespace(email="pratiti@example.com", full_name="Pratiti"),
+        },
+        job_metadata={},
+        task_job_metadata={},
+        brief_owners={brief_id: owner_id},
+    )
+    assert email == "pratiti@example.com"
+    assert name == "Pratiti"
 
 
 def test_image_cost_dedup_keys_differ_per_output():
