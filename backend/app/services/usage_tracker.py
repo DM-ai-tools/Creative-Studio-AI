@@ -194,22 +194,33 @@ def estimate_byteplus_seedance_cost_usd(
     return {"low": low_usd, "high": high_usd, "mid": round((low_usd + high_usd) / 2, 4)}
 
 
+_SEEDANCE_25_USD_PER_30S_1080 = 17.0
+
+
 def seedance_cost_detail(row: Any) -> dict[str, float] | None:
     if not is_byteplus_seedance_row(row):
         return None
     extra = getattr(row, "extra", None) or {}
+    model = (getattr(row, "model", "") or "").lower()
     resolution = str(extra.get("resolution") or "").lower()
-    resolution_1080 = "1080" in resolution
+    resolution_1080 = "1080" in resolution or any(
+        token in model for token in ("seedance-2-5", "seedance_2_5", "seedance-2.5", "2-5", "2.5")
+    )
     with_video = extra.get("with_video_input")
     if with_video is not None:
         with_video_input = bool(with_video)
     else:
         with_video_input = None
-    return estimate_byteplus_seedance_cost_usd(
-        _row_completion_tokens(row),
-        with_video_input=with_video_input,
-        resolution_1080=resolution_1080,
-    )
+    tokens = _row_completion_tokens(row)
+    if tokens > 0:
+        return estimate_byteplus_seedance_cost_usd(
+            tokens,
+            with_video_input=with_video_input,
+            resolution_1080=resolution_1080,
+        )
+    duration = float(extra.get("duration_seconds") or extra.get("duration") or 30)
+    mid = round(_SEEDANCE_25_USD_PER_30S_1080 * max(duration, 1.0) / 30.0, 4)
+    return {"low": mid, "high": mid, "mid": mid}
 
 
 def effective_cost_usd(row: Any) -> float:

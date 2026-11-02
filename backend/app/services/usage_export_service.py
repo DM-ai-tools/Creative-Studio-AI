@@ -752,6 +752,43 @@ def _resolve_brand_label(
     return ""
 
 
+def _is_gemini_omni_video_row(ev: Any) -> bool:
+    prov = (getattr(ev, "provider", "") or "").lower()
+    model = (getattr(ev, "model", "") or "").lower()
+    op = (getattr(ev, "operation", "") or "").lower()
+    return prov == "google" and "omni" in model and op == "video_generation"
+
+
+def _usage_delivery_dedup_key(ev: Any) -> str:
+    ex = getattr(ev, "extra", None) or {}
+    for key in ("job_id", "task_id", "interaction_id"):
+        raw = str(ex.get(key) or "").strip()
+        if raw:
+            return f"{key}:{raw}"
+    eid = getattr(ev, "id", None)
+    return f"event:{eid}" if eid else f"event:{id(ev)}"
+
+
+def _resolve_usage_actor(
+    ev: Any,
+    *,
+    users: dict[UUID, User],
+    job_metadata: dict[str, dict[str, str]],
+) -> tuple[str, str]:
+    """Prefer human user from Creative Studio job payload over service accounts."""
+    ex = ev.extra or {}
+    jid = str(ex.get("job_id") or "").strip()
+    if jid and jid in job_metadata:
+        uid = _uuid_or_none(job_metadata[jid].get("user_id"))
+        if uid and uid in users:
+            u = users[uid]
+            return (u.email or "").strip(), (u.full_name or "").strip()
+    if ev.user_id and ev.user_id in users:
+        u = users[ev.user_id]
+        return (u.email or "").strip(), (u.full_name or "").strip()
+    return "", ""
+
+
 def _usage_media_cost_usd(ev: Any) -> float:
     """USD to show on By brand — image/video generation only (not LLM / scrape / chat)."""
     if not getattr(ev, "success", False):
@@ -767,7 +804,7 @@ def _usage_media_cost_usd(ev: Any) -> float:
     op = (getattr(ev, "operation", "") or "").lower()
     if cat == "Creative Studio" and any(k in op for k in ("video", "image", "broll", "seedance")):
         return effective_cost_usd(ev)
-    if is_byteplus_seedance_row(ev):
+    if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
         return effective_cost_usd(ev)
     return 0.0
 
@@ -787,7 +824,7 @@ def _usage_delivery_kind(ev: Any) -> str | None:
         return "image"
     if mt == "Video":
         return "video"
-    if is_byteplus_seedance_row(ev):
+    if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
         return "video"
     return None
 
@@ -1400,7 +1437,11 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         [""],
         ["Period", period_label],
         ["How to use", "Deliverable counts = finished work in Creative library (READY variants only)."],
-        ["By user / By brand", "Same READY/APPROVED library rows in the report date range (default last 30 days)."],
+        [
+            "Videos delivered",
+            "Library READY rows + finished Seedance / Gemini Omni / HeyGen clips (deduped by job).",
+        ],
+        ["By user / By brand", "Same rules in the report date range (default last 30 days)."],
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
         ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
@@ -1516,12 +1557,30 @@ async def _build_manager_summary_tables(
     user_ids = {r.user_id for r in usage_rows if r.user_id}
     brand_ids: set[UUID] = set()
     brief_ids: set[UUID] = set()
+    job_ids: set[str] = set()
+    job_tenants: dict[str, str] = {}
     for r in usage_rows:
         ex = r.extra or {}
         bid = _uuid_or_none(ex.get("brand_id"))
         if bid:
             brand_ids.add(bid)
         brief_id = _uuid_or_none(ex.get("brief_id"))
+        if brief_id:
+            brief_ids.add(brief_id)
+        jid = str(ex.get("job_id") or "").strip()
+        if jid:
+            job_ids.add(jid)
+            if r.tenant_id:
+                job_tenants[jid] = str(r.tenant_id)
+    job_metadata = _load_creative_studio_job_metadata(job_ids, job_tenants=job_tenants)
+    for meta in job_metadata.values():
+        uid = _uuid_or_none(meta.get("user_id"))
+        if uid:
+            user_ids.add(uid)
+        bid = _uuid_or_none(meta.get("brand_id"))
+        if bid:
+            brand_ids.add(bid)
+        brief_id = _uuid_or_none(meta.get("brief_id"))
         if brief_id:
             brief_ids.add(brief_id)
     variant_ids_in_creatives: set[UUID] = set()
@@ -1583,6 +1642,7 @@ async def _build_manager_summary_tables(
     no_brand_totals = {"images": 0, "videos": 0, "creatives": 0}
     api_no_brand_person: dict[str, dict[str, int]] = defaultdict(lambda: {"images": 0, "videos": 0})
     api_no_brand_total = {"images": 0, "videos": 0}
+    delivery_dedup_keys: set[str] = set()
 
     total_images = 0
     total_videos = 0
@@ -1654,8 +1714,11 @@ async def _build_manager_summary_tables(
             total_videos += 1
 
     for ev in usage_rows:
-        email = ""
-        if ev.user_id and ev.user_id in users:
+        actor_email, actor_name = _resolve_usage_actor(ev, users=users, job_metadata=job_metadata)
+        email = actor_email
+        if email and actor_name:
+            user_acc[email]["name"] = user_acc[email]["name"] or actor_name
+        if not email and ev.user_id and ev.user_id in users:
             u = users[ev.user_id]
             email = u.email or ""
             user_acc[email]["name"] = user_acc[email]["name"] or (u.full_name or "")
@@ -1665,14 +1728,18 @@ async def _build_manager_summary_tables(
         user_acc[email]["cost"] += cost
         user_acc[email]["calls"] += 1
         ex = ev.extra or {}
+        jid = str(ex.get("job_id") or "").strip()
+        job_meta = job_metadata.get(jid) if jid else None
         bname = _resolve_brand_label(
-            brand_name=str(ex.get("brand_name") or ""),
-            brand_id=_uuid_or_none(ex.get("brand_id")),
-            brief_id=_uuid_or_none(ex.get("brief_id")),
+            brand_name=str(ex.get("brand_name") or (job_meta or {}).get("brand_name") or ""),
+            brand_id=_uuid_or_none(ex.get("brand_id") or (job_meta or {}).get("brand_id")),
+            brief_id=_uuid_or_none(ex.get("brief_id") or (job_meta or {}).get("brief_id")),
             brands=brands,
             brief_brands=brief_brands,
         )
-        hook_hint = str(ex.get("hook") or ex.get("prompt") or ex.get("title") or "")[:120]
+        hook_hint = str(
+            ex.get("hook") or ex.get("prompt") or ex.get("title") or (job_meta or {}).get("brand_name") or ""
+        )[:120]
         resolved, _ = _manager_brand_from_context(
             brand_name=bname,
             hook=hook_hint,
@@ -1687,13 +1754,29 @@ async def _build_manager_summary_tables(
         vid = _uuid_or_none(ex.get("variant_id"))
         if vid and vid in variant_ids_in_creatives:
             continue
+        dedup = _usage_delivery_dedup_key(ev)
+        if dedup in delivery_dedup_keys:
+            continue
+        delivery_dedup_keys.add(dedup)
         if brand_key != _NO_BRAND_BUCKET:
             user_acc[email]["brands"].add(brand_key)
         if email != "Unknown user":
             brand_acc[brand_key]["users"].add(email)
         if hook_hint:
             brand_acc[brand_key]["hooks"].add(_hook_sample_key(hook_hint))
-        # Deliverable counts come from library variants only — track API-only for reconciliation.
+        slot_u = user_acc[email]
+        slot_b = brand_acc[brand_key]
+        slot_u["creatives"] += 1
+        slot_b["creatives"] += 1
+        total_creatives += 1
+        if kind == "image":
+            slot_u["images"] += 1
+            slot_b["images"] += 1
+            total_images += 1
+        else:
+            slot_u["videos"] += 1
+            slot_b["videos"] += 1
+            total_videos += 1
         if brand_key == _NO_BRAND_BUCKET:
             person = _summary_user_display(user_acc[email]["name"], email)
             if kind == "image":

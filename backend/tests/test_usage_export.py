@@ -156,6 +156,26 @@ def test_usage_media_cost_excludes_llm():
 def test_usage_delivery_kind_counts_image_and_video():
     assert _usage_delivery_kind(_usage_row(operation="generate_image", provider="openai")) == "image"
     assert _usage_delivery_kind(_usage_row(operation="generate_video", provider="heygen")) == "video"
+    assert (
+        _usage_delivery_kind(
+            _usage_row(
+                operation="video_generation",
+                provider="google",
+                model="gemini-omni-1.1-flash",
+            )
+        )
+        == "video"
+    )
+    assert (
+        _usage_delivery_kind(
+            _usage_row(
+                operation="video_generation",
+                provider="byteplus",
+                model="dreamina-seedance-2-5-260628",
+            )
+        )
+        == "video"
+    )
     assert _usage_delivery_kind(_usage_row(operation="llm_chat", provider="openrouter")) is None
     assert _usage_delivery_kind(_usage_row(operation="analyze-reference-image", success=True)) is None
 

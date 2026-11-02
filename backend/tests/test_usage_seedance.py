@@ -41,7 +41,8 @@ def test_is_byteplus_seedance_row():
 
 def test_effective_cost_usd_uses_estimate_when_provider_cost_missing():
     row = _row(completion_tokens=1_000_000, total_tokens=1_000_000)
-    assert effective_cost_usd(row) == 8.55
+    # Seedance 2.5 defaults to 1080p token rates when resolution is omitted.
+    assert effective_cost_usd(row) == 9.35
 
 
 def test_effective_cost_usd_prefers_stored_cost():
