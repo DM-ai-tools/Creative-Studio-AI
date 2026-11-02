@@ -555,6 +555,14 @@ def resolve_visual_style(
         bits.append(BROLL_NO_RANDOM_RULE)
     if visual_cues:
         bits.append(f"Additional visual direction: {visual_cues}")
+    kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
+    landing_page_text = str(kb.get("landing_page_reference_text") or "").strip()
+    if landing_page_text:
+        bits.append(
+            "Optional landing-page PDF reference: use only facts and visuals relevant to the "
+            "authored scene; do not read this reference aloud, do not invent page copy, and do "
+            f"not treat it as performance proof. Reference excerpt: {landing_page_text[:900]}"
+        )
     bits.append(NATURAL_COLOR_RULE)
     bits.append(BRAND_BADGE_FORBIDDEN_RULE)
     bits.append(brand_onscreen_text_rule(str(brand)))

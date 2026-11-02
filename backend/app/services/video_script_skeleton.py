@@ -48,6 +48,15 @@ _SCENE_DIRECTION = re.compile(
     r"(Scene Direction:)\s*\n(.+?)(?=\nAvatar Attire:|\nBackground:|\nOn-Screen|\nAvatar Speaks|\nVO:|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+_PRODUCTION_SPOKEN_CUE = re.compile(
+    r"(?:SPEAK EXACTLY|VOICE-OVER(?:\s*[—\-][^\n:]*)?|SMALL DISCLAIMER)\s*:\s*\n(.+?)"
+    r"(?=\n(?:SPEAK EXACTLY|VOICE-OVER|SMALL DISCLAIMER|SCENE\s+\d|VISUAL:|FINAL(?:\s|$)|\Z))",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRODUCTION_BRIEF_MARKERS = re.compile(
+    r"\bSCENE\s+\d+\s*[—\-]|^VISUAL:\s*$|SPEAK EXACTLY:|VOICE-OVER",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _kb(brief: dict) -> dict:
@@ -226,21 +235,57 @@ def render_skeleton(context: dict[str, str]) -> str:
     return text
 
 
+def _normalize_spoken_quote(raw: str) -> str:
+    text = " ".join(str(raw or "").strip().split())
+    if len(text) >= 2 and text[0] in {'"', "\u201c"} and text[-1] in {'"', "\u201d"}:
+        text = text[1:-1].strip()
+        text = " ".join(text.split())
+    return text
+
+
+def looks_like_production_brief(text: str) -> bool:
+    """True when the user pasted a full scene director brief (HeyGen Video tab)."""
+    return bool(_PRODUCTION_BRIEF_MARKERS.search(text or ""))
+
+
 def extract_heygen_spoken_script(skeleton_text: str, *, target_seconds: int = 30) -> str:
-    """Concatenate Avatar Speaks + VO lines in story order."""
+    """Concatenate Avatar Speaks / VO / SPEAK EXACTLY lines in story order."""
+    text = str(skeleton_text or "")
     parts: list[str] = []
-    for match in _SPOKEN_BLOCK.finditer(skeleton_text):
-        line = " ".join(match.group(1).strip().split())
+    for match in _SPOKEN_BLOCK.finditer(text):
+        line = _normalize_spoken_quote(match.group(1))
         if line:
             parts.append(line.rstrip("."))
+
+    if not parts:
+        for match in _PRODUCTION_SPOKEN_CUE.finditer(text):
+            line = _normalize_spoken_quote(match.group(1))
+            if not line:
+                continue
+            upper = line.upper()
+            if upper.startswith(("VISUAL:", "SCENE ", "FINAL ", "PRESENTER ")):
+                continue
+            parts.append(line.rstrip("."))
+
+    from_production_cues = bool(parts) and looks_like_production_brief(text)
     spoken = ". ".join(parts)
     if spoken and not spoken.endswith((".", "!", "?")):
         spoken += "."
-    if not spoken.strip():
-        spoken = skeleton_text
+
+    if not spoken.strip() and not looks_like_production_brief(text):
+        # Legacy skeleton fallback — never use a full production brief as dialogue.
+        spoken = text
         spoken = re.sub(r"\[(?:\d+–\d+|\d+-\d+)[^\]]*\][^\n]*", "", spoken, flags=re.I)
-        spoken = re.sub(r"(Scene Direction|On-Screen Text|Avatar Attire|Background):[^\n]*", "", spoken, flags=re.I)
+        spoken = re.sub(
+            r"(Scene Direction|On-Screen Text|Avatar Attire|Background):[^\n]*",
+            "",
+            spoken,
+            flags=re.I,
+        )
         spoken = " ".join(spoken.split())
+
+    if from_production_cues:
+        return spoken.strip()
 
     words_budget = max(12, int(target_seconds * WPS))
     words = spoken.split()
@@ -1496,8 +1541,20 @@ def build_heygen_agent_prompt(
     headline = copy.get("headline") or ""
     cta = copy.get("cta") or brief.get("cta") or "Learn more"
 
-    approved_raw = str(brief.get("avatar_script") or _kb(brief).get("avatar_script") or "").strip()
+    approved_raw = str(
+        brief.get("avatar_script")
+        or _kb(brief).get("avatar_script")
+        or _kb(brief).get("custom_prompt")
+        or ""
+    ).strip()
     spoken_for_prompt = strip_insert_stat_placeholders(spoken_script.strip())
+    if looks_like_production_brief(approved_raw or production_skeleton):
+        extracted_dialogue = extract_heygen_spoken_script(
+            approved_raw or production_skeleton,
+            target_seconds=duration,
+        )
+        if extracted_dialogue.strip():
+            spoken_for_prompt = extracted_dialogue
     spoken_for_prompt = re.sub(
         r"\[\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}\]\s*", "", spoken_for_prompt
     )
@@ -1545,7 +1602,10 @@ def build_heygen_agent_prompt(
         f"{SCRIPT_VISUAL_SYNC_RULE}\n",
         *([f"{BROLL_NO_RANDOM_RULE}\n"] if broll_directed else []),
         f"{script_rule}\n",
-        f"SPOKEN SCRIPT (presenter must speak this exactly):\n{spoken_for_prompt}\n",
+        "CRITICAL — PRESENTER AUDIO: Speak ONLY the SPOKEN SCRIPT block below. "
+        "Never read scene titles, VISUAL directions, asset routing, timing headers, "
+        "or FINAL PRODUCTION RULES aloud. Those are director notes for visuals only.\n",
+        f"SPOKEN SCRIPT (presenter must speak this exactly — dialogue only):\n{spoken_for_prompt}\n",
     ]
     if stats_image_block:
         prompt_parts.append(f"{stats_image_block}\n")
@@ -1690,9 +1750,21 @@ def resolve_heygen_spoken_script(
             words = text.split()
             return " ".join(words[:words_budget]) if len(words) > words_budget else text
 
-    manual = brief.get("avatar_script") or kb.get("avatar_script")
+    manual = (
+        brief.get("avatar_script")
+        or kb.get("avatar_script")
+        or kb.get("custom_prompt")
+        or kb.get("video_script_skeleton")
+    )
     if manual and str(manual).strip() and kb.get("script_source") != "skeleton":
         raw_manual = str(manual).strip()
+        if looks_like_production_brief(raw_manual) or is_custom_script_mode(brief):
+            extracted = extract_heygen_spoken_script(
+                raw_manual, target_seconds=target_seconds
+            )
+            if extracted.strip():
+                return extracted
+
         text = strip_insert_stat_placeholders(raw_manual)
         text = re.sub(r"\[\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}\]\s*", "", text)
         # A user-approved TIMED script is sized for this video — speak it in full.

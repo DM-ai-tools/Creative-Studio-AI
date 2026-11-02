@@ -1503,6 +1503,13 @@ class CreativeStudioReference(BaseModel):
     role: Literal["product", "logo", "scene", "character", "reference", "proof"]
 
 
+class CreativeStudioDocumentReference(BaseModel):
+    name: str = Field(default="landing-page.pdf", max_length=240)
+    pdf_url: str = Field(min_length=1)
+    text: str = Field(default="", max_length=80_000)
+    page_image_urls: list[str] = Field(default_factory=list, max_length=8)
+
+
 class BrollBoardApproval(BaseModel):
     index: int = Field(ge=1, le=24)
     url: str = Field(min_length=1)
@@ -1544,6 +1551,14 @@ class CreativeStudioChatRequest(BaseModel):
     logo_reference_url: str = ""
     additional_reference_urls: list[str] = Field(default_factory=list)
     reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
+    document_references: list[CreativeStudioDocumentReference] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Optional landing-page PDF context. Raw PDFs inform planning only; rendered page "
+            "images may be used as scene references and are never proof or identity assets."
+        ),
+    )
     storyboard_image_urls: list[str] = Field(default_factory=list)
     prompt_only_video: bool = False
     preserve_image_text: bool = False
@@ -1680,6 +1695,26 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
     }
 
 
+@router.post("/creative-studio/pdf-reference")
+async def creative_studio_pdf_reference(
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+):
+    """Extract text and render page images from an optional landing-page PDF."""
+    from app.services.creative_studio_pdf_reference import ingest_landing_page_pdf
+
+    content_type = (file.content_type or "").lower()
+    filename = file.filename or "landing-page.pdf"
+    if content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="Upload a PDF file.")
+    content = await file.read()
+    return ingest_landing_page_pdf(
+        content=content,
+        filename=filename,
+        tenant_id=str(current_user.tenant_id),
+    )
+
+
 @router.post("/creative-studio/chat", response_model=CreativeStudioChatResponse)
 async def creative_studio_chat(
     data: CreativeStudioChatRequest,
@@ -1754,6 +1789,9 @@ async def creative_studio_chat(
         logo_reference_url=data.logo_reference_url,
         additional_reference_urls=list(data.additional_reference_urls or []),
         reference_assets=[asset.model_dump() for asset in data.reference_assets],
+        document_references=[
+            document.model_dump() for document in data.document_references
+        ],
         storyboard_image_urls=list(data.storyboard_image_urls or []),
         prompt_only_video=bool(data.prompt_only_video),
         preserve_image_text=bool(data.preserve_image_text),

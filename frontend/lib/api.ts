@@ -850,6 +850,27 @@ export const generationApi = {
       }>('/generation/creative-studio/models', { timeout: 20_000 })
       .then((r) => r.data),
 
+  creativeStudioPdfReference: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api
+      .post<{
+        name: string
+        pdf_url: string
+        page_count: number
+        text: string
+        pages: {
+          page_number: number
+          image_url: string
+          width: number
+          height: number
+          text: string
+        }[]
+        visual_pages_truncated: boolean
+      }>('/generation/creative-studio/pdf-reference', form, { timeout: 300_000 })
+      .then((r) => r.data)
+  },
+
   creativeStudioChat: (data: {
     messages: { role: 'user' | 'assistant'; content: string }[]
     mode?: 'auto' | 'ask' | 'generate'
@@ -884,6 +905,12 @@ export const generationApi = {
     logo_reference_url?: string
     additional_reference_urls?: string[]
     reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' }[]
+    document_references?: {
+      name: string
+      pdf_url: string
+      text: string
+      page_image_urls: string[]
+    }[]
     storyboard_image_urls?: string[]
     prompt_only_video?: boolean
     preserve_image_text?: boolean

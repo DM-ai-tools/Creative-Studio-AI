@@ -82,12 +82,14 @@ export default function UsageExportPanel({
     <Card title="Export usage report">
       <div className="space-y-4">
         <p className="text-sm text-mid leading-relaxed">
-          Download Excel for your <strong className="font-semibold text-charcoal">reporting manager</strong>:
-          each row includes the <strong className="font-semibold text-charcoal">user, workspace, brand, model, media type and cost</strong>, plus separate{' '}
-          <strong className="font-semibold text-charcoal">Image link</strong> and{' '}
-          <strong className="font-semibold text-charcoal">Video link</strong> columns (clickable on
-          production). On local dev only, a disk path column is included. Open the{' '}
-          <strong className="font-semibold text-charcoal">Read me</strong> tab before sending.
+          Download Excel for your <strong className="font-semibold text-charcoal">reporting manager</strong>.
+          Send the <strong className="font-semibold text-charcoal">Creatives by brand (manager)</strong> tab:
+          one row per finished image or video with brand name and clickable{' '}
+          <strong className="font-semibold text-charcoal">Image</strong> /{' '}
+          <strong className="font-semibold text-charcoal">Video</strong> links (
+          <code className="text-xs">/files/…</code> on production). Use the User filter above to export one person.
+          The <strong className="font-semibold text-charcoal">Usage detail</strong> tab is the technical API log. Open{' '}
+          <strong className="font-semibold text-charcoal">Read me</strong> first.
         </p>
         <div>
           <p className="text-[10px] font-bold text-lt uppercase tracking-wide mb-2">Date range</p>

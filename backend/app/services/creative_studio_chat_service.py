@@ -425,6 +425,7 @@ async def _llm_plan(
     video_prompt: str,
     approved_image_url: str,
     revision_notes: str,
+    document_context: str = "",
 ) -> dict[str, Any]:
     import asyncio
 
@@ -447,6 +448,12 @@ async def _llm_plan(
         f"Brand: {brand_name or '—'}",
         f"Product: {product_name or '—'}",
         f"Attachments (product photos to match): {', '.join(attachments) if attachments else 'none'}",
+        (
+            "Optional landing-page PDF reference (use only relevant facts/visuals; do not treat "
+            f"as spoken copy or proof): {document_context[:12000]}"
+            if document_context
+            else "Optional landing-page PDF reference: none"
+        ),
         f"Current image_prompt: {(image_prompt or '—')[:800]}",
         f"Current video_prompt: {(video_prompt or '—')[:800]}",
         f"Approved still URL: {approved_image_url or 'none'}",
@@ -539,7 +546,7 @@ async def _start_job(
     product_reference_url: str | None = None,
     logo_reference_url: str | None = None,
     additional_reference_urls: list[str] | None = None,
-    reference_assets: list[dict[str, str]] | None = None,
+    reference_assets: list[dict[str, Any]] | None = None,
     source_brief: str = "",
     storyboard_scenes: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
@@ -763,7 +770,8 @@ async def run_creative_studio_chat_turn(
     product_reference_url: str = "",
     logo_reference_url: str = "",
     additional_reference_urls: list[str] | None = None,
-    reference_assets: list[dict[str, str]] | None = None,
+    reference_assets: list[dict[str, Any]] | None = None,
+    document_references: list[dict[str, Any]] | None = None,
     storyboard_image_urls: list[str] | None = None,
     prompt_only_video: bool = False,
     preserve_image_text: bool = False,
@@ -873,6 +881,32 @@ async def run_creative_studio_chat_turn(
         action_norm = "generate_video"
 
     attachments = [u for u in (attachment_urls or []) if (u or "").strip()]
+    documents = [
+        document
+        for document in (document_references or [])
+        if isinstance(document, dict) and str(document.get("pdf_url") or "").strip()
+    ][:3]
+    document_context_parts: list[str] = []
+    for document in documents:
+        name = str(document.get("name") or "landing-page.pdf").strip()
+        text = str(document.get("text") or "").strip()
+        if text:
+            document_context_parts.append(f"DOCUMENT: {name}\n{text[:24000]}")
+    document_context = "\n\n".join(document_context_parts)[:60_000]
+
+    # Video providers accept images, not PDFs. Rendered PDF pages are optional
+    # scene guidance only and carry a marker that excludes them from proof-card
+    # and identity routing.
+    role_assets = [dict(asset) for asset in (reference_assets or []) if isinstance(asset, dict)]
+    known_urls = {str(asset.get("url") or "").strip() for asset in role_assets}
+    for document in documents:
+        for page_url in document.get("page_image_urls") or []:
+            url = str(page_url or "").strip()
+            if not url or url in known_urls or len(role_assets) >= 9:
+                continue
+            role_assets.append({"url": url, "role": "scene", "document_page": True})
+            known_urls.add(url)
+    reference_assets = role_assets
     product_ref = (product_reference_url or "").strip() or (attachments[0] if attachments and not reference_assets else "")
     logo_ref = (logo_reference_url or "").strip()
     if product_ref and logo_ref and product_ref == logo_ref:
@@ -912,6 +946,8 @@ async def run_creative_studio_chat_turn(
         """Uploaded stat/dashboard proof — usually tagged Reference, not Product."""
         for asset in reference_assets or []:
             if not isinstance(asset, dict):
+                continue
+            if asset.get("document_page"):
                 continue
             role = str(asset.get("role") or "").strip().lower()
             url = str(asset.get("url") or "").strip()
@@ -1593,6 +1629,7 @@ async def run_creative_studio_chat_turn(
                 brand_name=brand_name,
                 product_name=product_name,
                 attachments=attachments,
+                document_context=document_context,
                 messages=messages
                 + [
                     {
@@ -2257,6 +2294,16 @@ async def run_creative_studio_chat_turn(
             )
             motion = _with_product_fidelity(motion, product_ref or None)
 
+        if document_context:
+            motion = (
+                motion
+                + "\n\nOPTIONAL LANDING-PAGE PDF REFERENCE (NOT SPOKEN COPY):\n"
+                + document_context[:6000]
+                + "\nUse only the pages relevant to an authored scene. Preserve the user's "
+                "dialogue and timing. Do not invent page text, do not treat a PDF page as a "
+                "proof card, and do not show the PDF in every scene."
+            )
+
         continuity_for_job = (continuity_style_url or "").strip()
         staged_paths = list(accumulated_segment_paths or [])
         if chapter_staging and session_id and action_norm in {"approve_next", "generate_video"}:
@@ -2444,7 +2491,17 @@ async def run_creative_studio_chat_turn(
             logo_reference_url=logo_ref or None,
             additional_reference_urls=extra_refs,
             reference_assets=reference_assets,
-            source_brief=full_brief,
+            source_brief=(
+                full_brief
+                + (
+                    "\n\nOPTIONAL LANDING-PAGE PDF REFERENCE:\n"
+                    + document_context
+                    + "\nUse only scene-relevant facts and page visuals. Do not invent readable "
+                    "copy, do not treat PDF pages as proof cards, and do not force them into every scene."
+                    if document_context
+                    else ""
+                )
+            ),
             storyboard_image_urls=(
                 []
                 if prompt_only_video or broll_segments
@@ -2551,6 +2608,7 @@ async def run_creative_studio_chat_turn(
             brand_name=brand_name,
             product_name=product_name,
             attachments=attachments,
+            document_context=document_context,
             messages=messages,
             phase=phase or "ask",
             image_prompt=image_prompt,
@@ -2587,6 +2645,7 @@ async def run_creative_studio_chat_turn(
         brand_name=brand_name,
         product_name=product_name,
         attachments=attachments,
+        document_context=document_context,
         messages=messages,
         phase=phase or "planning",
         image_prompt=image_prompt,

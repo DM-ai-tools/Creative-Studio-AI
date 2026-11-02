@@ -557,6 +557,11 @@ export default function BriefComposer(_props: BriefComposerProps) {
     statsImageUrls: string[]
     performanceStats: PerformanceStatsContext | null
     performanceStatsPerImage: PerformanceStatsContext[]
+    landingPagePdfUrl: string | null
+    landingPagePdfName: string | null
+    landingPagePdfText: string | null
+    landingPagePageUrls: string[]
+    landingPagePages: { pageNumber: number; imageUrl: string; text: string }[]
   }>({
     icpText: null,
     generatedFullScript: null,
@@ -565,6 +570,11 @@ export default function BriefComposer(_props: BriefComposerProps) {
     statsImageUrls: [],
     performanceStats: null,
     performanceStatsPerImage: [],
+    landingPagePdfUrl: null,
+    landingPagePdfName: null,
+    landingPagePdfText: null,
+    landingPagePageUrls: [],
+    landingPagePages: [],
   })
 
   const {
@@ -1543,6 +1553,18 @@ export default function BriefComposer(_props: BriefComposerProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaType])
 
+  // The simplified HeyGen ratio control is authoritative. Keep the stored
+  // creative format and placement aligned so backend orientation, B-roll and
+  // final dimensions cannot override the user's selection.
+  useEffect(() => {
+    if (mediaType !== 'video') return
+    const landscape = heygenSettings.aspectRatio === '16:9'
+    setValue('formats', [landscape ? 'video' : 'reel'], { shouldValidate: true })
+    setValue('placements', [landscape ? 'landscape' : 'reels'], {
+      shouldValidate: true,
+    })
+  }, [mediaType, heygenSettings.aspectRatio, setValue])
+
   useEffect(() => {
     if (scriptBuildMode !== 'pdf') return
     const fmts = watch('formats') ?? []
@@ -2404,6 +2426,20 @@ export default function BriefComposer(_props: BriefComposerProps) {
                           : undefined,
                     }
                   : {}),
+                ...(avatarExportSnapshot.landingPagePdfUrl
+                  ? {
+                      landing_page_reference_pdf_url:
+                        avatarExportSnapshot.landingPagePdfUrl,
+                      landing_page_reference_name:
+                        avatarExportSnapshot.landingPagePdfName || 'landing-page.pdf',
+                      landing_page_reference_text:
+                        avatarExportSnapshot.landingPagePdfText || '',
+                      landing_page_reference_page_urls:
+                        avatarExportSnapshot.landingPagePageUrls,
+                      landing_page_reference_pages:
+                        avatarExportSnapshot.landingPagePages,
+                    }
+                  : {}),
               }
             : {}),
         },
@@ -3246,7 +3282,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
               brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
               productName={formValues.product_name ?? ''}
               niche={formValues.niche ?? ''}
-              onExportSnapshotChange={setAvatarExportSnapshot}
+              onExportSnapshotChange={(snapshot) =>
+                setAvatarExportSnapshot((current) => ({ ...current, ...snapshot }))
+              }
               scriptMode={scriptBuildMode === 'pdf' ? 'pdf' : 'custom'}
               onScriptModeChange={(mode) => setScriptBuildMode(mode)}
               pdfFile={pdfFile}
@@ -3501,7 +3539,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
               }}
               approvedScript={approvedAvatarScript}
               onApprovedScript={setApprovedAvatarScript}
-              onExportSnapshotChange={setAvatarExportSnapshot}
+              onExportSnapshotChange={(snapshot) =>
+                setAvatarExportSnapshot((current) => ({ ...current, ...snapshot }))
+              }
               onAfterScriptApproved={() => {
                 requestAnimationFrame(() => {
                   createVideoButtonRef.current?.scrollIntoView({

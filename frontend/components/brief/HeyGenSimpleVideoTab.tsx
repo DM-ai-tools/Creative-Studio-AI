@@ -31,6 +31,11 @@ export type HeyGenVideoExportSnapshot = {
   statsImageUrls: string[]
   performanceStats: PerformanceStatsContext | null
   performanceStatsPerImage: PerformanceStatsContext[]
+  landingPagePdfUrl: string | null
+  landingPagePdfName: string | null
+  landingPagePdfText: string | null
+  landingPagePageUrls: string[]
+  landingPagePages: { pageNumber: number; imageUrl: string; text: string }[]
 }
 
 export interface HeyGenSimpleVideoTabProps {
@@ -100,6 +105,15 @@ export default function HeyGenSimpleVideoTab({
   const [promptLoading, setPromptLoading] = useState(false)
   const [nicheOptions, setNicheOptions] = useState<{ id: string; label: string }[]>([])
   const [selectedNiche, setSelectedNiche] = useState('')
+  const [landingPagePdf, setLandingPagePdf] = useState<{
+    name: string
+    pdfUrl: string
+    text: string
+    pageCount: number
+    pageUrls: string[]
+    pages: { pageNumber: number; imageUrl: string; text: string }[]
+  } | null>(null)
+  const [landingPagePdfLoading, setLandingPagePdfLoading] = useState(false)
 
   useEffect(() => {
     generationApi
@@ -136,6 +150,11 @@ export default function HeyGenSimpleVideoTab({
       statsImageUrls,
       performanceStats: mergedPerformanceStats,
       performanceStatsPerImage,
+      landingPagePdfUrl: landingPagePdf?.pdfUrl ?? null,
+      landingPagePdfName: landingPagePdf?.name ?? null,
+      landingPagePdfText: landingPagePdf?.text ?? null,
+      landingPagePageUrls: landingPagePdf?.pageUrls ?? [],
+      landingPagePages: landingPagePdf?.pages ?? [],
     })
   }, [
     onExportSnapshotChange,
@@ -143,7 +162,39 @@ export default function HeyGenSimpleVideoTab({
     statsImageUrls,
     mergedPerformanceStats,
     performanceStatsPerImage,
+    landingPagePdf,
   ])
+
+  const uploadLandingPagePdf = async (file: File | null) => {
+    if (!file) return
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      toast.error('Choose a PDF file')
+      return
+    }
+    setLandingPagePdfLoading(true)
+    try {
+      const result = await generationApi.creativeStudioPdfReference(file)
+      setLandingPagePdf({
+        name: result.name || file.name,
+        pdfUrl: result.pdf_url,
+        text: result.text,
+        pageCount: result.page_count,
+        pageUrls: result.pages.map((page) => page.image_url),
+        pages: result.pages.map((page) => ({
+          pageNumber: page.page_number,
+          imageUrl: page.image_url,
+          text: page.text || '',
+        })),
+      })
+      toast.success(
+        `Landing-page reference ready · ${result.page_count} page${result.page_count === 1 ? '' : 's'}`,
+      )
+    } catch (err) {
+      toast.error(extractApiError(err, 'Could not process landing-page PDF'))
+    } finally {
+      setLandingPagePdfLoading(false)
+    }
+  }
 
   useEffect(() => {
     pushExportSnapshot()
@@ -439,6 +490,55 @@ export default function HeyGenSimpleVideoTab({
           </div>
         </>
       )}
+
+      <div className="card-premium p-5 border-sky-200 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <label className="block text-xs font-bold text-navy uppercase tracking-wide">
+              Landing-page PDF reference <span className="font-normal normal-case text-mid">(optional)</span>
+            </label>
+            <p className="mt-1 text-[11px] text-mid">
+              HeyGen may use relevant page text and page visuals when planning scenes. It is
+              not spoken automatically and is not treated as a stat/proof image.
+            </p>
+          </div>
+          {landingPagePdf ? (
+            <button
+              type="button"
+              onClick={() => setLandingPagePdf(null)}
+              className="text-xs font-semibold text-red-600 hover:text-red-700"
+            >
+              Remove
+            </button>
+          ) : null}
+        </div>
+        <div className="rounded-xl border-2 border-dashed border-sky-200 bg-sky-50/60 p-4">
+          <input
+            type="file"
+            accept=".pdf,application/pdf"
+            disabled={landingPagePdfLoading}
+            className="text-sm w-full file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-sky-600 file:text-white disabled:opacity-60"
+            onChange={(event) => {
+              void uploadLandingPagePdf(event.target.files?.[0] ?? null)
+              event.target.value = ''
+            }}
+          />
+          {landingPagePdfLoading ? (
+            <p className="mt-2 text-xs font-semibold text-sky-700">
+              Extracting text and preparing page visuals…
+            </p>
+          ) : landingPagePdf ? (
+            <p className="mt-2 text-xs text-navy">
+              Ready: <strong>{landingPagePdf.name}</strong> · {landingPagePdf.pageCount} page{landingPagePdf.pageCount === 1 ? '' : 's'}
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] text-mid">
+              Upload the PDF exported from the landing page. Maximum 50 MB and 50 pages. The
+              eight pages most relevant to your script are selected automatically for HeyGen.
+            </p>
+          )}
+        </div>
+      </div>
 
       <HeyGenVideoSettingsCard
         section="all"

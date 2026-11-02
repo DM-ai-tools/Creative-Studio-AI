@@ -76,6 +76,63 @@ def heygen_seedance2_enabled(brief: dict) -> bool:
     return _heygen_settings(brief).get("seedance_2_enabled") is True
 
 
+_PDF_REFERENCE_STOP_WORDS = frozenset(
+    {
+        "about", "after", "again", "also", "and", "are", "but", "for", "from",
+        "have", "into", "not", "only", "our", "scene", "show", "that", "the",
+        "their", "this", "through", "use", "video", "visual", "with", "your",
+    }
+)
+
+
+def _reference_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", (value or "").lower())
+        if len(token) >= 3 and token not in _PDF_REFERENCE_STOP_WORDS
+    }
+
+
+def _rank_landing_page_reference_urls(
+    brief: dict,
+    *,
+    query: str,
+    limit: int = 8,
+) -> tuple[list[str], list[int]]:
+    """Select visual PDF pages most relevant to the authored video scenes."""
+    kb = brief.get("key_benefits") if isinstance(brief.get("key_benefits"), dict) else {}
+    raw_pages = kb.get("landing_page_reference_pages")
+    query_tokens = _reference_tokens(query)
+    ranked: list[tuple[int, int, str]] = []
+    if isinstance(raw_pages, list):
+        for fallback_index, raw in enumerate(raw_pages, start=1):
+            if not isinstance(raw, dict):
+                continue
+            url = str(raw.get("imageUrl") or raw.get("image_url") or "").strip()
+            if not url:
+                continue
+            page_number = int(raw.get("pageNumber") or raw.get("page_number") or fallback_index)
+            page_tokens = _reference_tokens(str(raw.get("text") or ""))
+            overlap = query_tokens.intersection(page_tokens)
+            # Prefer meaningful overlap, while retaining stable PDF order as a fallback.
+            score = sum(3 if len(token) >= 8 else 1 for token in overlap)
+            ranked.append((score, page_number, url))
+
+    if ranked:
+        best = sorted(ranked, key=lambda row: (-row[0], row[1]))[: max(1, limit)]
+        # Preserve natural landing-page order once relevance has selected the subset.
+        selected = sorted(best, key=lambda row: row[1])
+        return [row[2] for row in selected], [row[1] for row in selected]
+
+    raw_urls = kb.get("landing_page_reference_page_urls")
+    urls = (
+        [str(url).strip() for url in raw_urls if str(url).strip()]
+        if isinstance(raw_urls, list)
+        else []
+    )
+    return urls[: max(1, limit)], list(range(1, min(len(urls), limit) + 1))
+
+
 def _timecode_seconds(value: str) -> float:
     raw = re.sub(
         r"\s*(?:s|sec|secs|second|seconds)\s*$",
@@ -697,6 +754,46 @@ class HeyGenVideoProvider(VideoGenerationProvider):
                     "numbers; the application will insert the original files full-screen during "
                     "post-production at their exact marked times."
                 )
+        landing_query = "\n".join(
+            (
+                script,
+                production_skeleton,
+                str(_heygen_settings(brief).get("scene_broll_directions") or ""),
+                str(_heygen_settings(brief).get("visual_cues") or ""),
+            )
+        )
+        landing_urls, selected_landing_pages = _rank_landing_page_reference_urls(
+            brief,
+            query=landing_query,
+            limit=8,
+        )
+        landing_files: list[dict] = []
+        remaining_file_slots = max(0, 20 - len(stats_files))
+        if landing_urls and remaining_file_slots:
+            from app.services.heygen_assets import build_heygen_file_attachments
+
+            landing_files = await build_heygen_file_attachments(
+                client,
+                base,
+                headers,
+                landing_urls[: min(8, remaining_file_slots)],
+            )
+            if landing_files:
+                logger.info(
+                    "HeyGen landing-page PDF reference selected pages=%s of %s available",
+                    selected_landing_pages,
+                    len(
+                        (brief.get("key_benefits") or {}).get(
+                            "landing_page_reference_pages", []
+                        )
+                    ),
+                )
+                agent_prompt += (
+                    "\n\nATTACHED LANDING-PAGE PDF PAGES: These are optional visual and factual "
+                    "references for scene planning. Use only a page relevant to the authored scene. "
+                    "Do not read PDF copy aloud unless it is already in the approved spoken script; "
+                    "do not treat these pages as stat/proof cards; do not force them into every scene."
+                )
         agent_prompt = clamp_heygen_v3_prompt(agent_prompt)
         if len(agent_prompt) > HEYGEN_V3_PROMPT_MAX:
             raise ValueError(
@@ -716,8 +813,8 @@ class HeyGenVideoProvider(VideoGenerationProvider):
             "voice_id": voice_id,
             "orientation": orientation,
         }
-        if stats_files:
-            payload["files"] = stats_files
+        if stats_files or landing_files:
+            payload["files"] = [*stats_files, *landing_files]
             logger.info(
                 "HeyGen v3: %s/%s stats image(s) attached; original files will be inserted full-screen",
                 len(stats_files),

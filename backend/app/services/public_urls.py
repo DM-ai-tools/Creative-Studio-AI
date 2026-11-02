@@ -89,6 +89,19 @@ def _url_looks_like_image(url: str) -> bool:
     return any(low.endswith(ext) for ext in _IMAGE_EXTENSIONS)
 
 
+def is_hosted_creative_file_url(url: str) -> bool:
+    """True only for files served from this app (/files/...), not client websites."""
+    u = (url or "").strip()
+    if not u:
+        return False
+    if normalize_stored_file_url(u):
+        return True
+    low = u.lower().split("?", 1)[0]
+    if "/files/" not in low:
+        return False
+    return _url_looks_like_image(u) or _url_looks_like_video(u)
+
+
 def pick_image_and_video_links(
     urls: list[str],
     *,
@@ -107,23 +120,21 @@ def pick_image_and_video_links(
 
     img_raw = extra.get("image_url")
     vid_raw = extra.get("video_url")
-    if img_raw:
+    if img_raw and is_hosted_creative_file_url(str(img_raw)):
         images.append(absolute_media_url(str(img_raw)))
-    if vid_raw:
+    if vid_raw and is_hosted_creative_file_url(str(vid_raw)):
         videos.append(absolute_media_url(str(vid_raw)))
 
     for u in urls:
-        if not u:
+        if not u or not is_hosted_creative_file_url(u):
             continue
         if _url_looks_like_video(u):
             videos.append(u)
         elif _url_looks_like_image(u):
             images.append(u)
-        elif mt == "video" or "video" in op or (prov == "byteplus" and "video" in op):
+        elif mt == "video" or op == "generate_video" or (prov in {"heygen", "byteplus", "runway", "higgsfield"} and "video" in op):
             videos.append(u)
-        elif mt == "image" or "image" in op:
-            images.append(u)
-        else:
+        elif mt == "image" or op == "generate_image" or "image" in op:
             images.append(u)
 
     def _first_unique(items: list[str]) -> str:

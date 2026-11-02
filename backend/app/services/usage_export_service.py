@@ -22,6 +22,7 @@ from app.models.user import User
 from app.models.variant import Variant
 from app.services.public_urls import (
     absolute_media_url,
+    is_hosted_creative_file_url,
     media_urls_from_extra,
     normalize_stored_file_url,
     pick_image_and_video_links,
@@ -84,6 +85,21 @@ _COL_HYPERLINK_HEADERS = (
     "Video link (for manager — click to open)",
     "Creative library (open in app)",
 )
+
+CREATIVES_BY_BRAND_HEADERS = [
+    "Date (UTC)",
+    "User email",
+    "User name",
+    "Brand name",
+    "Format",
+    "Creative type",
+    "Hook",
+    "Image link (click to open)",
+    "Video link (click to open)",
+    "Open in Creative Studio",
+    "Brief ID",
+    "Variant ID",
+]
 
 
 def _uuid_or_none(value: Any) -> UUID | None:
@@ -155,15 +171,16 @@ def _stored_paths_from_extra(extra: dict | None, *, job_urls: dict[str, str]) ->
 def _category(operation: str, provider: str) -> str:
     op = (operation or "").lower()
     prov = (provider or "").lower()
+    if "analyze-reference-image" in op or "analyze_reference" in op:
+        return "LLM / copy"
     if "creative_studio" in op or prov == "byteplus":
         return "Creative Studio"
     if op in {
         "generate_image",
         "hero_ai_image",
-        "analyze_reference_image",
         "creative_studio_image",
         "creative_studio_character_portrait",
-    } or "image" in op:
+    } or ("image" in op and "analyze" not in op):
         return "Image generation"
     if op == "generate_video" or "video" in op:
         return "Video generation"
@@ -187,9 +204,15 @@ def _media_type(operation: str, provider: str, extra: dict | None) -> str:
     if mt in {"image", "video", "text"}:
         return mt.title()
     op = (operation or "").lower()
-    if "video" in op or (extra or {}).get("video_url"):
+    if "analyze-reference-image" in op or "analyze_reference" in op:
+        return "Text"
+    if op == "generate_video" or (extra or {}).get("video_url"):
         return "Video"
-    if "image" in op or (extra or {}).get("image_url"):
+    if op == "generate_image" or (extra or {}).get("image_url"):
+        return "Image"
+    if "video" in op:
+        return "Video"
+    if "image" in op:
         return "Image"
     if prov := (provider or "").lower():
         if prov == "byteplus" and "video" in op:
@@ -312,13 +335,20 @@ def _detail_row(
     if variant_id_str and variant_pipeline_media:
         try:
             pipe = variant_pipeline_media.get(UUID(variant_id_str)) or {}
-            if not image_link and pipe.get("image"):
+            if not image_link and pipe.get("image") and is_hosted_creative_file_url(pipe["image"]):
                 image_link = pipe["image"]
-            if not video_link and pipe.get("video"):
+            if not video_link and pipe.get("video") and is_hosted_creative_file_url(pipe["video"]):
                 video_link = pipe["video"]
         except ValueError:
             pass
     media_type = _media_type(row.operation, row.provider, extra)
+    if media_type == "Image":
+        video_link = ""
+    elif media_type == "Video":
+        image_link = ""
+    elif media_type == "Text":
+        image_link = ""
+        video_link = ""
     if not brand_name and media_type in {"Image", "Video"}:
         brand_name = "Legacy – brand unavailable"
     disk_path = ""
@@ -429,12 +459,17 @@ def _readme_sheet_rows() -> list[list[str]]:
     return [
         ["Usage report — for your reporting manager"],
         [""],
-        ["How to use", "Log in as admin on the live app → Usage & costs → Download Excel → email this file."],
+        ["How to use", "Log in as admin → Usage & costs → Download Excel → email this file."],
+        [
+            "For client / manager reports",
+            "Use the tab «Creatives by brand (manager)» — one row per finished image or video, grouped by brand with working /files/ links.",
+        ],
         ["Image link", f"Blue hyperlink — opens the still in a browser ({origin}/files/...)."],
         ["Video link", f"Blue hyperlink — opens the video in a browser ({origin}/files/...)."],
-        ["Creative library", "Optional — opens that saved creative inside the app (variants page)."],
+        ["Creative library", "Opens that saved creative inside the app (variants page)."],
         [""],
-        ["Production (creativestudio.tools)", "Send Image link + Video link columns only; disk path is left blank on purpose."],
+        ["Usage detail tab", "Technical API log (includes LLM calls). Ignore rows with empty image/video cells."],
+        ["Production (creativestudio.tools)", "Send the «Creatives by brand» tab; disk path is blank on purpose."],
         ["Local development", "Disk path column shows where the file sits under backend/uploads on your PC."],
         [""],
         ["Empty image/video cell?", "That row was text/LLM only, or the file was not recorded yet. Re-export after new work."],
@@ -442,7 +477,94 @@ def _readme_sheet_rows() -> list[list[str]]:
     ]
 
 
-def build_usage_workbook(detail_rows: list[list[Any]]) -> bytes:
+def _pipeline_media_from_variant(params: dict | None) -> tuple[str, str]:
+    pipe = (params or {}).get("pipeline") if isinstance(params, dict) else None
+    if not isinstance(pipe, dict):
+        return "", ""
+    img = absolute_media_url(str((pipe.get("image") or {}).get("url") or ""))
+    vid = absolute_media_url(str((pipe.get("video") or {}).get("url") or ""))
+    if img and not is_hosted_creative_file_url(img):
+        img = ""
+    if vid and not is_hosted_creative_file_url(vid):
+        vid = ""
+    return img, vid
+
+
+def _creative_type_label(fmt: str, image_link: str, video_link: str) -> str:
+    if video_link and image_link:
+        return "Image + video"
+    if video_link or fmt in {"reel", "video"}:
+        return "Video"
+    if image_link or fmt in {"static", "carousel"}:
+        return "Image"
+    return ""
+
+
+async def _load_creatives_by_brand_rows(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime,
+    user_id: UUID | None = None,
+) -> list[list[Any]]:
+    """Finished variants — authoritative list for client/brand managers."""
+    from sqlalchemy.orm import aliased
+
+    Creator = aliased(User)
+    q = (
+        select(Variant, Brand.name, Creator.email, Creator.full_name)
+        .join(Brand, Variant.brand_id == Brand.id)
+        .join(Brief, Variant.brief_id == Brief.id)
+        .outerjoin(Creator, Brief.created_by == Creator.id)
+        .where(Variant.created_at >= since)
+        .where(Variant.created_at <= until)
+        .where(Variant.status.in_(["READY", "APPROVED", "EXPORTED"]))
+    )
+    if not platform and tenant_id:
+        q = q.where(Variant.tenant_id == tenant_id)
+    if user_id is not None:
+        q = q.where(Creator.id == user_id)
+    q = q.order_by(Brand.name.asc(), Variant.created_at.desc())
+
+    rows_out: list[list[Any]] = []
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(q)
+        for variant, brand_name, email, full_name in result.all():
+            img, vid = _pipeline_media_from_variant(variant.generation_params)
+            if not img and not vid:
+                continue
+            ctype = _creative_type_label(variant.format or "", img, vid)
+            created = (
+                variant.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                if variant.created_at
+                else ""
+            )
+            hook = (variant.hook or "")[:120]
+            rows_out.append(
+                [
+                    created,
+                    email or "",
+                    full_name or "",
+                    brand_name or "",
+                    variant.format or "",
+                    ctype,
+                    hook,
+                    img,
+                    vid,
+                    variant_library_url(str(variant.id)),
+                    str(variant.brief_id),
+                    str(variant.id),
+                ]
+            )
+    return rows_out
+
+
+def build_usage_workbook(
+    detail_rows: list[list[Any]],
+    *,
+    creatives_by_brand: list[list[Any]] | None = None,
+) -> bytes:
     wb = Workbook()
     readme = wb.active
     readme.title = "Read me"
@@ -458,6 +580,22 @@ def build_usage_workbook(detail_rows: list[list[Any]]) -> bytes:
     link_cols = [DETAIL_HEADERS.index(h) + 1 for h in _COL_HYPERLINK_HEADERS]
     _add_hyperlinks(ws, url_col_indices=link_cols)
     _autosize_columns(ws)
+
+    manager_rows = creatives_by_brand or []
+    mgr = wb.create_sheet(title="Creatives by brand (manager)", index=2)
+    _write_sheet_headers(mgr, CREATIVES_BY_BRAND_HEADERS)
+    for row in manager_rows:
+        mgr.append(row)
+    mgr_link_cols = [
+        CREATIVES_BY_BRAND_HEADERS.index(h) + 1
+        for h in (
+            "Image link (click to open)",
+            "Video link (click to open)",
+            "Open in Creative Studio",
+        )
+    ]
+    _add_hyperlinks(mgr, url_col_indices=mgr_link_cols)
+    _autosize_columns(mgr)
 
     for title, group_col in (
         ("By user", _COL_USER_EMAIL),
@@ -663,6 +801,13 @@ async def generate_usage_export_xlsx(
         )
         for r in reversed(rows)
     ]
-    content = build_usage_workbook(detail)
+    creatives = await _load_creatives_by_brand_rows(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        user_id=user_id,
+    )
+    content = build_usage_workbook(detail, creatives_by_brand=creatives)
     filename = f"usage-report-{label}.xlsx"
     return content, filename

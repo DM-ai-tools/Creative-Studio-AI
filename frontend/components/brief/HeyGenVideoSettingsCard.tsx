@@ -223,6 +223,18 @@ export default function HeyGenVideoSettingsCard({
           value={String(durationSeconds)}
           onChange={(e) => onDurationChange(Number(e.target.value))}
         />
+        {compact && (
+          <Select
+            label="Video ratio"
+            options={HEYGEN_ASPECT_OPTIONS
+              .filter((option) => option.id === '9:16' || option.id === '16:9')
+              .map((option) => ({ value: option.id, label: option.label }))}
+            value={settings.aspectRatio}
+            onChange={(e) =>
+              patch({ aspectRatio: e.target.value, aspectRatioCustom: '' })
+            }
+          />
+        )}
         {!compact && (
           <>
         <HeyGenSelectWithCustom

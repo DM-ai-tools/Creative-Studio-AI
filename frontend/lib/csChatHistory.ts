@@ -42,7 +42,11 @@ export interface CsChatAttachment {
   url: string
   previewUrl?: string
   mime?: string
-  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof'
+  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' | 'document'
+  /** Extracted text and rendered page previews for an optional landing-page PDF. */
+  documentText?: string
+  documentPageUrls?: string[]
+  documentPageCount?: number
 }
 
 export interface CsChatMessage {

@@ -207,8 +207,14 @@ export default function BriefDetailPage() {
   // Poll quietly while a generation job is active — keep going until ALL target variants
   // are ready (do NOT stop after the first READY variant, or the UI looks stuck at 1/N).
   // Also keep polling PARTIAL when completed_variants < variant_count (mid-batch images).
-  // Stops automatically after POLL_TIMEOUT_MS to prevent infinite loops on stuck jobs.
-  const POLL_TIMEOUT_MS = 15 * 60 * 1000 // 15 minutes
+  // HeyGen Video Agent can take up to ~60 minutes per clip — keep polling longer than stills.
+  const wantsVideoBriefPoll = (brief?.formats ?? []).some((f) => f === 'reel' || f === 'video')
+  const heygenVideoModelPoll =
+    genSettings?.videoModel ||
+    String((brief?.key_benefits as Record<string, unknown> | undefined)?.video_model ?? '')
+  const isHeyGenPollJob =
+    wantsVideoBriefPoll && heygenVideoModelPoll.toLowerCase().startsWith('heygen')
+  const pollTimeoutMs = isHeyGenPollJob ? 65 * 60 * 1000 : 15 * 60 * 1000
   const pollTarget = Math.max(1, Number(brief?.variant_count) || 1)
   const pollReadyCount = (variants ?? []).filter(
     (v) => v.status === 'READY' || v.status === 'APPROVED'
@@ -249,7 +255,7 @@ export default function BriefDetailPage() {
     const tick = () => {
       if (document.visibilityState === 'hidden') return
       // Stop polling if we've exceeded the max wait time.
-      if (pollStartedAtRef.current && Date.now() - pollStartedAtRef.current > POLL_TIMEOUT_MS) {
+      if (pollStartedAtRef.current && Date.now() - pollStartedAtRef.current > pollTimeoutMs) {
         setPollTimedOut(true)
         return
       }
@@ -262,7 +268,7 @@ export default function BriefDetailPage() {
     return () => window.clearInterval(timer)
     // Depend on booleans only — never `variants`/`brief` objects, or each refetch
     // restarts this effect and tick() immediately → terminal spam loop.
-  }, [shouldPollBrief, pollIncomplete, refetchBrief, refetchVariants])
+  }, [shouldPollBrief, pollIncomplete, pollTimeoutMs, refetchBrief, refetchVariants])
 
   // When the job finishes (READY / PARTIAL / FAILED), force one fresh variants fetch
   // so variants 2..N appear even if an earlier poll stopped short.
@@ -704,11 +710,14 @@ export default function BriefDetailPage() {
         {pollTimedOut && (
           <div className="text-sm rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 space-y-2">
             <p className="font-medium text-amber-800">
-              ⏱ The last variant is taking longer than expected — the Runway job may be stuck.
+              ⏱ The last variant is taking longer than expected
+              {wantsVideoBrief && isHeyGen
+                ? ' — HeyGen can take up to about an hour per video when their queue is busy.'
+                : ' — the video job may be stuck.'}
             </p>
             <p className="text-amber-700">
               {brief.completed_variants} of {brief.variant_count} creatives finished.
-              You can keep waiting or reset so you can regenerate the missing variant.
+              You can keep waiting, refresh the page, or reset so you can generate again.
             </p>
             <div className="flex gap-2">
               <Button

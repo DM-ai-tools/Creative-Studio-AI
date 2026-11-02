@@ -41,6 +41,7 @@ type MediaLibraryFilter = 'recent' | 'all' | 'images' | 'videos' | 'audio'
 type MediaLibrarySort = 'newest' | 'oldest' | 'name'
 
 type ChatAttachment = NonNullable<CsChatMessage['attachments']>[number]
+type ImageReferenceRole = Exclude<NonNullable<ChatAttachment['role']>, 'document'>
 type ChatMessage = CsChatMessage
 
 interface Props {
@@ -309,10 +310,12 @@ function buildContinuationRecoveryPayload(args: {
     product_reference_url: args.productReferenceUrl || null,
     logo_reference_url: args.logoReferenceUrl || null,
     additional_reference_urls: args.additionalReferenceUrls,
-    reference_assets: args.referenceAssets.map((asset) => ({
-      url: asset.url,
-      role: asset.role || 'reference',
-    })),
+    reference_assets: args.referenceAssets
+      .filter((asset) => asset.role !== 'document')
+      .map((asset) => ({
+        url: asset.url,
+        role: (asset.role || 'reference') as ImageReferenceRole,
+      })),
     source_brief: args.videoPrompt,
     storyboard_scenes: [],
     storyboard_image_urls: [],
@@ -994,9 +997,22 @@ export default function CreativeStudioTab({
           logo_reference_url: logoReferenceUrl || selectedBrand?.logo_url || '',
           reference_assets: messages
             .flatMap((m) => m.attachments || [])
-            .filter((a) => a.role)
-            .map((a) => ({ url: a.url, role: a.role || 'reference' }))
+            .filter((a) => a.role && a.role !== 'document')
+            .map((a) => ({
+              url: a.url,
+              role: (a.role || 'reference') as ImageReferenceRole,
+            }))
             .slice(0, 9),
+          document_references: messages
+            .flatMap((m) => m.attachments || [])
+            .filter((a) => a.role === 'document')
+            .map((document) => ({
+              name: document.name,
+              pdf_url: document.url,
+              text: document.documentText || '',
+              page_image_urls: (document.documentPageUrls || []).slice(0, 8),
+            }))
+            .slice(0, 3),
         })
         const jobId = res.job_id
         if (!jobId) {
@@ -1482,6 +1498,26 @@ export default function CreativeStudioTab({
     let productAssigned = Boolean(productReferenceUrl)
     for (const file of Array.from(files).slice(0, remaining)) {
       try {
+        if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+          const document = await generationApi.creativeStudioPdfReference(file)
+          setAttachments((prev) => [
+            ...prev,
+            {
+              id: uid(),
+              name: document.name || file.name,
+              url: document.pdf_url,
+              mime: 'application/pdf',
+              role: 'document',
+              documentText: document.text,
+              documentPageUrls: document.pages.map((page) => page.image_url),
+              documentPageCount: document.page_count,
+            },
+          ])
+          toast.success(
+            `Landing-page PDF attached · ${document.page_count} page${document.page_count === 1 ? '' : 's'}`,
+          )
+          continue
+        }
         // Creative Studio attachments are persisted for generation, but must
         // never appear in the image-brief Brand Kit reference library.
         const asset = await assetsApi.upload(
@@ -1773,8 +1809,23 @@ export default function CreativeStudioTab({
       .filter((asset) => asset.role === 'scene' || asset.role === 'character' ||
         asset.role === 'reference' || asset.role === 'proof' ||
         asset.url === turnProductRef || asset.url === turnLogoRef || turnAdditionalRefs.includes(asset.url))
-      .map((asset) => ({ url: asset.url, role: asset.role || 'reference' as const }))
+      .map((asset) => ({
+        url: asset.url,
+        role: (asset.role || 'reference') as ImageReferenceRole,
+      }))
         .slice(0, 9)
+    const documentByUrl = new Map<string, ChatAttachment>()
+    for (const asset of referenceSource) {
+      if (asset.role === 'document' && asset.url) documentByUrl.set(asset.url, asset)
+    }
+    const documentReferences = Array.from(documentByUrl.values())
+      .map((document) => ({
+        name: document.name,
+        pdf_url: document.url,
+        text: document.documentText || '',
+        page_image_urls: (document.documentPageUrls || []).slice(0, 8),
+      }))
+      .slice(0, 3)
     const cloneHasCharacterReference = referenceAssets.some((asset) => asset.role === 'character')
     const boardUrls = (
       opts.storyboardImageUrls ||
@@ -1865,8 +1916,14 @@ export default function CreativeStudioTab({
         sound_on: soundOn,
         speech_mode: speechMode,
         attachment_urls: turnProductRef
-          ? [turnProductRef, ...userAttachments.map((a) => a.url).filter((u) => u !== turnProductRef)]
-          : userAttachments.map((a) => a.url),
+          ? [
+              turnProductRef,
+              ...userAttachments
+                .filter((a) => a.role !== 'document')
+                .map((a) => a.url)
+                .filter((u) => u !== turnProductRef),
+            ]
+          : userAttachments.filter((a) => a.role !== 'document').map((a) => a.url),
         brand_name: effectiveBrandName,
         brand_id: brandId,
         brief_id: briefId,
@@ -1879,6 +1936,7 @@ export default function CreativeStudioTab({
         logo_reference_url: turnLogoRef,
         additional_reference_urls: turnAdditionalRefs,
         reference_assets: referenceAssets,
+        document_references: documentReferences,
         storyboard_image_urls: !promptOnlyVideo && useStoryboardReferences ? boardUrls : [],
         prompt_only_video: promptOnlyVideo,
         preserve_image_text: !promptOnlyVideo,
@@ -2115,13 +2173,31 @@ export default function CreativeStudioTab({
         : {}
       const next = await generationApi.creativeStudioContinueJob(fromMsg.jobId, {
         ...recovery,
-        next_prompt: draftPrompt.trim(),
-        next_reference_assets: draftAttachments
-          .filter((asset) => asset.url)
-          .map((asset) => ({
-            url: asset.url,
-            role: asset.role || 'reference',
-          })),
+        next_prompt:
+          draftPrompt.trim() +
+          draftAttachments
+            .filter((asset) => asset.role === 'document' && asset.documentText)
+            .map(
+              (asset) =>
+                `\n\nOPTIONAL LANDING-PAGE PDF REFERENCE (not spoken copy):\n${(
+                  asset.documentText || ''
+                ).slice(0, 6000)}\nUse only scene-relevant facts and page visuals; preserve the authored dialogue and timing.`,
+            )
+            .join(''),
+        next_reference_assets: draftAttachments.flatMap((asset) => {
+          if (asset.role === 'document') {
+            return (asset.documentPageUrls || []).slice(0, 8).map((url) => ({
+              url,
+              role: 'scene' as const,
+            }))
+          }
+          return asset.url
+            ? [{
+                url: asset.url,
+                role: (asset.role || 'reference') as ImageReferenceRole,
+              }]
+            : []
+        }).slice(0, 9),
         next_reference_mode: continuationReferenceMode,
         next_seed_image_url:
           continuationReferenceMode === 'first_frame' ? firstImage?.url || '' : '',
@@ -2539,7 +2615,10 @@ export default function CreativeStudioTab({
                           <span className="grid h-12 w-12 place-items-center rounded-full border border-white/20 bg-white/5 text-2xl">
                             ↑
                           </span>
-                          <span className="text-sm font-semibold">Upload files</span>
+                          <span className="text-sm font-semibold">Upload image or PDF</span>
+                          <span className="px-2 text-center text-[9px] text-white/45">
+                            Landing-page PDFs are optional scene references
+                          </span>
                         </span>
                       </button>
                     )}
@@ -2677,7 +2756,7 @@ export default function CreativeStudioTab({
 
             <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-t border-white/10 bg-[#17181b]">
               <p className="text-xs text-white/45">
-                {attachments.length} of 9 selected · choose a role for each image
+                {attachments.length} of 9 selected · images use roles; PDFs are optional page references
               </p>
               <button
                 type="button"
@@ -2737,28 +2816,39 @@ export default function CreativeStudioTab({
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={a.previewUrl} alt={a.name} className="h-16 w-16 object-cover" />
               ) : (
-                <div className="h-16 w-28 px-2 flex items-center text-[10px] text-white/70 truncate">
-                  {a.name}
+                <div className="h-16 w-28 px-2 flex flex-col justify-center text-[10px] text-white/70">
+                  <span className="font-semibold truncate">{a.name}</span>
+                  {a.role === 'document' ? (
+                    <span className="mt-1 text-[9px] text-[#b8f000]">
+                      PDF · {a.documentPageCount || 0} pages
+                    </span>
+                  ) : null}
                 </div>
               )}
-              <select
-                value={a.role || 'reference'}
-                onChange={(event) =>
-                  setAttachmentRole(
-                    a,
-                    event.target.value as ChatAttachment['role'],
-                  )
-                }
-                className="mt-1 block w-full max-w-28 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white"
-                title="How this image should be used"
-              >
-                <option value="proof">🔒 Proof (editor only)</option>
-                <option value="product">Product</option>
-                <option value="logo">Brand logo</option>
-                <option value="scene">Scene / location</option>
-                <option value="character">Character</option>
-                <option value="reference">Other reference</option>
-              </select>
+              {a.role === 'document' ? (
+                <div className="mt-1 max-w-28 rounded bg-[#b8f000]/10 px-1 py-0.5 text-center text-[9px] text-[#b8f000]">
+                  Landing-page reference
+                </div>
+              ) : (
+                <select
+                  value={a.role || 'reference'}
+                  onChange={(event) =>
+                    setAttachmentRole(
+                      a,
+                      event.target.value as ChatAttachment['role'],
+                    )
+                  }
+                  className="mt-1 block w-full max-w-28 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white"
+                  title="How this image should be used"
+                >
+                  <option value="proof">🔒 Proof (editor only)</option>
+                  <option value="product">Product</option>
+                  <option value="logo">Brand logo</option>
+                  <option value="scene">Scene / location</option>
+                  <option value="character">Character</option>
+                  <option value="reference">Other reference</option>
+                </select>
+              )}
               <button
                 type="button"
                 onClick={() => removeAttachment(a)}
@@ -2807,7 +2897,7 @@ export default function CreativeStudioTab({
             type="button"
             onClick={() => setImageLibraryOpen(true)}
             className="h-9 w-9 rounded-full border border-white/15 bg-white/5 text-white/80 hover:bg-white/10 text-lg"
-            title="Open uploads and generated media"
+            title="Attach images or an optional landing-page PDF"
           >
             +
           </button>
