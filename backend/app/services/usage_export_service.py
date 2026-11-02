@@ -571,8 +571,127 @@ _LEGACY_BRAND_LABELS = frozenset(
         "legacy – brand unavailable",
         "legacy - brand unavailable",
         "no brand",
+        "(no brand)",
     }
 )
+
+_NO_BRAND_BUCKET = "(no brand)"
+_MAX_HOOK_SAMPLES = 8
+_HOOK_SAMPLE_LEN = 100
+
+
+def _is_placeholder_brand(name: str) -> bool:
+    raw = (name or "").strip()
+    if not raw:
+        return True
+    return raw.lower() in _LEGACY_BRAND_LABELS
+
+
+def _normalize_brand_bucket(name: str) -> str:
+    """Single rollup key for missing/placeholder brand labels."""
+    if _is_placeholder_brand(name):
+        return _NO_BRAND_BUCKET
+    return (name or "").strip()
+
+
+def _infer_brand_from_text(text: str, known_brands: list[str]) -> str:
+    hay = (text or "").strip()
+    if len(hay) < 3 or not known_brands:
+        return ""
+    hay_lower = hay.lower()
+    for brand in sorted({b.strip() for b in known_brands if b and b.strip()}, key=len, reverse=True):
+        if len(brand) < 3:
+            continue
+        if brand.lower() in hay_lower:
+            return brand
+    return ""
+
+
+def _manager_brand_from_context(
+    *,
+    brand_name: str = "",
+    hook: str = "",
+    brief_title: str = "",
+    product_name: str = "",
+    known_brands: list[str],
+) -> tuple[str, bool]:
+    """Return display brand for managers; bool = True when inferred from hook/brief text."""
+    raw = (brand_name or "").strip()
+    if raw and not _is_placeholder_brand(raw):
+        return raw, False
+    for text in (hook, brief_title, product_name):
+        hit = _infer_brand_from_text(text, known_brands)
+        if hit:
+            return hit, True
+    if raw and not _is_placeholder_brand(raw):
+        return raw, False
+    return _NO_BRAND_BUCKET, False
+
+
+def _hook_sample_key(hook: str) -> str:
+    return (hook or "").strip()[: _HOOK_SAMPLE_LEN]
+
+
+async def _load_known_brand_names(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+) -> list[str]:
+    async with AsyncSessionLocal() as db:
+        q = select(Brand.name).where(Brand.name.is_not(None))
+        if not platform and tenant_id:
+            q = q.where(Brand.tenant_id == tenant_id)
+        rows = await db.execute(q)
+        return [str(r[0]).strip() for r in rows.all() if str(r[0] or "").strip()]
+
+
+async def _usage_contributor_maps(
+    *,
+    tenant_id: UUID | None,
+    platform: bool,
+    since: datetime,
+    until: datetime,
+) -> tuple[dict[UUID, set[str]], dict[UUID, set[str]], dict[UUID, str]]:
+    """Map variant/brief -> contributor emails from successful usage in the period."""
+    from app.models.usage_event import UsageEvent
+
+    variant_emails: dict[UUID, set[str]] = {}
+    brief_emails: dict[UUID, set[str]] = {}
+    user_ids: set[UUID] = set()
+    async with AsyncSessionLocal() as db:
+        q = (
+            select(UsageEvent.user_id, UsageEvent.extra)
+            .where(UsageEvent.created_at >= since)
+            .where(UsageEvent.created_at <= until)
+            .where(UsageEvent.success.is_(True))
+            .where(UsageEvent.user_id.is_not(None))
+        )
+        if not platform and tenant_id:
+            q = q.where(UsageEvent.tenant_id == tenant_id)
+        rows = (await db.execute(q)).all()
+    for user_id, extra in rows:
+        if not user_id:
+            continue
+        user_ids.add(user_id)
+        ex = extra or {}
+        vid = _uuid_or_none(ex.get("variant_id"))
+        brief_id = _uuid_or_none(ex.get("brief_id"))
+        if vid:
+            variant_emails.setdefault(vid, set()).add(user_id)
+        if brief_id:
+            brief_emails.setdefault(brief_id, set()).add(user_id)
+    emails_by_user: dict[UUID, str] = {}
+    if user_ids:
+        async with AsyncSessionLocal() as db:
+            urows = await db.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
+            emails_by_user = {row.id: (row.email or "") for row in urows.all()}
+    variant_out: dict[UUID, set[str]] = {}
+    for vid, uids in variant_emails.items():
+        variant_out[vid] = {emails_by_user[uid] for uid in uids if uid in emails_by_user and emails_by_user[uid]}
+    brief_out: dict[UUID, set[str]] = {}
+    for bid, uids in brief_emails.items():
+        brief_out[bid] = {emails_by_user[uid] for uid in uids if uid in emails_by_user and emails_by_user[uid]}
+    return variant_out, brief_out, emails_by_user
 
 
 def _resolve_brand_label(
@@ -584,7 +703,7 @@ def _resolve_brand_label(
     brief_brands: dict[UUID, UUID],
 ) -> str:
     raw = (brand_name or "").strip()
-    if raw and raw.lower() not in _LEGACY_BRAND_LABELS:
+    if raw and not _is_placeholder_brand(raw):
         return raw
     if brand_id and brand_id in brands:
         return brands[brand_id]
@@ -771,8 +890,15 @@ async def _load_creatives_by_brand_rows(
     from sqlalchemy.orm import aliased
 
     Creator = aliased(User)
+    known_brands = await _load_known_brand_names(tenant_id=tenant_id, platform=platform)
+    variant_user_map, brief_user_map, _ = await _usage_contributor_maps(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+    )
     q = (
-        select(Variant, Brand.name, Creator.email, Creator.full_name)
+        select(Variant, Brand.name, Creator.email, Creator.full_name, Brief.title, Brief.product_name)
         .join(Brand, Variant.brand_id == Brand.id)
         .join(Brief, Variant.brief_id == Brief.id)
         .outerjoin(Creator, Brief.created_by == Creator.id)
@@ -808,7 +934,7 @@ async def _load_creatives_by_brand_rows(
     async with AsyncSessionLocal() as db:
         result = await db.execute(q)
         batch = result.all()
-    variant_ids = {v.id for v, _, _, _ in batch}
+    variant_ids = {v.id for v, *_ in batch}
     assets_map = await _asset_urls_by_variant(variant_ids)
     usage_img_map, usage_vid_map = await _usage_media_maps_for_variants(
         variant_ids,
@@ -823,7 +949,7 @@ async def _load_creatives_by_brand_rows(
         since=since,
         until=until,
     )
-    for variant, brand_name, email, full_name in batch:
+    for variant, brand_name, email, full_name, brief_title, product_name in batch:
         img, vid = _pipeline_media_from_variant(
             variant.generation_params,
             asset_urls=assets_map.get(variant.id),
@@ -835,6 +961,10 @@ async def _load_creatives_by_brand_rows(
         has_img, has_vid = _variant_delivery_flags(variant, img, vid)
         if not has_img and not has_vid:
             continue
+        if not (email or "").strip():
+            extra_emails = variant_user_map.get(variant.id) or brief_user_map.get(variant.brief_id) or set()
+            if extra_emails:
+                email = sorted(extra_emails)[0]
         ctype = _creative_type_label(variant.format or "", img, vid)
         if not ctype:
             if has_img and has_vid:
@@ -849,12 +979,19 @@ async def _load_creatives_by_brand_rows(
             else ""
         )
         hook = (variant.hook or "")[:120]
+        display_brand, _ = _manager_brand_from_context(
+            brand_name=brand_name or "",
+            hook=hook,
+            brief_title=brief_title or "",
+            product_name=product_name or "",
+            known_brands=known_brands,
+        )
         rows_out.append(
             [
                 created,
                 email or "",
                 full_name or "",
-                brand_name or "",
+                display_brand,
                 variant.format or "",
                 ctype,
                 hook,
@@ -863,6 +1000,7 @@ async def _load_creatives_by_brand_rows(
                 variant_library_url(str(variant.id)),
                 str(variant.brief_id),
                 str(variant.id),
+                brand_name or "",  # DB brand label (internal rollup / unassigned sheet)
             ]
         )
     return rows_out
@@ -893,7 +1031,7 @@ def build_usage_workbook(
     mgr = wb.create_sheet(title="Creatives by brand (manager)", index=2)
     _write_sheet_headers(mgr, CREATIVES_BY_BRAND_HEADERS)
     for row in manager_rows:
-        mgr.append(row)
+        mgr.append(row[: len(CREATIVES_BY_BRAND_HEADERS)])
     mgr_link_cols = [
         CREATIVES_BY_BRAND_HEADERS.index(h) + 1
         for h in (
@@ -1138,7 +1276,19 @@ BRAND_MANAGER_SUMMARY_HEADERS = [
     "Videos delivered",
     "Total creatives",
     "Contributors (emails)",
+    "Sample hooks / purpose",
     "Est. spend (USD)",
+]
+
+UNASSIGNED_DETAIL_HEADERS = [
+    "Hook / purpose (from creative)",
+    "DB brand label",
+    "Resolved brand",
+    "User email",
+    "Format",
+    "Type",
+    "Open in Creative Studio",
+    "Brief ID",
 ]
 
 
@@ -1150,6 +1300,7 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["How to use", "High-level counts per person and per brand/client — no API noise."],
         ["By user", "How many images/videos each teammate delivered and which clients they touched."],
         ["By brand", "Deliverables and spend rolled up per brand."],
+        ["No brand?", "Hooks and brief titles are scanned for known client names; see «Unassigned by hook»."],
         ["Spend", "Estimated USD from API usage (HeyGen, images, LLM, etc.) in this period."],
         [""],
         ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
@@ -1162,6 +1313,7 @@ def build_summary_workbook(
     overview: list[list[Any]],
     by_user: list[list[Any]],
     by_brand: list[list[Any]],
+    unassigned_by_hook: list[list[Any]] | None = None,
 ) -> bytes:
     wb = Workbook()
     readme = wb.active
@@ -1191,6 +1343,13 @@ def build_summary_workbook(
         br.append(row)
     _autosize_columns(br)
 
+    if unassigned_by_hook:
+        uh = wb.create_sheet("Unassigned by hook", 4)
+        _write_sheet_headers(uh, UNASSIGNED_DETAIL_HEADERS)
+        for row in unassigned_by_hook:
+            uh.append(row)
+        _autosize_columns(uh, max_width=64)
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1204,9 +1363,10 @@ async def _build_manager_summary_tables(
     until: datetime,
     period_label: str,
     user_id: UUID | None = None,
-) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]]]:
+) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]]]:
     from collections import defaultdict
 
+    known_brands = await _load_known_brand_names(tenant_id=tenant_id, platform=platform)
     creatives = await _load_creatives_by_brand_rows(
         tenant_id=tenant_id,
         platform=platform,
@@ -1275,9 +1435,11 @@ async def _build_manager_summary_tables(
             "videos": 0,
             "creatives": 0,
             "users": set(),
+            "hooks": set(),
             "cost": 0.0,
         }
     )
+    unassigned_rows: list[list[Any]] = []
 
     total_images = 0
     total_videos = 0
@@ -1285,7 +1447,8 @@ async def _build_manager_summary_tables(
     for row in creatives:
         email = str(row[1] or "").strip() or "Unknown user"
         name = str(row[2] or "").strip()
-        brand = str(row[3] or "").strip() or "(no brand)"
+        brand = _normalize_brand_bucket(str(row[3] or "").strip())
+        hook = str(row[6] or "").strip()
         img_link = str(row[7] or "").strip()
         vid_link = str(row[8] or "").strip()
         ctype = str(row[5] or "").strip().lower()
@@ -1293,9 +1456,27 @@ async def _build_manager_summary_tables(
         counts_vid = bool(vid_link) or "video" in ctype
         slot_u = user_acc[email]
         slot_u["name"] = slot_u["name"] or name
-        slot_u["brands"].add(brand)
+        if brand != _NO_BRAND_BUCKET:
+            slot_u["brands"].add(brand)
         slot_b = brand_acc[brand]
-        slot_b["users"].add(email)
+        if email != "Unknown user":
+            slot_b["users"].add(email)
+        if hook:
+            slot_b["hooks"].add(_hook_sample_key(hook))
+        if brand == _NO_BRAND_BUCKET and hook:
+            db_brand = str(row[12] if len(row) > 12 else row[3] or "").strip()
+            unassigned_rows.append(
+                [
+                    hook,
+                    db_brand,
+                    brand,
+                    email if email != "Unknown user" else "",
+                    str(row[4] or ""),
+                    str(row[5] or ""),
+                    str(row[9] or ""),
+                    str(row[10] or ""),
+                ]
+            )
         if counts_img or counts_vid:
             slot_u["creatives"] += 1
             slot_b["creatives"] += 1
@@ -1327,7 +1508,13 @@ async def _build_manager_summary_tables(
             brands=brands,
             brief_brands=brief_brands,
         )
-        brand_key = bname or "(no brand)"
+        hook_hint = str(ex.get("hook") or ex.get("prompt") or ex.get("title") or "")[:120]
+        resolved, _ = _manager_brand_from_context(
+            brand_name=bname,
+            hook=hook_hint,
+            known_brands=known_brands,
+        )
+        brand_key = _normalize_brand_bucket(resolved or bname)
         brand_acc[brand_key]["cost"] += cost
 
         kind = _usage_delivery_kind(ev)
@@ -1336,9 +1523,12 @@ async def _build_manager_summary_tables(
         vid = _uuid_or_none(ex.get("variant_id"))
         if vid and vid in variant_ids_in_creatives:
             continue
-        if bname:
-            user_acc[email]["brands"].add(bname)
-            brand_acc[bname]["users"].add(email)
+        if brand_key != _NO_BRAND_BUCKET:
+            user_acc[email]["brands"].add(brand_key)
+        if email != "Unknown user":
+            brand_acc[brand_key]["users"].add(email)
+        if hook_hint:
+            brand_acc[brand_key]["hooks"].add(_hook_sample_key(hook_hint))
         slot_u = user_acc[email]
         slot_b = brand_acc[brand_key]
         slot_u["creatives"] += 1
@@ -1384,8 +1574,9 @@ async def _build_manager_summary_tables(
 
     by_brand_rows: list[list[Any]] = []
     for brand, slot in sorted(brand_acc.items(), key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0])):
-        if brand == "(no brand)" and slot["images"] + slot["videos"] == 0:
+        if brand == _NO_BRAND_BUCKET and slot["images"] + slot["videos"] == 0:
             continue
+        hook_samples = sorted(slot["hooks"])[:_MAX_HOOK_SAMPLES]
         by_brand_rows.append(
             [
                 brand,
@@ -1393,11 +1584,13 @@ async def _build_manager_summary_tables(
                 slot["videos"],
                 slot["creatives"],
                 ", ".join(sorted(u for u in slot["users"] if u)),
+                " | ".join(hook_samples),
                 round(slot["cost"], 4),
             ]
         )
 
-    return overview, by_user_rows, by_brand_rows
+    unassigned_rows.sort(key=lambda r: (r[0] or "").lower())
+    return overview, by_user_rows, by_brand_rows, unassigned_rows
 
 
 async def generate_usage_summary_xlsx(
@@ -1412,7 +1605,7 @@ async def generate_usage_summary_xlsx(
     since, until, label = parse_usage_date_range(
         days=days, date_from=date_from, date_to=date_to
     )
-    overview, by_user, by_brand = await _build_manager_summary_tables(
+    overview, by_user, by_brand, unassigned = await _build_manager_summary_tables(
         tenant_id=tenant_id,
         platform=platform,
         since=since,
@@ -1425,6 +1618,7 @@ async def generate_usage_summary_xlsx(
         overview=overview,
         by_user=by_user,
         by_brand=by_brand,
+        unassigned_by_hook=unassigned,
     )
     filename = f"usage-summary-{label}.xlsx"
     return content, filename

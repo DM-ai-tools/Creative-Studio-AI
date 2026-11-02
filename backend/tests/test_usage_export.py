@@ -10,6 +10,8 @@ from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
     _detail_row,
+    _infer_brand_from_text,
+    _manager_brand_from_context,
     _usage_delivery_kind,
     _variant_delivery_flags,
     build_summary_workbook,
@@ -130,11 +132,13 @@ def test_summary_workbook_has_user_and_brand_sheets():
         period_label="last 7 days",
         overview=[["Total videos delivered", 3]],
         by_user=[["a@test.com", "A", 1, 2, 2, "Brand X", 4.5, 10]],
-        by_brand=[["Brand X", 1, 2, 2, "a@test.com", 4.5]],
+        by_brand=[["Brand X", 1, 2, 2, "a@test.com", "Hook line", 4.5]],
+        unassigned_by_hook=[["Summer sale hook", "No brand", "(no brand)", "a@test.com", "static", "Image", "https://x", "brief-1"]],
     )
     workbook = load_workbook(io.BytesIO(content))
     assert "By user" in workbook.sheetnames
     assert "By brand" in workbook.sheetnames
+    assert "Unassigned by hook" in workbook.sheetnames
     assert workbook["By user"].cell(row=2, column=4).value == 2
 
 
@@ -143,6 +147,18 @@ def test_usage_delivery_kind_counts_image_and_video():
     assert _usage_delivery_kind(_usage_row(operation="generate_video", provider="heygen")) == "video"
     assert _usage_delivery_kind(_usage_row(operation="llm_chat", provider="openrouter")) is None
     assert _usage_delivery_kind(_usage_row(operation="analyze-reference-image", success=True)) is None
+
+
+def test_infer_brand_from_hook_text():
+    brands = ["Pickle Juice Australia", "Traffic Radius", "Spar Club"]
+    assert _infer_brand_from_text("Stop scrolling — Pickle Juice Australia hydration", brands) == "Pickle Juice Australia"
+    label, inferred = _manager_brand_from_context(
+        brand_name="No brand",
+        hook="New reel for Traffic Radius local ads",
+        known_brands=brands,
+    )
+    assert inferred is True
+    assert label == "Traffic Radius"
 
 
 def test_variant_delivery_flags_without_public_url():
