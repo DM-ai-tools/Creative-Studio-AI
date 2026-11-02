@@ -1325,6 +1325,13 @@ NO_BRAND_BY_PERSON_HEADERS = [
     "Example links (Creative Studio)",
 ]
 
+API_ONLY_NO_BRAND_HEADERS = [
+    "User",
+    "API image calls",
+    "API video calls",
+    "Note",
+]
+
 UNASSIGNED_DETAIL_HEADERS = [
     "User",
     "Brief title",
@@ -1342,11 +1349,11 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["Usage summary — for reporting managers"],
         [""],
         ["Period", period_label],
-        ["How to use", "High-level counts per person and per brand/client — no API noise."],
-        ["By user", "How many images/videos each teammate delivered and which clients they touched."],
-        ["By brand", "Deliverables and spend rolled up per brand."],
-        ["No brand?", "See «No brand by person» (who did what) and «No brand detail» (each creative line)."],
-        ["Spend", "Estimated USD from API usage (HeyGen, images, LLM, etc.) in this period."],
+        ["How to use", "Deliverable counts = finished work in Creative library (READY variants only)."],
+        ["By user / By brand", "Images & videos are library deliverables — not raw API call counts."],
+        ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
+        ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
+        ["Spend", "Estimated USD from all API usage (HeyGen, images, LLM, etc.) in this period."],
         [""],
         ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
     ]
@@ -1360,6 +1367,7 @@ def build_summary_workbook(
     by_brand: list[list[Any]],
     unassigned_by_hook: list[list[Any]] | None = None,
     no_brand_by_person: list[list[Any]] | None = None,
+    api_only_no_brand: list[list[Any]] | None = None,
 ) -> bytes:
     wb = Workbook()
     readme = wb.active
@@ -1400,10 +1408,18 @@ def build_summary_workbook(
 
     if unassigned_by_hook:
         uh = wb.create_sheet("No brand detail", sheet_idx)
+        sheet_idx += 1
         _write_sheet_headers(uh, UNASSIGNED_DETAIL_HEADERS)
         for row in unassigned_by_hook:
             uh.append(row)
         _autosize_columns(uh, max_width=64)
+
+    if api_only_no_brand:
+        ao = wb.create_sheet("API only (no library)", sheet_idx)
+        _write_sheet_headers(ao, API_ONLY_NO_BRAND_HEADERS)
+        for row in api_only_no_brand:
+            ao.append(row)
+        _autosize_columns(ao, max_width=56)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -1418,7 +1434,14 @@ async def _build_manager_summary_tables(
     until: datetime,
     period_label: str,
     user_id: UUID | None = None,
-) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]]]:
+) -> tuple[
+    list[list[Any]],
+    list[list[Any]],
+    list[list[Any]],
+    list[list[Any]],
+    list[list[Any]],
+    list[list[Any]],
+]:
     from collections import defaultdict
 
     known_brands = await _load_known_brand_names(tenant_id=tenant_id, platform=platform)
@@ -1506,6 +1529,8 @@ async def _build_manager_summary_tables(
         }
     )
     no_brand_totals = {"images": 0, "videos": 0, "creatives": 0}
+    api_no_brand_person: dict[str, dict[str, int]] = defaultdict(lambda: {"images": 0, "videos": 0})
+    api_no_brand_total = {"images": 0, "videos": 0}
 
     total_images = 0
     total_videos = 0
@@ -1615,19 +1640,15 @@ async def _build_manager_summary_tables(
             brand_acc[brand_key]["users"].add(email)
         if hook_hint:
             brand_acc[brand_key]["hooks"].add(_hook_sample_key(hook_hint))
-        slot_u = user_acc[email]
-        slot_b = brand_acc[brand_key]
-        slot_u["creatives"] += 1
-        slot_b["creatives"] += 1
-        total_creatives += 1
-        if kind == "image":
-            slot_u["images"] += 1
-            slot_b["images"] += 1
-            total_images += 1
-        else:
-            slot_u["videos"] += 1
-            slot_b["videos"] += 1
-            total_videos += 1
+        # Deliverable counts come from library variants only — track API-only for reconciliation.
+        if brand_key == _NO_BRAND_BUCKET:
+            person = _summary_user_display(user_acc[email]["name"], email)
+            if kind == "image":
+                api_no_brand_person[person]["images"] += 1
+                api_no_brand_total["images"] += 1
+            else:
+                api_no_brand_person[person]["videos"] += 1
+                api_no_brand_total["videos"] += 1
 
     total_cost = round(sum(effective_cost_usd(r) for r in usage_rows), 4)
     overview = [
@@ -1640,7 +1661,11 @@ async def _build_manager_summary_tables(
         ["Active users (with API usage)", len(user_acc)],
         ["Est. total spend (USD)", total_cost],
         ["Total API calls logged", len(usage_rows)],
-        ["Creatives without client (no brand)", no_brand_totals["creatives"]],
+        ["Library creatives without client (no brand)", no_brand_totals["creatives"]],
+        [
+            "API image/video calls without library row (no brand)",
+            api_no_brand_total["images"] + api_no_brand_total["videos"],
+        ],
     ]
     by_user_rows: list[list[Any]] = []
     for email, slot in sorted(user_acc.items(), key=lambda x: (-x[1]["cost"], x[0])):
@@ -1661,12 +1686,27 @@ async def _build_manager_summary_tables(
         email: _summary_user_display(slot["name"], email) for email, slot in user_acc.items()
     }
 
+    # Keep (no brand) deliverable totals aligned with «No brand by person» / detail sheets.
+    if _NO_BRAND_BUCKET in brand_acc or no_brand_person:
+        nb_slot = brand_acc[_NO_BRAND_BUCKET]
+        nb_slot["images"] = sum(p["images"] for p in no_brand_person.values())
+        nb_slot["videos"] = sum(p["videos"] for p in no_brand_person.values())
+        nb_slot["creatives"] = sum(p["creatives"] for p in no_brand_person.values())
+        nb_hooks: set[str] = set()
+        for p in no_brand_person.values():
+            nb_hooks |= p["hooks"]
+        if nb_hooks:
+            nb_slot["hooks"] = nb_hooks
+
     by_brand_rows: list[list[Any]] = []
     for brand, slot in sorted(brand_acc.items(), key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0])):
-        if brand == _NO_BRAND_BUCKET and slot["images"] + slot["videos"] == 0:
+        if brand == _NO_BRAND_BUCKET and slot["images"] + slot["videos"] == 0 and slot["cost"] <= 0:
             continue
         hook_samples = sorted(slot["hooks"])[:_MAX_HOOK_SAMPLES]
-        people = sorted({email_to_person.get(u, u) for u in slot["users"] if u})
+        if brand == _NO_BRAND_BUCKET:
+            people = sorted(no_brand_person.keys())
+        else:
+            people = sorted({email_to_person.get(u, u) for u in slot["users"] if u})
         by_brand_rows.append(
             [
                 brand,
@@ -1696,8 +1736,31 @@ async def _build_manager_summary_tables(
             ]
         )
 
+    api_only_rows: list[list[Any]] = []
+    for person, counts in sorted(
+        api_no_brand_person.items(),
+        key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0]),
+    ):
+        if counts["images"] + counts["videos"] == 0:
+            continue
+        api_only_rows.append(
+            [
+                person,
+                counts["images"],
+                counts["videos"],
+                "API generation logged — not a READY variant in library (see full Excel for raw events).",
+            ]
+        )
+
     unassigned_rows.sort(key=lambda r: ((r[0] or "").lower(), (r[1] or "").lower()))
-    return overview, by_user_rows, by_brand_rows, unassigned_rows, no_brand_by_person_rows
+    return (
+        overview,
+        by_user_rows,
+        by_brand_rows,
+        unassigned_rows,
+        no_brand_by_person_rows,
+        api_only_rows,
+    )
 
 
 async def generate_usage_summary_xlsx(
@@ -1712,7 +1775,7 @@ async def generate_usage_summary_xlsx(
     since, until, label = parse_usage_date_range(
         days=days, date_from=date_from, date_to=date_to
     )
-    overview, by_user, by_brand, unassigned, no_brand_people = await _build_manager_summary_tables(
+    overview, by_user, by_brand, unassigned, no_brand_people, api_only = await _build_manager_summary_tables(
         tenant_id=tenant_id,
         platform=platform,
         since=since,
@@ -1727,6 +1790,7 @@ async def generate_usage_summary_xlsx(
         by_brand=by_brand,
         unassigned_by_hook=unassigned,
         no_brand_by_person=no_brand_people,
+        api_only_no_brand=api_only,
     )
     filename = f"usage-summary-{label}.xlsx"
     return content, filename
