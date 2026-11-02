@@ -132,13 +132,15 @@ def test_summary_workbook_has_user_and_brand_sheets():
         period_label="last 7 days",
         overview=[["Total videos delivered", 3]],
         by_user=[["Alex", 1, 2, 2, "Brand X", 4.5, 10]],
-        by_brand=[["Brand X", 1, 2, 2, "a@test.com", "Hook line", 4.5]],
-        unassigned_by_hook=[["Summer sale hook", "No brand", "(no brand)", "a@test.com", "static", "Image", "https://x", "brief-1"]],
+        by_brand=[["Brand X", 1, 2, 2, "Alex", "Hook line", 4.5]],
+        unassigned_by_hook=[["Alex", "Summer campaign", "Juice", "Summer sale hook", "static", "Image", "https://x", "brief-1"]],
+        no_brand_by_person=[["Alex", 10, 2, 12, "Summer campaign", "Hook one", "https://x"]],
     )
     workbook = load_workbook(io.BytesIO(content))
     assert "By user" in workbook.sheetnames
     assert "By brand" in workbook.sheetnames
-    assert "Unassigned by hook" in workbook.sheetnames
+    assert "No brand detail" in workbook.sheetnames
+    assert "No brand by person" in workbook.sheetnames
     assert workbook["By user"].cell(row=1, column=1).value == "User"
     assert workbook["By user"].cell(row=2, column=3).value == 2
 

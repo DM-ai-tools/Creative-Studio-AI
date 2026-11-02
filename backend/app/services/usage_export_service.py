@@ -594,6 +594,17 @@ def _normalize_brand_bucket(name: str) -> str:
     return (name or "").strip()
 
 
+def _brand_hints_from_params(params: dict | None) -> str:
+    if not isinstance(params, dict):
+        return ""
+    chunks: list[str] = []
+    for key in ("brand_name", "client_name", "brand", "client"):
+        raw = params.get(key)
+        if raw:
+            chunks.append(str(raw))
+    return " ".join(chunks)
+
+
 def _infer_brand_from_text(text: str, known_brands: list[str]) -> str:
     hay = (text or "").strip()
     if len(hay) < 3 or not known_brands:
@@ -979,9 +990,20 @@ async def _load_creatives_by_brand_rows(
             else ""
         )
         hook = (variant.hook or "")[:120]
+        params = variant.generation_params if isinstance(variant.generation_params, dict) else {}
+        hook_context = " ".join(
+            p
+            for p in (
+                hook,
+                brief_title or "",
+                product_name or "",
+                _brand_hints_from_params(params),
+            )
+            if p
+        ).strip()
         display_brand, _ = _manager_brand_from_context(
             brand_name=brand_name or "",
-            hook=hook,
+            hook=hook_context,
             brief_title=brief_title or "",
             product_name=product_name or "",
             known_brands=known_brands,
@@ -1001,6 +1023,8 @@ async def _load_creatives_by_brand_rows(
                 str(variant.brief_id),
                 str(variant.id),
                 brand_name or "",  # DB brand label (internal rollup / unassigned sheet)
+                (brief_title or "")[:120],
+                (product_name or "")[:120],
             ]
         )
     return rows_out
@@ -1286,16 +1310,26 @@ BRAND_MANAGER_SUMMARY_HEADERS = [
     "Images delivered",
     "Videos delivered",
     "Total creatives",
-    "Contributors (emails)",
+    "Contributors",
     "Sample hooks / purpose",
     "Est. spend (USD)",
 ]
 
+NO_BRAND_BY_PERSON_HEADERS = [
+    "User",
+    "Images",
+    "Videos",
+    "Total creatives",
+    "Sample brief titles",
+    "Sample hooks / purpose",
+    "Example links (Creative Studio)",
+]
+
 UNASSIGNED_DETAIL_HEADERS = [
-    "Hook / purpose (from creative)",
-    "DB brand label",
-    "Resolved brand",
-    "User email",
+    "User",
+    "Brief title",
+    "Product (brief)",
+    "Hook / purpose",
     "Format",
     "Type",
     "Open in Creative Studio",
@@ -1311,7 +1345,7 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["How to use", "High-level counts per person and per brand/client — no API noise."],
         ["By user", "How many images/videos each teammate delivered and which clients they touched."],
         ["By brand", "Deliverables and spend rolled up per brand."],
-        ["No brand?", "Hooks and brief titles are scanned for known client names; see «Unassigned by hook»."],
+        ["No brand?", "See «No brand by person» (who did what) and «No brand detail» (each creative line)."],
         ["Spend", "Estimated USD from API usage (HeyGen, images, LLM, etc.) in this period."],
         [""],
         ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
@@ -1325,6 +1359,7 @@ def build_summary_workbook(
     by_user: list[list[Any]],
     by_brand: list[list[Any]],
     unassigned_by_hook: list[list[Any]] | None = None,
+    no_brand_by_person: list[list[Any]] | None = None,
 ) -> bytes:
     wb = Workbook()
     readme = wb.active
@@ -1354,8 +1389,17 @@ def build_summary_workbook(
         br.append(row)
     _autosize_columns(br)
 
+    sheet_idx = 4
+    if no_brand_by_person:
+        np = wb.create_sheet("No brand by person", sheet_idx)
+        sheet_idx += 1
+        _write_sheet_headers(np, NO_BRAND_BY_PERSON_HEADERS)
+        for row in no_brand_by_person:
+            np.append(row)
+        _autosize_columns(np, max_width=64)
+
     if unassigned_by_hook:
-        uh = wb.create_sheet("Unassigned by hook", 4)
+        uh = wb.create_sheet("No brand detail", sheet_idx)
         _write_sheet_headers(uh, UNASSIGNED_DETAIL_HEADERS)
         for row in unassigned_by_hook:
             uh.append(row)
@@ -1374,7 +1418,7 @@ async def _build_manager_summary_tables(
     until: datetime,
     period_label: str,
     user_id: UUID | None = None,
-) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]]]:
+) -> tuple[list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]], list[list[Any]]]:
     from collections import defaultdict
 
     known_brands = await _load_known_brand_names(tenant_id=tenant_id, platform=platform)
@@ -1451,6 +1495,17 @@ async def _build_manager_summary_tables(
         }
     )
     unassigned_rows: list[list[Any]] = []
+    no_brand_person: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "images": 0,
+            "videos": 0,
+            "creatives": 0,
+            "titles": set(),
+            "hooks": set(),
+            "links": set(),
+        }
+    )
+    no_brand_totals = {"images": 0, "videos": 0, "creatives": 0}
 
     total_images = 0
     total_videos = 0
@@ -1474,17 +1529,37 @@ async def _build_manager_summary_tables(
             slot_b["users"].add(email)
         if hook:
             slot_b["hooks"].add(_hook_sample_key(hook))
-        if brand == _NO_BRAND_BUCKET and hook:
-            db_brand = str(row[12] if len(row) > 12 else row[3] or "").strip()
+        person = _summary_user_display(name, email)
+        brief_title = str(row[13] if len(row) > 13 else "").strip()
+        product_name = str(row[14] if len(row) > 14 else "").strip()
+        if brand == _NO_BRAND_BUCKET and (counts_img or counts_vid):
+            no_brand_totals["creatives"] += 1
+            if counts_img:
+                no_brand_totals["images"] += 1
+            if counts_vid:
+                no_brand_totals["videos"] += 1
+            ps = no_brand_person[person]
+            ps["creatives"] += 1
+            if counts_img:
+                ps["images"] += 1
+            if counts_vid:
+                ps["videos"] += 1
+            if brief_title:
+                ps["titles"].add(brief_title[:80])
+            if hook:
+                ps["hooks"].add(_hook_sample_key(hook))
+            link = str(row[9] or "").strip()
+            if link and len(ps["links"]) < 5:
+                ps["links"].add(link)
             unassigned_rows.append(
                 [
+                    person,
+                    brief_title,
+                    product_name,
                     hook,
-                    db_brand,
-                    brand,
-                    email if email != "Unknown user" else "",
                     str(row[4] or ""),
                     str(row[5] or ""),
-                    str(row[9] or ""),
+                    link,
                     str(row[10] or ""),
                 ]
             )
@@ -1565,8 +1640,8 @@ async def _build_manager_summary_tables(
         ["Active users (with API usage)", len(user_acc)],
         ["Est. total spend (USD)", total_cost],
         ["Total API calls logged", len(usage_rows)],
+        ["Creatives without client (no brand)", no_brand_totals["creatives"]],
     ]
-    # Fix total creatives line - use len(creatives)
     by_user_rows: list[list[Any]] = []
     for email, slot in sorted(user_acc.items(), key=lambda x: (-x[1]["cost"], x[0])):
         brands_list = ", ".join(sorted(b for b in slot["brands"] if b))
@@ -1582,25 +1657,47 @@ async def _build_manager_summary_tables(
             ]
         )
 
+    email_to_person = {
+        email: _summary_user_display(slot["name"], email) for email, slot in user_acc.items()
+    }
+
     by_brand_rows: list[list[Any]] = []
     for brand, slot in sorted(brand_acc.items(), key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0])):
         if brand == _NO_BRAND_BUCKET and slot["images"] + slot["videos"] == 0:
             continue
         hook_samples = sorted(slot["hooks"])[:_MAX_HOOK_SAMPLES]
+        people = sorted({email_to_person.get(u, u) for u in slot["users"] if u})
         by_brand_rows.append(
             [
                 brand,
                 slot["images"],
                 slot["videos"],
                 slot["creatives"],
-                ", ".join(sorted(u for u in slot["users"] if u)),
+                ", ".join(people),
                 " | ".join(hook_samples),
                 round(slot["cost"], 4),
             ]
         )
 
-    unassigned_rows.sort(key=lambda r: (r[0] or "").lower())
-    return overview, by_user_rows, by_brand_rows, unassigned_rows
+    no_brand_by_person_rows: list[list[Any]] = []
+    for person, ps in sorted(
+        no_brand_person.items(),
+        key=lambda x: (-(x[1]["images"] + x[1]["videos"]), x[0]),
+    ):
+        no_brand_by_person_rows.append(
+            [
+                person,
+                ps["images"],
+                ps["videos"],
+                ps["creatives"],
+                " | ".join(sorted(ps["titles"])[:5]),
+                " | ".join(sorted(ps["hooks"])[:5]),
+                " | ".join(sorted(ps["links"])[:5]),
+            ]
+        )
+
+    unassigned_rows.sort(key=lambda r: ((r[0] or "").lower(), (r[1] or "").lower()))
+    return overview, by_user_rows, by_brand_rows, unassigned_rows, no_brand_by_person_rows
 
 
 async def generate_usage_summary_xlsx(
@@ -1615,7 +1712,7 @@ async def generate_usage_summary_xlsx(
     since, until, label = parse_usage_date_range(
         days=days, date_from=date_from, date_to=date_to
     )
-    overview, by_user, by_brand, unassigned = await _build_manager_summary_tables(
+    overview, by_user, by_brand, unassigned, no_brand_people = await _build_manager_summary_tables(
         tenant_id=tenant_id,
         platform=platform,
         since=since,
@@ -1629,6 +1726,7 @@ async def generate_usage_summary_xlsx(
         by_user=by_user,
         by_brand=by_brand,
         unassigned_by_hook=unassigned,
+        no_brand_by_person=no_brand_people,
     )
     filename = f"usage-summary-{label}.xlsx"
     return content, filename
