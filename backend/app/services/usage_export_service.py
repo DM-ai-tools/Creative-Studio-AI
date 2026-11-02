@@ -752,6 +752,26 @@ def _resolve_brand_label(
     return ""
 
 
+def _usage_media_cost_usd(ev: Any) -> float:
+    """USD to show on By brand — image/video generation only (not LLM / scrape / chat)."""
+    if not getattr(ev, "success", False):
+        return 0.0
+    if _usage_delivery_kind(ev):
+        return effective_cost_usd(ev)
+    cat = _category(
+        getattr(ev, "operation", "") or "",
+        getattr(ev, "provider", "") or "",
+    )
+    if cat in {"Image generation", "Video generation", "HeyGen", "Higgsfield"}:
+        return effective_cost_usd(ev)
+    op = (getattr(ev, "operation", "") or "").lower()
+    if cat == "Creative Studio" and any(k in op for k in ("video", "image", "broll", "seedance")):
+        return effective_cost_usd(ev)
+    if is_byteplus_seedance_row(ev):
+        return effective_cost_usd(ev)
+    return 0.0
+
+
 def _usage_delivery_kind(ev: Any) -> str | None:
     """Successful image/video generation (excludes LLM-only rows)."""
     if not getattr(ev, "success", False):
@@ -1342,7 +1362,7 @@ BRAND_MANAGER_SUMMARY_HEADERS = [
     "Total creatives",
     "Contributors",
     "Sample hooks / purpose",
-    "Est. spend (USD)",
+    "Est. spend — media only (USD)",
 ]
 
 NO_BRAND_BY_PERSON_HEADERS = [
@@ -1384,7 +1404,8 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
         ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
-        ["Spend", "Estimated USD from all API usage (HeyGen, images, LLM, etc.) in this period."],
+        ["Spend on By brand", "Media generation only (image/video/HeyGen/Seedance) — not LLM or chat."],
+        ["Spend on By user / Overview", "All API usage including LLM, scrapes, and retries."],
         [""],
         ["Detail links", "Use «Download Excel (full report)» for clickable image/video URLs per creative."],
     ]
@@ -1640,6 +1661,7 @@ async def _build_manager_summary_tables(
             user_acc[email]["name"] = user_acc[email]["name"] or (u.full_name or "")
         email = email or "Unknown user"
         cost = effective_cost_usd(ev)
+        media_cost = _usage_media_cost_usd(ev)
         user_acc[email]["cost"] += cost
         user_acc[email]["calls"] += 1
         ex = ev.extra or {}
@@ -1657,7 +1679,7 @@ async def _build_manager_summary_tables(
             known_brands=known_brands,
         )
         brand_key = _normalize_brand_bucket(resolved or bname)
-        brand_acc[brand_key]["cost"] += cost
+        brand_acc[brand_key]["cost"] += media_cost
 
         kind = _usage_delivery_kind(ev)
         if not kind:

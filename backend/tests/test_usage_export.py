@@ -13,6 +13,7 @@ from app.services.usage_export_service import (
     _infer_brand_from_text,
     _manager_brand_from_context,
     _usage_delivery_kind,
+    _usage_media_cost_usd,
     _variant_delivery_flags,
     build_summary_workbook,
     build_usage_workbook,
@@ -143,6 +144,13 @@ def test_summary_workbook_has_user_and_brand_sheets():
     assert "No brand by person" in workbook.sheetnames
     assert workbook["By user"].cell(row=1, column=1).value == "User"
     assert workbook["By user"].cell(row=2, column=3).value == 2
+
+
+def test_usage_media_cost_excludes_llm():
+    llm = _usage_row(operation="llm_chat", provider="openrouter", cost_usd=5.0)
+    img = _usage_row(operation="generate_image", provider="openai", cost_usd=0.12)
+    assert _usage_media_cost_usd(llm) == 0.0
+    assert _usage_media_cost_usd(img) == 0.12
 
 
 def test_usage_delivery_kind_counts_image_and_video():
