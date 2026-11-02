@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
+    _assign_pending_media_spend,
     _detail_row,
     _infer_brand_from_text,
     _manager_brand_from_context,
@@ -137,7 +138,7 @@ def test_summary_workbook_has_user_and_brand_sheets():
     content = build_summary_workbook(
         period_label="last 7 days",
         overview=[["Total videos delivered", 3]],
-        by_user=[["Alex", 1, 2, 2, "Brand X", 4.5, 10]],
+        by_user=[["Alex", 1, 2, 2, "Brand X", 1.2, 4.5, 10]],
         by_brand=[["Brand X", 1, 2, 2, "Alex", "Hook line", 4.5]],
         unassigned_by_hook=[["Alex", "Summer campaign", "Juice", "Summer sale hook", "static", "Image", "https://x", "brief-1"]],
         no_brand_by_person=[["Alex", 10, 2, 12, "Summer campaign", "Hook one", "https://x"]],
@@ -203,6 +204,22 @@ def test_seedance_actor_from_brief_owner():
     )
     assert email == "pratiti@example.com"
     assert name == "Pratiti"
+
+
+def test_pending_image_spend_splits_to_library_brands():
+    brand_acc = {
+        "(no brand)": {"cost": 0.0, "images": 0, "videos": 0, "creatives": 0, "users": set(), "hooks": set()},
+        "Spar Club": {"cost": 0.0, "images": 24, "videos": 0, "creatives": 24, "users": set(), "hooks": set()},
+        "Pickle Juice Australia": {"cost": 0.0, "images": 14, "videos": 0, "creatives": 14, "users": set(), "hooks": set()},
+    }
+    _assign_pending_media_spend(
+        brand_acc,
+        pending_by_user={"pratiti@x.com": {"image": 1.0, "video": 0.0}},
+        user_brand_images={"pratiti@x.com": {"Spar Club": 24, "Pickle Juice Australia": 14}},
+        user_brand_videos={},
+    )
+    assert round(brand_acc["Spar Club"]["cost"], 4) == round(1.0 * 24 / 38, 4)
+    assert brand_acc["(no brand)"]["cost"] == 0.0
 
 
 def test_image_cost_dedup_keys_differ_per_output():
