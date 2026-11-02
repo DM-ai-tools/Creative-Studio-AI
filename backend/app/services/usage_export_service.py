@@ -1259,9 +1259,20 @@ async def generate_usage_export_xlsx(
     return content, filename
 
 
+def _summary_user_display(name: str, email: str) -> str:
+    label = (name or "").strip()
+    if label:
+        return label
+    if email and email != "Unknown user" and "@" in email:
+        local = email.split("@", 1)[0].replace(".", " ").replace("_", " ")
+        return local.title()
+    if email and email != "Unknown user":
+        return email
+    return "Unknown"
+
+
 USER_MANAGER_SUMMARY_HEADERS = [
-    "User email",
-    "User name",
+    "User",
     "Images delivered",
     "Videos delivered",
     "Total creatives",
@@ -1561,8 +1572,7 @@ async def _build_manager_summary_tables(
         brands_list = ", ".join(sorted(b for b in slot["brands"] if b))
         by_user_rows.append(
             [
-                email,
-                slot["name"],
+                _summary_user_display(slot["name"], email),
                 slot["images"],
                 slot["videos"],
                 slot["creatives"],

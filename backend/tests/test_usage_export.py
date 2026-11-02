@@ -131,7 +131,7 @@ def test_summary_workbook_has_user_and_brand_sheets():
     content = build_summary_workbook(
         period_label="last 7 days",
         overview=[["Total videos delivered", 3]],
-        by_user=[["a@test.com", "A", 1, 2, 2, "Brand X", 4.5, 10]],
+        by_user=[["Alex", 1, 2, 2, "Brand X", 4.5, 10]],
         by_brand=[["Brand X", 1, 2, 2, "a@test.com", "Hook line", 4.5]],
         unassigned_by_hook=[["Summer sale hook", "No brand", "(no brand)", "a@test.com", "static", "Image", "https://x", "brief-1"]],
     )
@@ -139,7 +139,8 @@ def test_summary_workbook_has_user_and_brand_sheets():
     assert "By user" in workbook.sheetnames
     assert "By brand" in workbook.sheetnames
     assert "Unassigned by hook" in workbook.sheetnames
-    assert workbook["By user"].cell(row=2, column=4).value == 2
+    assert workbook["By user"].cell(row=1, column=1).value == "User"
+    assert workbook["By user"].cell(row=2, column=3).value == 2
 
 
 def test_usage_delivery_kind_counts_image_and_video():
