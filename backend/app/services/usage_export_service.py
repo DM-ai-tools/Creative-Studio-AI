@@ -759,6 +759,29 @@ def _is_gemini_omni_video_row(ev: Any) -> bool:
     return prov == "google" and "omni" in model and op == "video_generation"
 
 
+def _is_automation_service_email(email: str) -> bool:
+    """Shared login used by Seedance/Omni workers — not a person on By user."""
+    e = (email or "").strip().lower()
+    if not e:
+        return False
+    return "seedance" in e and "creativestudio.tools" in e
+
+
+def _usage_has_successful_media_output(ev: Any) -> bool:
+    """Count API deliverables only when a file URL was recorded (success with output)."""
+    if not getattr(ev, "success", False):
+        return False
+    ex = getattr(ev, "extra", None) or {}
+    if media_urls_from_extra(ex):
+        return True
+    if ex.get("video_url") or ex.get("image_url"):
+        return True
+    raw_urls = ex.get("output_urls")
+    if isinstance(raw_urls, list) and any(str(u or "").strip() for u in raw_urls):
+        return True
+    return False
+
+
 def _usage_delivery_dedup_key(ev: Any) -> str:
     ex = getattr(ev, "extra", None) or {}
     for key in ("job_id", "task_id", "interaction_id"):
@@ -785,7 +808,9 @@ def _resolve_usage_actor(
             return (u.email or "").strip(), (u.full_name or "").strip()
     if ev.user_id and ev.user_id in users:
         u = users[ev.user_id]
-        return (u.email or "").strip(), (u.full_name or "").strip()
+        email = (u.email or "").strip()
+        if email and not _is_automation_service_email(email):
+            return email, (u.full_name or "").strip()
     return "", ""
 
 
@@ -825,7 +850,9 @@ def _usage_delivery_kind(ev: Any) -> str | None:
     if mt == "Video":
         return "video"
     if is_byteplus_seedance_row(ev) or _is_gemini_omni_video_row(ev):
-        return "video"
+        if _usage_has_successful_media_output(ev):
+            return "video"
+        return None
     return None
 
 
@@ -1439,9 +1466,10 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         ["How to use", "Deliverable counts = finished work in Creative library (READY variants only)."],
         [
             "Videos delivered",
-            "Library READY rows + finished Seedance / Gemini Omni / HeyGen clips (deduped by job).",
+            "Saved in library (READY) OR successful Seedance/Omni/HeyGen with output URL — not both.",
         ],
-        ["By user / By brand", "Same rules in the report date range (default last 30 days)."],
+        ["By user", "People only — Seedance service login rolls into whoever started the job."],
+        ["Date range", "Same rules in the report period (default last 30 days)."],
         ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
         ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
@@ -1712,21 +1740,28 @@ async def _build_manager_summary_tables(
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
+        try:
+            variant_id = UUID(str(row[11]))
+        except (ValueError, TypeError, IndexError):
+            variant_id = None
+        if variant_id:
+            delivery_dedup_keys.add(f"variant:{variant_id}")
 
     for ev in usage_rows:
         actor_email, actor_name = _resolve_usage_actor(ev, users=users, job_metadata=job_metadata)
         email = actor_email
         if email and actor_name:
             user_acc[email]["name"] = user_acc[email]["name"] or actor_name
-        if not email and ev.user_id and ev.user_id in users:
-            u = users[ev.user_id]
-            email = u.email or ""
-            user_acc[email]["name"] = user_acc[email]["name"] or (u.full_name or "")
-        email = email or "Unknown user"
         cost = effective_cost_usd(ev)
         media_cost = _usage_media_cost_usd(ev)
-        user_acc[email]["cost"] += cost
-        user_acc[email]["calls"] += 1
+        cost_email = email if email and not _is_automation_service_email(email) else ""
+        if not cost_email and ev.user_id and ev.user_id in users:
+            fallback = (users[ev.user_id].email or "").strip()
+            if fallback and not _is_automation_service_email(fallback):
+                cost_email = fallback
+        cost_email = cost_email or "Unknown user"
+        user_acc[cost_email]["cost"] += cost
+        user_acc[cost_email]["calls"] += 1
         ex = ev.extra or {}
         jid = str(ex.get("job_id") or "").strip()
         job_meta = job_metadata.get(jid) if jid else None
@@ -1749,11 +1784,18 @@ async def _build_manager_summary_tables(
         brand_acc[brand_key]["cost"] += media_cost
 
         kind = _usage_delivery_kind(ev)
-        if not kind:
+        if not kind or not _usage_has_successful_media_output(ev):
+            continue
+        if not email or _is_automation_service_email(email):
             continue
         vid = _uuid_or_none(ex.get("variant_id"))
         if vid and vid in variant_ids_in_creatives:
             continue
+        if vid:
+            vkey = f"variant:{vid}"
+            if vkey in delivery_dedup_keys:
+                continue
+            delivery_dedup_keys.add(vkey)
         dedup = _usage_delivery_dedup_key(ev)
         if dedup in delivery_dedup_keys:
             continue
@@ -1805,6 +1847,8 @@ async def _build_manager_summary_tables(
     ]
     by_user_rows: list[list[Any]] = []
     for email, slot in sorted(user_acc.items(), key=lambda x: (-x[1]["cost"], x[0])):
+        if _is_automation_service_email(email):
+            continue
         brands_list = ", ".join(sorted(b for b in slot["brands"] if b))
         by_user_rows.append(
             [

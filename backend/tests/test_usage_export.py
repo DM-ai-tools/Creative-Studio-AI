@@ -13,6 +13,8 @@ from app.services.usage_export_service import (
     _infer_brand_from_text,
     _manager_brand_from_context,
     _usage_delivery_kind,
+    _is_automation_service_email,
+    _usage_has_successful_media_output,
     _usage_media_cost_usd,
     _variant_delivery_flags,
     build_summary_workbook,
@@ -144,6 +146,25 @@ def test_summary_workbook_has_user_and_brand_sheets():
     assert "No brand by person" in workbook.sheetnames
     assert workbook["By user"].cell(row=1, column=1).value == "User"
     assert workbook["By user"].cell(row=2, column=3).value == 2
+
+
+def test_automation_service_email_detection():
+    assert _is_automation_service_email("seedance_2.5@creativestudio.tools")
+    assert not _is_automation_service_email("varshankumar.ch@dotmappers.in")
+
+
+def test_usage_output_required_for_delivery_count():
+    assert not _usage_has_successful_media_output(
+        _usage_row(operation="video_generation", provider="byteplus", model="dreamina-seedance-2-5-260628")
+    )
+    assert _usage_has_successful_media_output(
+        _usage_row(
+            operation="video_generation",
+            provider="byteplus",
+            model="dreamina-seedance-2-5-260628",
+            extra={"output_urls": ["/files/clip.mp4"]},
+        )
+    )
 
 
 def test_usage_media_cost_excludes_llm():
