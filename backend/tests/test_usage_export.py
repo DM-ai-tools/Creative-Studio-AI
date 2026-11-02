@@ -10,6 +10,8 @@ from app.services.public_urls import absolute_media_url, media_urls_from_extra
 from app.services.usage_export_service import (
     DETAIL_HEADERS,
     _detail_row,
+    _usage_delivery_kind,
+    _variant_delivery_flags,
     build_summary_workbook,
     build_usage_workbook,
     parse_usage_date_range,
@@ -134,6 +136,23 @@ def test_summary_workbook_has_user_and_brand_sheets():
     assert "By user" in workbook.sheetnames
     assert "By brand" in workbook.sheetnames
     assert workbook["By user"].cell(row=2, column=4).value == 2
+
+
+def test_usage_delivery_kind_counts_image_and_video():
+    assert _usage_delivery_kind(_usage_row(operation="generate_image", provider="openai")) == "image"
+    assert _usage_delivery_kind(_usage_row(operation="generate_video", provider="heygen")) == "video"
+    assert _usage_delivery_kind(_usage_row(operation="llm_chat", provider="openrouter")) is None
+    assert _usage_delivery_kind(_usage_row(operation="analyze-reference-image", success=True)) is None
+
+
+def test_variant_delivery_flags_without_public_url():
+    variant = SimpleNamespace(
+        format="reel",
+        generation_params={"pipeline": {"video": {"status": "done"}}},
+    )
+    has_img, has_vid = _variant_delivery_flags(variant, "", "")
+    assert not has_img
+    assert has_vid
 
 
 def test_workbook_media_urls_are_clickable():

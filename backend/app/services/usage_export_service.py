@@ -530,6 +530,91 @@ def _pipeline_media_from_variant(
     return img, vid
 
 
+def _pipeline_step_done(params: dict | None, step: str, fmt: str) -> bool:
+    pipe = (params or {}).get("pipeline") if isinstance(params, dict) else None
+    if not isinstance(pipe, dict):
+        return False
+    block = pipe.get(step)
+    if not isinstance(block, dict):
+        return False
+    st = str(block.get("status") or "").lower()
+    if st in {"skipped", "failed", "error"}:
+        return False
+    if st in {"done", "complete", "completed", "ready"}:
+        return True
+    if block.get("url") or block.get("video_url") or block.get("image_url"):
+        return True
+    if step == "video" and fmt in {"reel", "video"} and st not in {"", "pending", "running"}:
+        return st == "done"
+    return False
+
+
+def _variant_delivery_flags(
+    variant: Any,
+    img: str,
+    vid: str,
+) -> tuple[bool, bool]:
+    """Count deliverables even when hosted /files/ URLs are missing from exports."""
+    fmt = (variant.format or "").lower()
+    params = variant.generation_params if isinstance(variant.generation_params, dict) else {}
+    has_img = bool(img) or _pipeline_step_done(params, "image", fmt)
+    has_vid = bool(vid) or _pipeline_step_done(params, "video", fmt)
+    if fmt in {"static", "carousel"} and not has_img:
+        has_img = _pipeline_step_done(params, "image", fmt)
+    if fmt in {"reel", "video"} and not has_vid:
+        has_vid = _pipeline_step_done(params, "video", fmt)
+    return has_img, has_vid
+
+
+_LEGACY_BRAND_LABELS = frozenset(
+    {
+        "legacy – brand unavailable",
+        "legacy - brand unavailable",
+        "no brand",
+    }
+)
+
+
+def _resolve_brand_label(
+    *,
+    brand_name: str = "",
+    brand_id: UUID | None = None,
+    brief_id: UUID | None = None,
+    brands: dict[UUID, str],
+    brief_brands: dict[UUID, UUID],
+) -> str:
+    raw = (brand_name or "").strip()
+    if raw and raw.lower() not in _LEGACY_BRAND_LABELS:
+        return raw
+    if brand_id and brand_id in brands:
+        return brands[brand_id]
+    if brief_id and brief_id in brief_brands:
+        bid = brief_brands[brief_id]
+        if bid in brands:
+            return brands[bid]
+    return ""
+
+
+def _usage_delivery_kind(ev: Any) -> str | None:
+    """Successful image/video generation (excludes LLM-only rows)."""
+    if not getattr(ev, "success", False):
+        return None
+    op = (getattr(ev, "operation", None) or "").lower()
+    if "analyze-reference-image" in op or "analyze_reference" in op:
+        return None
+    if op.startswith("llm") or "chat_completion" in op or op in {"chat", "completion"}:
+        return None
+    ex = getattr(ev, "extra", None) or {}
+    mt = _media_type(getattr(ev, "operation", "") or "", getattr(ev, "provider", "") or "", ex)
+    if mt == "Image":
+        return "image"
+    if mt == "Video":
+        return "video"
+    if is_byteplus_seedance_row(ev):
+        return "video"
+    return None
+
+
 def _brief_usage_video_fallback(
     variant: Any,
     brief_video_events: dict[UUID, list[tuple[datetime, str]]],
@@ -697,8 +782,26 @@ async def _load_creatives_by_brand_rows(
     )
     if not platform and tenant_id:
         q = q.where(Variant.tenant_id == tenant_id)
+    brief_ids_for_user: set[UUID] = set()
     if user_id is not None:
-        q = q.where(Creator.id == user_id)
+        usage_scope = await fetch_usage_events(
+            tenant_id=tenant_id,
+            platform=platform,
+            since=since,
+            until=until,
+            user_id=user_id,
+            limit=MAX_EXPORT_ROWS + 1,
+        )
+        for ev in usage_scope:
+            bid = _uuid_or_none((ev.extra or {}).get("brief_id"))
+            if bid:
+                brief_ids_for_user.add(bid)
+        from sqlalchemy import or_
+
+        clauses = [Creator.id == user_id, Brief.created_by == user_id]
+        if brief_ids_for_user:
+            clauses.append(Variant.brief_id.in_(brief_ids_for_user))
+        q = q.where(or_(*clauses))
     q = q.order_by(Brand.name.asc(), Variant.created_at.desc())
 
     rows_out: list[list[Any]] = []
@@ -729,31 +832,39 @@ async def _load_creatives_by_brand_rows(
         )
         if not vid:
             vid = _brief_usage_video_fallback(variant, brief_video_events)
-        if not img and not vid:
+        has_img, has_vid = _variant_delivery_flags(variant, img, vid)
+        if not has_img and not has_vid:
             continue
-            ctype = _creative_type_label(variant.format or "", img, vid)
-            created = (
-                variant.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                if variant.created_at
-                else ""
-            )
-            hook = (variant.hook or "")[:120]
-            rows_out.append(
-                [
-                    created,
-                    email or "",
-                    full_name or "",
-                    brand_name or "",
-                    variant.format or "",
-                    ctype,
-                    hook,
-                    img,
-                    vid,
-                    variant_library_url(str(variant.id)),
-                    str(variant.brief_id),
-                    str(variant.id),
-                ]
-            )
+        ctype = _creative_type_label(variant.format or "", img, vid)
+        if not ctype:
+            if has_img and has_vid:
+                ctype = "Image + video"
+            elif has_vid:
+                ctype = "Video"
+            elif has_img:
+                ctype = "Image"
+        created = (
+            variant.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            if variant.created_at
+            else ""
+        )
+        hook = (variant.hook or "")[:120]
+        rows_out.append(
+            [
+                created,
+                email or "",
+                full_name or "",
+                brand_name or "",
+                variant.format or "",
+                ctype,
+                hook,
+                img,
+                vid,
+                variant_library_url(str(variant.id)),
+                str(variant.brief_id),
+                str(variant.id),
+            ]
+        )
     return rows_out
 
 
@@ -1113,11 +1224,39 @@ async def _build_manager_summary_tables(
     )
 
     user_ids = {r.user_id for r in usage_rows if r.user_id}
+    brand_ids: set[UUID] = set()
+    brief_ids: set[UUID] = set()
+    for r in usage_rows:
+        ex = r.extra or {}
+        bid = _uuid_or_none(ex.get("brand_id"))
+        if bid:
+            brand_ids.add(bid)
+        brief_id = _uuid_or_none(ex.get("brief_id"))
+        if brief_id:
+            brief_ids.add(brief_id)
+    variant_ids_in_creatives: set[UUID] = set()
+    for row in creatives:
+        try:
+            variant_ids_in_creatives.add(UUID(str(row[11])))
+        except (ValueError, TypeError, IndexError):
+            pass
+
     async with AsyncSessionLocal() as db:
         users: dict[UUID, User] = {}
         if user_ids:
             urows = await db.execute(select(User).where(User.id.in_(user_ids)))
             users = {u.id: u for u in urows.scalars().all()}
+        brands: dict[UUID, str] = {}
+        brief_brands: dict[UUID, UUID] = {}
+        if brief_ids:
+            brows = await db.execute(select(Brief.id, Brief.brand_id).where(Brief.id.in_(brief_ids)))
+            for brow in brows.all():
+                brief_brands[brow.id] = brow.brand_id
+                if brow.brand_id:
+                    brand_ids.add(brow.brand_id)
+        if brand_ids:
+            bnames = await db.execute(select(Brand.id, Brand.name).where(Brand.id.in_(brand_ids)))
+            brands = {row.id: row.name for row in bnames.all()}
 
     user_acc: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -1142,25 +1281,30 @@ async def _build_manager_summary_tables(
 
     total_images = 0
     total_videos = 0
+    total_creatives = 0
     for row in creatives:
         email = str(row[1] or "").strip() or "Unknown user"
         name = str(row[2] or "").strip()
         brand = str(row[3] or "").strip() or "(no brand)"
         img_link = str(row[7] or "").strip()
         vid_link = str(row[8] or "").strip()
+        ctype = str(row[5] or "").strip().lower()
+        counts_img = bool(img_link) or "image" in ctype
+        counts_vid = bool(vid_link) or "video" in ctype
         slot_u = user_acc[email]
         slot_u["name"] = slot_u["name"] or name
         slot_u["brands"].add(brand)
         slot_b = brand_acc[brand]
         slot_b["users"].add(email)
-        if img_link or vid_link:
+        if counts_img or counts_vid:
             slot_u["creatives"] += 1
             slot_b["creatives"] += 1
-        if img_link:
+            total_creatives += 1
+        if counts_img:
             slot_u["images"] += 1
             slot_b["images"] += 1
             total_images += 1
-        if vid_link:
+        if counts_vid:
             slot_u["videos"] += 1
             slot_b["videos"] += 1
             total_videos += 1
@@ -1168,15 +1312,46 @@ async def _build_manager_summary_tables(
     for ev in usage_rows:
         email = ""
         if ev.user_id and ev.user_id in users:
-            email = users[ev.user_id].email or ""
+            u = users[ev.user_id]
+            email = u.email or ""
+            user_acc[email]["name"] = user_acc[email]["name"] or (u.full_name or "")
         email = email or "Unknown user"
         cost = effective_cost_usd(ev)
         user_acc[email]["cost"] += cost
         user_acc[email]["calls"] += 1
         ex = ev.extra or {}
-        bname = str(ex.get("brand_name") or "").strip()
+        bname = _resolve_brand_label(
+            brand_name=str(ex.get("brand_name") or ""),
+            brand_id=_uuid_or_none(ex.get("brand_id")),
+            brief_id=_uuid_or_none(ex.get("brief_id")),
+            brands=brands,
+            brief_brands=brief_brands,
+        )
+        brand_key = bname or "(no brand)"
+        brand_acc[brand_key]["cost"] += cost
+
+        kind = _usage_delivery_kind(ev)
+        if not kind:
+            continue
+        vid = _uuid_or_none(ex.get("variant_id"))
+        if vid and vid in variant_ids_in_creatives:
+            continue
         if bname:
-            brand_acc[bname]["cost"] += cost
+            user_acc[email]["brands"].add(bname)
+            brand_acc[bname]["users"].add(email)
+        slot_u = user_acc[email]
+        slot_b = brand_acc[brand_key]
+        slot_u["creatives"] += 1
+        slot_b["creatives"] += 1
+        total_creatives += 1
+        if kind == "image":
+            slot_u["images"] += 1
+            slot_b["images"] += 1
+            total_images += 1
+        else:
+            slot_u["videos"] += 1
+            slot_b["videos"] += 1
+            total_videos += 1
 
     total_cost = round(sum(effective_cost_usd(r) for r in usage_rows), 4)
     overview = [
@@ -1185,7 +1360,7 @@ async def _build_manager_summary_tables(
         ["To (UTC)", until.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")],
         ["Total images delivered", total_images],
         ["Total videos delivered", total_videos],
-        ["Total finished creatives", len(creatives)],
+        ["Total finished creatives", total_creatives],
         ["Active users (with API usage)", len(user_acc)],
         ["Est. total spend (USD)", total_cost],
         ["Total API calls logged", len(usage_rows)],
