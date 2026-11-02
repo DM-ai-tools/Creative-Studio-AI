@@ -540,7 +540,7 @@ def _pipeline_step_done(params: dict | None, step: str, fmt: str) -> bool:
     st = str(block.get("status") or "").lower()
     if st in {"skipped", "failed", "error"}:
         return False
-    if st in {"done", "complete", "completed", "ready"}:
+    if st in {"done", "complete", "completed", "ready", "mock"}:
         return True
     if block.get("url") or block.get("video_url") or block.get("image_url"):
         return True
@@ -556,6 +556,8 @@ def _variant_delivery_flags(
 ) -> tuple[bool, bool]:
     """Count deliverables even when hosted /files/ URLs are missing from exports."""
     fmt = (variant.format or "").lower()
+    status = str(getattr(variant, "status", "") or "").upper()
+    library_ready = status in {"READY", "APPROVED", "EXPORTED"}
     params = variant.generation_params if isinstance(variant.generation_params, dict) else {}
     has_img = bool(img) or _pipeline_step_done(params, "image", fmt)
     has_vid = bool(vid) or _pipeline_step_done(params, "video", fmt)
@@ -563,7 +565,32 @@ def _variant_delivery_flags(
         has_img = _pipeline_step_done(params, "image", fmt)
     if fmt in {"reel", "video"} and not has_vid:
         has_vid = _pipeline_step_done(params, "video", fmt)
+    # Match Creative library tiles: READY/APPROVED static rows count as delivered images.
+    if library_ready:
+        if fmt in {"static", "carousel"}:
+            has_img = True
+        elif fmt in {"reel", "video"}:
+            has_vid = True
+        elif not has_img and not has_vid:
+            has_img = True
     return has_img, has_vid
+
+
+async def _asset_creator_email_by_variant(variant_ids: set[UUID]) -> dict[UUID, str]:
+    if not variant_ids:
+        return {}
+    out: dict[UUID, str] = {}
+    async with AsyncSessionLocal() as db:
+        rows = await db.execute(
+            select(Asset.variant_id, User.email)
+            .join(User, Asset.created_by == User.id)
+            .where(Asset.variant_id.in_(variant_ids), Asset.created_by.is_not(None))
+            .order_by(Asset.created_at.desc())
+        )
+        for variant_id, email in rows.all():
+            if variant_id and variant_id not in out and email:
+                out[variant_id] = str(email)
+    return out
 
 
 _LEGACY_BRAND_LABELS = frozenset(
@@ -960,6 +987,7 @@ async def _load_creatives_by_brand_rows(
         since=since,
         until=until,
     )
+    asset_creator_email = await _asset_creator_email_by_variant(variant_ids)
     for variant, brand_name, email, full_name, brief_title, product_name in batch:
         img, vid = _pipeline_media_from_variant(
             variant.generation_params,
@@ -972,6 +1000,8 @@ async def _load_creatives_by_brand_rows(
         has_img, has_vid = _variant_delivery_flags(variant, img, vid)
         if not has_img and not has_vid:
             continue
+        if not (email or "").strip():
+            email = asset_creator_email.get(variant.id) or ""
         if not (email or "").strip():
             extra_emails = variant_user_map.get(variant.id) or brief_user_map.get(variant.brief_id) or set()
             if extra_emails:
@@ -1350,7 +1380,8 @@ def _summary_readme_rows(period_label: str) -> list[list[str]]:
         [""],
         ["Period", period_label],
         ["How to use", "Deliverable counts = finished work in Creative library (READY variants only)."],
-        ["By user / By brand", "Images & videos are library deliverables — not raw API call counts."],
+        ["By user / By brand", "Same READY/APPROVED library rows in the report date range (default last 30 days)."],
+        ["vs Creative library UI", "Library header counts all dates (up to 300) for the workspace — not one person."],
         ["No brand?", "«No brand by person» + «No brand detail» list every line. Totals must match."],
         ["API only sheet", "Extra API image/video calls with no library row (internal / in-progress)."],
         ["Spend", "Estimated USD from all API usage (HeyGen, images, LLM, etc.) in this period."],

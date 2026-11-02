@@ -167,11 +167,23 @@ def test_infer_brand_from_hook_text():
 def test_variant_delivery_flags_without_public_url():
     variant = SimpleNamespace(
         format="reel",
+        status="READY",
         generation_params={"pipeline": {"video": {"status": "done"}}},
     )
     has_img, has_vid = _variant_delivery_flags(variant, "", "")
     assert not has_img
     assert has_vid
+
+
+def test_variant_delivery_flags_ready_static_without_pipeline():
+    variant = SimpleNamespace(
+        format="static",
+        status="READY",
+        generation_params={},
+    )
+    has_img, has_vid = _variant_delivery_flags(variant, "", "")
+    assert has_img
+    assert not has_vid
 
 
 def test_workbook_media_urls_are_clickable():
