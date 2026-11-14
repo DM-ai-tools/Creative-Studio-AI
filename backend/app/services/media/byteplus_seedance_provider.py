@@ -10,11 +10,14 @@ import httpx
 from app.core.config import settings
 from app.services.media.base import VideoGenerationProvider
 from app.services.media.byteplus_seedance_client import (
+    ark_credential_family,
+    ark_credential_fingerprint,
     ark_configured,
     ark_configured_for_model,
     ark_seedance_model,
     clamp_seedance_duration,
     create_video_task,
+    extract_last_frame_url,
     extract_video_url,
     is_seedance_person_privacy_block,
     is_seedance_transport_error,
@@ -99,6 +102,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         send_role: str,
         extra_refs: list[dict[str, str]],
         extra_video_refs: list[dict[str, str]],
+        video_reference_mode: str,
         tenant_id: str,
         cs_job_id: str | None,
         cancel_check,
@@ -115,6 +119,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             image_role=send_role,
             extra_image_refs=extra_refs or None,
             extra_video_refs=extra_video_refs or None,
+            video_reference_mode=video_reference_mode,
         )
 
         if cs_job_id:
@@ -126,9 +131,32 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 progress="Seedance running — you can Stop anytime…",
             )
 
+        def _record_failed_task(reason: str) -> None:
+            # BytePlus only bills successfully generated videos, so this costs $0,
+            # but the failed task is recorded so it is visible in Usage.
+            from app.services.usage_tracker import record_usage as _record_usage
+
+            _record_usage(
+                provider="byteplus",
+                model=api_model,
+                operation="video_generation",
+                tenant_id=tenant_id,
+                success=False,
+                error=reason[:1900],
+                extra={
+                    "task_id": task_id,
+                    "resolution": resolution,
+                    "ratio": ratio,
+                    "duration_seconds": duration,
+                    "with_video_input": bool(extra_video_refs),
+                    "media_type": "video",
+                },
+            )
+
         if cancel_check():
             from app.services.media.byteplus_seedance_client import delete_video_task
 
+            _record_failed_task("Cancelled by user before BytePlus finished")
             await delete_video_task(task_id, client=client, model=api_model)
             return {
                 "status": "cancelled",
@@ -150,6 +178,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 cancel_check=cancel_check,
             )
         except Exception as exc:
+            _record_failed_task(f"{type(exc).__name__}: {exc}")
             if is_seedance_transport_error(exc):
                 return {
                     "status": "failed",
@@ -170,6 +199,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 }
             raise
         remote_url = extract_video_url(task)
+        last_frame_url = extract_last_frame_url(task)
         from app.services.media.byteplus_usage import video_task_usage
         from app.services.usage_tracker import record_usage
 
@@ -209,6 +239,10 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 **provider_usage,
                 "media_type": "video",
                 "duration_seconds": int(task.get("duration") or duration or 0),
+                # Facts the cost estimate needs, so the price can be recomputed later.
+                "resolution": resolution,
+                "ratio": ratio,
+                "with_video_input": bool(extra_video_refs),
                 "output_urls": [final_url],
             },
         )
@@ -243,6 +277,9 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "reason": "Seedance native audio" if generate_audio else "Sound off",
             },
             "task_id": task_id,
+            "last_frame_url": last_frame_url,
+            "credential_family": ark_credential_family(api_model),
+            "credential_fingerprint": ark_credential_fingerprint(api_model),
             "reference_bindings": [
                 {"image": i, "role": asset["role"]} for i, asset in enumerate(bound_assets, 1)
             ],
@@ -251,7 +288,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 for i, asset in enumerate(extra_video_refs, 1)
             ],
         }
-        if reported + 1 < duration:
+        if video_reference_mode != "edit" and reported + 1 < duration:
             result["partial"] = True
             result["duration_warning"] = (
                 f"Seedance returned {reported}s for a {duration}s request. "
@@ -307,6 +344,34 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         continuity_video_url = str(
             brief.get("continuity_video_reference_url") or ""
         ).strip()
+        video_reference_mode = str(
+            brief.get("creative_studio_video_reference_mode") or "reference"
+        ).strip().lower()
+        if video_reference_mode not in {"reference", "edit"}:
+            video_reference_mode = "reference"
+        from app.services.public_urls import absolute_media_url
+
+        uploaded_video_refs = [
+            {
+                "url": absolute_media_url(str(asset.get("url") or "").strip()),
+                "role": "reference_video",
+            }
+            for asset in (brief.get("reference_assets") or [])
+            if isinstance(asset, dict)
+            and str(asset.get("role") or "").strip().lower() == "reference_video"
+            and str(asset.get("url") or "").strip()
+        ]
+        if any(
+            re.match(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?/", ref["url"], re.I)
+            for ref in uploaded_video_refs
+        ):
+            raise ValueError(
+                "BytePlus must fetch uploaded videos from a public URL. Set PUBLIC_APP_URL "
+                "to the deployed HTTPS app (or an HTTPS development tunnel) and retry. "
+                "No Seedance task was submitted."
+            )
+        if video_reference_mode == "edit" and len(uploaded_video_refs) != 1:
+            raise ValueError("Seedance 2.5 edit mode requires exactly one source video.")
         # A prior approved video uses multimodal reference mode. First/last frame
         # conditioning cannot be mixed with reference video media.
         uses_first_frame_task = bool(
@@ -337,7 +402,14 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 return None
             return seedance_reference_data_uri(u)
 
-        manifest = reference_manifest(brief, source_image_url)
+        image_brief = {
+            **brief,
+            "reference_assets": [
+                asset for asset in (brief.get("reference_assets") or [])
+                if str((asset or {}).get("role") or "").strip().lower() != "reference_video"
+            ],
+        }
+        manifest = reference_manifest(image_brief, source_image_url)
         primary_opening_supplied = bool(source_image_url) and image_role in {
             "first_frame", "last_frame"
         }
@@ -354,7 +426,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
         strict_continuity_reference = bool(brief.get("strict_continuity_reference")) and any(
             asset.get("role") == "continuity" for asset in manifest
         )
-        strict_video_reference = bool(continuity_video_url)
+        strict_video_reference = bool(continuity_video_url or uploaded_video_refs)
         strict_opening_reference = bool(brief.get("strict_opening_reference")) and primary_opening_supplied
         strict_reference_lock = (
             strict_character_reference
@@ -362,7 +434,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
             or strict_video_reference
             or strict_opening_reference
         )
-        use_multimodal = bool(continuity_video_url) or image_role == "reference_image" or len(manifest) > 1 or any(
+        use_multimodal = bool(continuity_video_url or uploaded_video_refs) or image_role == "reference_image" or len(manifest) > 1 or any(
             asset["role"] != "storyboard" for asset in manifest
         )
         from app.services.creative_studio_prompt_service import soften_character_reference_prompt
@@ -421,6 +493,23 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                     "with the newly authored action only. Do not replay, loop or summarize "
                     "the reference footage."
                 )
+            if uploaded_video_refs:
+                video_refs.extend(
+                    ref for ref in uploaded_video_refs
+                    if ref["url"] not in {item["url"] for item in video_refs}
+                )
+                if video_reference_mode == "edit":
+                    video_instruction += (
+                        "\n\nSOURCE VIDEO EDIT: Transform the attached source video according "
+                        "to the user's instructions while preserving its timeline, camera geometry "
+                        "and unrequested content. Do not restart or recreate it as a new clip."
+                    )
+                else:
+                    video_instruction += (
+                        "\n\nUPLOADED VIDEO REFERENCES: Use the attached videos as motion, "
+                        "scene and product guidance. Generate the newly requested shot; do not "
+                        "copy unrelated content or replay the references."
+                    )
             motion = (
                 base_prompt + prompt_suffix + video_instruction
                 + reference_instructions(submitted_assets)
@@ -522,10 +611,57 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                             send_role=send_role,
                             extra_refs=extra_refs,
                             extra_video_refs=video_refs,
+                            video_reference_mode=video_reference_mode,
                             tenant_id=tenant_id,
                             cs_job_id=cs_job_id,
                             cancel_check=_cancel_check,
                         )
+                        # Seedance can return noticeably less duration than requested
+                        # on a given attempt (the provider's own non-determinism, not
+                        # anything in this request) and this was previously accepted
+                        # silently as a "partial" result the caller had to notice and
+                        # retry by hand. One significant shortfall (<85% of requested)
+                        # on the primary attempt is worth one automatic retry before
+                        # handing back a short clip.
+                        if (
+                            out.get("status") == "done"
+                            and video_reference_mode != "edit"
+                            and tier == "full"
+                            and int(out.get("duration_seconds") or duration) < duration * 0.85
+                        ):
+                            if cs_job_id:
+                                from app.services.creative_studio_job_service import update_job
+
+                                await update_job(
+                                    cs_job_id,
+                                    progress=(
+                                        f"Seedance returned {out.get('duration_seconds')}s of "
+                                        f"{duration}s — retrying once before accepting a short clip…"
+                                    ),
+                                )
+                            retry_out = await self._run_seedance_attempt(
+                                client=client,
+                                motion_prompt=motion_prompt,
+                                api_model=api_model,
+                                model=model,
+                                duration=duration,
+                                ratio=ratio,
+                                resolution=resolution,
+                                generate_audio=generate_audio,
+                                bound_assets=bound_assets,
+                                image_ref=image_ref,
+                                send_role=send_role,
+                                extra_refs=extra_refs,
+                                extra_video_refs=video_refs,
+                                video_reference_mode=video_reference_mode,
+                                tenant_id=tenant_id,
+                                cs_job_id=cs_job_id,
+                                cancel_check=_cancel_check,
+                            )
+                            if retry_out.get("status") == "done" and int(
+                                retry_out.get("duration_seconds") or 0
+                            ) > int(out.get("duration_seconds") or 0):
+                                out = retry_out
                         if out.get("status") != "done":
                             return out
                         out["requested_duration_seconds"] = requested
@@ -637,6 +773,16 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                         "Automatic text-to-video fallback also failed. This is provider moderation — "
                         "not a content violation on your side."
                     )
+            audio_sensitive = "outputaudiosensitivecontentdetected" in err.lower()
+            if audio_sensitive:
+                err = (
+                    "BytePlus accepted the visual request but its native-audio safety filter rejected "
+                    "the generated speech. No video was published. This can be triggered by spoken "
+                    "financial claims such as exact revenue, profit, large-loss or scarcity wording. "
+                    "For talking-head lip sync, keep Native presenter speech and soften only those "
+                    "spoken claims. To preserve the exact script, choose Studio voiceover so the "
+                    "narration is generated and mixed separately."
+                )
             return {
                 "status": "failed",
                 "model": api_model,
@@ -646,6 +792,7 @@ class BytePlusSeedanceVideoProvider(VideoGenerationProvider):
                 "provider": "byteplus",
                 "error": err[:500],
                 "retryable": True,
+                **({"error_code": "OutputAudioSensitiveContentDetected"} if audio_sensitive else {}),
             }
 
 
@@ -664,7 +811,7 @@ async def recover_byteplus_seedance_task(
     Does not submit a new generation task.
     """
     tid = str(task_id or "").strip()
-    if not tid or not ark_configured():
+    if not tid or not ark_configured_for_model(model):
         return None
 
     api_model = resolve_byteplus_api_model(model)
@@ -684,6 +831,7 @@ async def recover_byteplus_seedance_task(
             return None
 
         remote_url = extract_video_url(task)
+        last_frame_url = extract_last_frame_url(task)
         if not remote_url:
             return None
 
@@ -722,6 +870,10 @@ async def recover_byteplus_seedance_task(
                 **provider_usage,
                 "recovered": True,
                 "media_type": "video",
+                # Taken from the BytePlus task response when it includes them;
+                # otherwise the cost estimate infers resolution from tokens/sec.
+                "resolution": str(task.get("resolution") or "") or None,
+                "duration_seconds": int(task.get("duration") or 0) or None,
                 "output_urls": [final_url],
             },
         )
@@ -733,6 +885,9 @@ async def recover_byteplus_seedance_task(
             "remote_url": saved.get("remote_url"),
             "provider": "byteplus",
             "task_id": tid,
+            "last_frame_url": last_frame_url,
+            "credential_family": ark_credential_family(api_model),
+            "credential_fingerprint": ark_credential_fingerprint(api_model),
             "recovered": True,
             "provider_usage": [provider_usage],
         }

@@ -15,6 +15,7 @@ class ImageGenerationProvider(ABC):
         reference_image_url: str | None = None,
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
+        target_video_model: str | None = None,
     ) -> dict:
         raise NotImplementedError
 

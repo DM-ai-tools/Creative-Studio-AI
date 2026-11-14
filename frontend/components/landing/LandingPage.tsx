@@ -100,7 +100,7 @@ export default function LandingPage() {
     if (!token) return
     let active = true
     authApi.getMe().then((user) => {
-      if (active && user) router.replace('/dashboard')
+        if (active && user) router.replace('/dashboard')
     }).catch(() => authStorage.clear())
     return () => { active = false }
   }, [router])
@@ -136,13 +136,13 @@ export default function LandingPage() {
         <section className="lp-hero" aria-labelledby="hero-title">
           {HERO_SLIDES.map((item, index) => (
             <div key={item.src} className={`lp-hero-image ${index === slide ? 'is-active' : ''}`} aria-hidden={index !== slide}>
-              <Image
-                src={item.src}
-                alt=""
-                fill
+            <Image
+              src={item.src}
+              alt=""
+              fill
                 priority={index === 0}
-                sizes="100vw"
-                className="object-cover"
+              sizes="100vw"
+              className="object-cover"
                 style={{ objectPosition: item.position }}
               />
             </div>
@@ -156,12 +156,12 @@ export default function LandingPage() {
               <div className="lp-hero-actions">
                 <Link href="/login" className="lp-button">Open CreativeStudio</Link>
                 <a href="#workflow" className="lp-text-link">See how production works</a>
-              </div>
+        </div>
               <div className="lp-hero-proof" aria-label="CreativeStudio capabilities">
                 <div><strong>5</strong><span>reference roles</span></div>
                 <div><strong>9</strong><span>assets per brief</span></div>
                 <div><strong>4 min</strong><span>video compositions</span></div>
-              </div>
+        </div>
             </div>
             <div className="lp-hero-caption" aria-live="polite">
               <span>{activeHero.label}</span><strong>{activeHero.headline}</strong><small>{activeHero.detail}</small>
@@ -171,8 +171,8 @@ export default function LandingPage() {
                 ))}
               </div>
             </div>
-          </div>
-        </section>
+        </div>
+      </section>
 
         <section className="lp-capability-bar" aria-label="Core capabilities"><div className="lp-page-width">
           <span>Brand intelligence</span><span>Campaign strategy</span><span>Image generation</span><span>Avatar video</span><span>Cinematic B-roll</span><span>Placement-ready export</span>
@@ -213,12 +213,12 @@ export default function LandingPage() {
                   <div className={`lp-ratio-frame ${item.className}`}>
                     <Image src={item.src} alt={`${item.title} example in ${item.ratio} ratio`} fill sizes="(max-width: 700px) 80vw, (max-width: 1100px) 40vw, 22vw" className="object-cover" />
                     <span>{item.ratio}</span>
-                  </div>
-                </div>
-                <div className="lp-ratio-copy"><strong>{item.title}</strong><span>{item.placement}</span><small>{item.size} px</small></div>
-              </article>
-            ))}
           </div>
+        </div>
+                <div className="lp-ratio-copy"><strong>{item.title}</strong><span>{item.placement}</span><small>{item.size} px</small></div>
+            </article>
+          ))}
+        </div>
           <div className="lp-platform-table"><div className="lp-platform-row lp-platform-head"><span>Platform</span><span>Placements</span><span>Primary ratios</span></div>{PLATFORM_ROWS.map((row) => <div className="lp-platform-row" key={row.platform}><strong>{row.platform}</strong><span>{row.formats}</span><code>{row.ratios}</code></div>)}</div>
           <div className="lp-format-callout"><div><span>Image</span><strong>1:1 / 4:3 / 4:5 / 9:16 / 16:9 / 1.91:1 / 2:3</strong></div><div><span>Video</span><strong>9:16 / 1:1 / 16:9 / 4:3 / 4:5*</strong></div><p>* Native support varies by provider. Seedance maps 4:5 reference video to 3:4 for cropping.</p></div>
         </div></section>

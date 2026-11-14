@@ -6,7 +6,9 @@ import re
 
 MAX_VIDEO_PROMPT_CHARS = 32_000
 SHOT_HEADER = re.compile(
-    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:(?:CLIP|Scene)[ \t]*\d+|S\d+[A-Za-z]?)[^\n]*|"
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:(?:(?:CLIP|Scene)[ \t]*\d+|S\d+[A-Za-z]?)"
+    r"(?=[^\n]*(?:\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?)\s*"
+    r"(?:s(?:econds?)?)?\s*[–—-]\s*(?:\d{1,2}:\d{2}(?:\.\d+)?|\d+(?:\.\d+)?))[^\n]*|"
     r"\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:seconds?|s)\s*[—–-]\s*[^\n]+|"
     # One-shot briefs commonly put a clock range on its own line, followed by
     # DIALOGUE/VISUAL sections. The lookahead excludes timed caption rows.
@@ -33,6 +35,21 @@ _SESSION_HEADER = re.compile(
     rf"({_TIME_VALUE})[^\n]*"
 )
 _GLOBAL = re.compile(r"(?im)^\s*(?:AUDIO|TEXT RULE|PRODUCT RULE|MOTION RULE|VISUAL STYLE|EDITING / TIMING|STRICT NEGATIVE|PRODUCT CINEMATOGRAPHY LOCK|FINISHING LOCK|CHARACTER CONTINUITY|On-screen copy and graphic direction|Voiceover performance and synchronisation|Camera, lighting and finishing|Music and sound mix|Generation workflow and final checks)\s*[:\n]")
+
+_PREPRODUCTION_IMAGE_BLOCK = re.compile(
+    r"(?ims)^\s*IMAGE\s+\d+\s*[-–—:].*?"
+    r"(?=^\s*IMAGE\s+\d+\s*[-–—:]|^\s*(?:SCENE|CLIP)\s+\d+\b|\Z)"
+)
+
+
+def _strip_preproduction_image_blocks(text: str) -> str:
+    """Remove GPT still-planning blocks from a paid video chapter prompt.
+
+    IMAGE N blocks describe how the already-approved stills were created. Sending
+    them again to Seedance—especially in chapter 2—can make the model replay the
+    opening dashboard or restart the story instead of rendering the local scenes.
+    """
+    return _PREPRODUCTION_IMAGE_BLOCK.sub("", str(text or "")).strip()
 
 
 def _clock_seconds(value: str) -> float:
@@ -387,7 +404,11 @@ def segment_motion_prompt(prompt: str, *, start: float, end: float, total: float
         )
     headers = list(_HEADER.finditer(prompt))
     scoped_windows = _part_scoped_shot_windows(prompt)
-    prefix = prompt[:headers[0].start()].strip() if headers else ""
+    prefix = (
+        _strip_preproduction_image_blocks(prompt[:headers[0].start()])
+        if headers
+        else ""
+    )
     suffix = ""
     beats: list[str] = []
     for i, header in enumerate(headers):

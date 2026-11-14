@@ -38,6 +38,7 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
         reference_image_url: str | None = None,
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
+        target_video_model: str | None = None,
     ) -> dict:
         api_model = resolve_seedream_api_model(model)
         if not seedream_configured():
@@ -98,6 +99,7 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
                     model=api_model,
                     size=size,
                     reference_image_url=ref_for_api,
+                    target_video_model=target_video_model,
                 )
                 dl = await client.get(byteplus_url, timeout=120.0, follow_redirects=True)
                 dl.raise_for_status()
@@ -134,7 +136,8 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
             }
 
         note = (
-            "Seedream still saved locally; BytePlus URL passed unchanged to Seedance on approve."
+            "Seedream still saved locally with the selected Seedance account; "
+            "BytePlus URL passed unchanged to Seedance on approve."
         )
         return {
             "status": "done",
@@ -142,6 +145,7 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
             "prompt": prompt,
             "url": saved["file_url"],
             "byteplus_url": byteplus_url if is_byteplus_ark_media_url(byteplus_url) else None,
+            "trusted_video_model": target_video_model or None,
             "provider": "byteplus",
             "note": note,
         }

@@ -22,6 +22,7 @@ import HeyGenProductionPipeline from '@/components/brief/HeyGenProductionPipelin
 import HeyGenSimpleVideoTab from '@/components/brief/HeyGenSimpleVideoTab'
 import CreativeStudioTab from '@/components/brief/CreativeStudioTab'
 import HeroAiImageTab from '@/components/brief/HeroAiImageTab'
+import LandingPageAdsTab from '@/components/brief/LandingPageAdsTab'
 import {
   emptyImageVariantSlot,
   effectiveVariantAspectRatio,
@@ -466,7 +467,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
     ttlMs: API_CACHE_TTL.catalog,
   })
 
-  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio' | 'hero_ai_image'>(
+  const [mediaType, setMediaType] = useState<'image' | 'video' | 'creative_studio' | 'hero_ai_image' | 'landing_page_ads'>(
     () => (cs25Only ? 'creative_studio' : 'image'),
   )
 
@@ -477,6 +478,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
   const composerMediaTabs = useMemo(() => {
     const tabs = [
       { id: 'image' as const, label: 'Image', hint: 'Static & carousel ads' },
+      { id: 'landing_page_ads' as const, label: 'Landing Page Ads', hint: 'URL → static & carousel images', badge: 'NEW' as const },
       { id: 'video' as const, label: 'Video', hint: 'HeyGen · paste script & generate' },
       { id: 'hero_ai_image' as const, label: UI.imageAdFromPhoto, hint: UI.addTextToImage },
       {
@@ -2500,52 +2502,70 @@ export default function BriefComposer(_props: BriefComposerProps) {
 
   return (
     <div className="min-h-full app-mesh-bg">
-      <header className="sticky top-0 z-20 glass-topbar flex items-center justify-between px-6 py-4">
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold text-charcoal tracking-tight">{UI.createProject}</h1>
-          <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full">
-            {mediaType === 'image'
-              ? 'Image'
-              : mediaType === 'video'
-                ? 'Video'
-                : mediaType === 'hero_ai_image'
-                  ? UI.imageAdFromPhoto
-                  : UI.aiAssistant}
-          </span>
+      <header className="sticky top-0 z-20 glass-topbar border-b border-border/40">
+        <div className="w-full max-w-[1600px] mx-auto px-4 md:px-8 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-xl font-bold text-charcoal tracking-tight">{UI.createProject}</h1>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 border border-accent/25 px-2.5 py-1 rounded-full shrink-0">
+              {mediaType === 'image'
+                ? 'Image'
+                : mediaType === 'video'
+                  ? 'Video'
+                  : mediaType === 'landing_page_ads'
+                    ? 'Landing Page Ads'
+                  : mediaType === 'hero_ai_image'
+                    ? UI.imageAdFromPhoto
+                    : UI.aiAssistant}
+            </span>
+          </div>
+          {mediaType !== 'landing_page_ads' && (
+            <Button
+              type="submit"
+              form="brief-form"
+              variant="outline"
+              size="sm"
+              disabled={isSubmitting}
+              className="shrink-0"
+            >
+              Save Brief
+            </Button>
+          )}
         </div>
-        <Button type="submit" form="brief-form" variant="outline" size="sm" disabled={isSubmitting}>
-          Save Brief
-        </Button>
       </header>
 
       {/* Image / Video / Creative Studio tabs */}
-      <div className="sticky top-[65px] z-10 border-b border-border bg-white/90 backdrop-blur-md">
-        <div className="w-full max-w-[1600px] mx-auto px-6 md:px-8 flex gap-1">
-          {composerMediaTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setMediaType(tab.id)}
-              className={`relative flex items-center gap-1.5 px-5 py-3 text-sm font-semibold transition-colors ${
-                mediaType === tab.id
-                  ? 'text-charcoal'
-                  : 'text-mid hover:text-charcoal'
-              }`}
-            >
-              {tab.label}
-              {'badge' in tab && tab.badge && (
-                <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-accent/15 text-accent border border-accent/20 leading-none">
-                  {tab.badge}
+      <div className="sticky top-[73px] z-10 border-b border-border bg-white/90 backdrop-blur-md">
+        <div className="w-full max-w-[1600px] mx-auto px-4 md:px-8">
+          <div className="flex w-full gap-0.5 overflow-x-auto overscroll-x-contain lg:overflow-x-visible lg:justify-between">
+            {composerMediaTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setMediaType(tab.id)}
+                title={tab.hint}
+                className={`relative shrink-0 flex flex-1 flex-col items-start lg:items-center justify-center gap-0.5 px-3 sm:px-4 lg:px-2 py-2.5 min-h-[3.25rem] min-w-[9.5rem] lg:min-w-0 text-left lg:text-center transition-colors ${
+                  mediaType === tab.id
+                    ? 'text-charcoal'
+                    : 'text-mid hover:text-charcoal'
+                }`}
+              >
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm font-semibold leading-tight lg:justify-center">
+                  {tab.label}
+                  {'badge' in tab && tab.badge && (
+                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-accent/15 text-accent border border-accent/20 leading-none">
+                      {tab.badge}
+                    </span>
+                  )}
                 </span>
-              )}
-              <span className="hidden sm:inline text-mid font-normal text-[11px] ml-0.5">
-                · {tab.hint}
-              </span>
-              {mediaType === tab.id && (
-                <span className="absolute left-2 right-2 bottom-0 h-0.5 rounded-full bg-accent" />
-              )}
-            </button>
-          ))}
+                <span className="hidden sm:block text-[11px] font-normal text-mid/90 whitespace-nowrap leading-tight">
+                  {tab.hint}
+                </span>
+                {mediaType === tab.id && (
+                  <span className="absolute left-2 right-2 lg:left-1 lg:right-1 bottom-0 h-0.5 rounded-full bg-accent" />
+                )}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -2565,7 +2585,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
           industry={watch('title') || selectedBrand?.industry || ''}
           niche={watch('niche') || ''}
           productName={watch('product_name') || ''}
-          imageModel={genSettings.imageModel || 'openai-gpt-image-2'}
+          imageModel={genSettings.imageModel || 'openai-gpt-image-2.6-sunburst'}
           brandId={(watch('brand_id') || '').trim()}
           brands={brands ?? []}
           onBrandChange={(brandId) => setValue('brand_id', brandId, { shouldValidate: true })}
@@ -2579,10 +2599,18 @@ export default function BriefComposer(_props: BriefComposerProps) {
         />
       )}
 
+      {mediaType === 'landing_page_ads' && (
+        <LandingPageAdsTab
+          brandId={(watch('brand_id') || selectedBrand?.id || activeBrandId || '').trim() || undefined}
+          brandName={selectedBrand?.name ?? websiteBrand?.brand_name}
+          imageModel={genSettings.imageModel || 'openai-gpt-image-2.6-sunburst'}
+        />
+      )}
+
       <form
         id="brief-form"
         onSubmit={handleSubmit(onSubmit, onInvalid)}
-        className={`w-full max-w-[1600px] mx-auto p-6 md:p-8 space-y-4 ${mediaType === 'creative_studio' || mediaType === 'hero_ai_image' ? 'hidden' : ''}`}
+        className={`w-full max-w-[1600px] mx-auto px-4 md:px-8 py-6 md:py-8 space-y-4 ${mediaType === 'creative_studio' || mediaType === 'hero_ai_image' || mediaType === 'landing_page_ads' ? 'hidden' : ''}`}
       >
         <div className="space-y-4">
           {brandSource === 'brand' && !hasBrands && (

@@ -21,17 +21,7 @@ logger = logging.getLogger(__name__)
 _ctx: ContextVar[dict[str, Any] | None] = ContextVar("usage_ctx", default=None)
 _openai_patched = False
 
-# USD per 1M tokens — approximate list prices used when the provider does not return cost.
-_LLM_PRICE_PER_M: dict[str, tuple[float, float]] = {
-    "anthropic/claude-haiku-4.5": (1.0, 5.0),
-    "anthropic/claude-sonnet-4.6": (3.0, 15.0),
-    "anthropic/claude-sonnet-4": (3.0, 15.0),
-    "openai/gpt-4o-mini": (0.15, 0.60),
-    "openai/gpt-4o": (2.50, 10.0),
-    "google/gemini-2.5-flash": (0.15, 0.60),
-    "google/gemini-3.1-flash-image-preview": (0.30, 2.50),
-    "google/veo-3.1": (0.0, 0.0),
-}
+# LLM / Seedance / image prices live in app.services.usage_pricing (admin-editable).
 
 _FIRECRAWL_SCRAPE_USD = 0.005
 _META_EXPORT_USD = 0.0
@@ -81,16 +71,10 @@ def _as_uuid(value: Any) -> UUID | None:
 
 
 def estimate_llm_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    from app.services.usage_pricing import llm_rates
+
     key = (model or "").strip().lower()
-    prices = _LLM_PRICE_PER_M.get(key)
-    if not prices:
-        for known, pair in _LLM_PRICE_PER_M.items():
-            if known in key or key in known:
-                prices = pair
-                break
-    if not prices:
-        prices = (0.50, 2.00)
-    inp, out = prices
+    inp, out = llm_rates(key)
     return round((prompt_tokens / 1_000_000) * inp + (completion_tokens / 1_000_000) * out, 6)
 
 
@@ -137,23 +121,29 @@ def estimate_media_cost(*, provider: str, model: str, duration_seconds: float = 
         return round((duration or 10) * 0.10, 6), 0.0
 
     if provider == "openai":
-        from app.services.media.openai_image_catalog import openai_image_cost_usd
+        from app.services.media.openai_image_catalog import (
+            openai_image_cost_usd,
+            resolve_openai_image_model,
+        )
+        from app.services.usage_pricing import image_price_override
 
-        cost = openai_image_cost_usd(model)
+        override = image_price_override(resolve_openai_image_model(model))
+        cost = override if override is not None else openai_image_cost_usd(model)
         return round(cost, 6), round(cost / _RUNWAY_CREDIT_USD, 4)
 
     return 0.0, 0.0
 
 
-# BytePlus Seedance — USD per 1M completion tokens (public list pricing).
-_BYTEPLUS_SEEDANCE_720_NO_VIDEO = 10.70
-_BYTEPLUS_SEEDANCE_720_WITH_VIDEO = 6.40
-_BYTEPLUS_SEEDANCE_1080_NO_VIDEO = 11.70
-_BYTEPLUS_SEEDANCE_1080_WITH_VIDEO = 7.00
 _SEEDANCE_PRICING_NOTE = (
-    "BytePlus does not return USD on task responses; estimates use public Seedance "
-    "token rates ($6.40–$10.70 per 1M completion tokens at 720p)."
+    "BytePlus does not return USD on task responses. Spend is estimated as completion "
+    "tokens x the official per-1M-token rate for the clip's model and resolution "
+    "(editable in Pricing rates below). Clips saved before resolution was recorded have it "
+    "inferred from tokens per second. Where it is unknown whether a reference video was used, "
+    "the higher no-video rate is assumed. BytePlus only bills successfully generated videos, "
+    "so failed tasks show here but cost $0."
 )
+
+_SEEDANCE_RESOLUTIONS = ("480p", "720p", "1080p", "2160p")
 
 
 def is_byteplus_seedance_row(row: Any) -> bool:
@@ -167,60 +157,115 @@ def _row_completion_tokens(row: Any) -> int:
     return int(getattr(row, "completion_tokens", 0) or getattr(row, "total_tokens", 0) or 0)
 
 
+def infer_seedance_resolution(tokens: int, duration_seconds: float | None) -> str | None:
+    """Guess a clip's resolution from its tokens per second.
+
+    Seedance bills roughly width x height x fps x seconds / 1024 tokens, so at
+    24 fps a second of video is about 10k tokens at 480p, 22k at 720p and 49k at
+    1080p and 194k at 4K. Returns None when there is not enough information.
+    """
+    try:
+        count = int(tokens or 0)
+        seconds = float(duration_seconds or 0)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0 or seconds <= 0:
+        return None
+    per_second = count / seconds
+    if per_second < 15_000:
+        return "480p"
+    if per_second < 33_000:
+        return "720p"
+    if per_second < 100_000:
+        return "1080p"
+    return "2160p"
+
+
+def _normalize_resolution(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if text in {"4k", "2160"}:
+        return "2160p"
+    if text in _SEEDANCE_RESOLUTIONS:
+        return text
+    if text.isdigit() and f"{text}p" in _SEEDANCE_RESOLUTIONS:
+        return f"{text}p"
+    return None
+
+
 def estimate_byteplus_seedance_cost_usd(
     tokens: int,
     *,
     with_video_input: bool | None = None,
     resolution_1080: bool = False,
+    resolution: str | None = None,
+    model: str | None = None,
 ) -> dict[str, float]:
-    """Return low/high/mid USD estimates from measured completion tokens."""
+    """Return low/high/mid USD estimates from measured completion tokens.
+
+    `mid` is the point estimate shown everywhere. When it is unknown whether a
+    reference video was used it is the no-video (higher) rate, because the app
+    normally continues chapters from an image frame; `low` is the with-video rate.
+    """
+    from app.services.usage_pricing import seedance_rate
+
     count = max(0, int(tokens or 0))
     if count == 0:
         return {"low": 0.0, "high": 0.0, "mid": 0.0}
-    if resolution_1080:
-        lo_rate = _BYTEPLUS_SEEDANCE_1080_WITH_VIDEO
-        hi_rate = _BYTEPLUS_SEEDANCE_1080_NO_VIDEO
-    else:
-        lo_rate = _BYTEPLUS_SEEDANCE_720_WITH_VIDEO
-        hi_rate = _BYTEPLUS_SEEDANCE_720_NO_VIDEO
+    res = _normalize_resolution(resolution) or ("1080p" if resolution_1080 else "720p")
+    lo_rate = seedance_rate(model, res, with_video=True)
+    hi_rate = seedance_rate(model, res, with_video=False)
     if with_video_input is True:
-        low_rate, high_rate = lo_rate, lo_rate
+        low_rate = high_rate = lo_rate
     elif with_video_input is False:
-        low_rate, high_rate = hi_rate, hi_rate
+        low_rate = high_rate = hi_rate
     else:
         low_rate, high_rate = lo_rate, hi_rate
     low_usd = round(count / 1_000_000 * low_rate, 4)
     high_usd = round(count / 1_000_000 * high_rate, 4)
-    return {"low": low_usd, "high": high_usd, "mid": round((low_usd + high_usd) / 2, 4)}
+    mid_usd = high_usd if with_video_input is None else low_usd
+    return {"low": low_usd, "high": high_usd, "mid": mid_usd}
 
 
-_SEEDANCE_25_USD_PER_30S_1080 = 17.0
+def seedance_cost_detail(row: Any) -> dict[str, Any] | None:
+    from app.services.usage_pricing import seedance_fallback_usd_per_30s
 
-
-def seedance_cost_detail(row: Any) -> dict[str, float] | None:
     if not is_byteplus_seedance_row(row):
         return None
     extra = getattr(row, "extra", None) or {}
     model = (getattr(row, "model", "") or "").lower()
-    resolution = str(extra.get("resolution") or "").lower()
-    resolution_1080 = "1080" in resolution or any(
-        token in model for token in ("seedance-2-5", "seedance_2_5", "seedance-2.5", "2-5", "2.5")
-    )
     with_video = extra.get("with_video_input")
-    if with_video is not None:
-        with_video_input = bool(with_video)
-    else:
-        with_video_input = None
+    with_video_input = bool(with_video) if with_video is not None else None
     tokens = _row_completion_tokens(row)
+    try:
+        duration = float(extra.get("duration_seconds") or extra.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+
     if tokens > 0:
-        return estimate_byteplus_seedance_cost_usd(
+        resolution = _normalize_resolution(extra.get("resolution"))
+        inferred = False
+        if resolution is None and with_video_input is not True:
+            # With a reference video the token count also includes that input
+            # clip, so tokens per second would over-state the resolution.
+            resolution = infer_seedance_resolution(tokens, duration)
+            inferred = resolution is not None
+        if resolution is None:
+            is_25 = any(
+                token in model
+                for token in ("seedance-2-5", "seedance_2_5", "seedance-2.5", "2-5", "2.5")
+            )
+            resolution = "1080p" if is_25 else "720p"
+        detail = estimate_byteplus_seedance_cost_usd(
             tokens,
             with_video_input=with_video_input,
-            resolution_1080=resolution_1080,
+            resolution=resolution,
+            model=getattr(row, "model", None),
         )
-    duration = float(extra.get("duration_seconds") or extra.get("duration") or 30)
-    mid = round(_SEEDANCE_25_USD_PER_30S_1080 * max(duration, 1.0) / 30.0, 4)
-    return {"low": mid, "high": mid, "mid": mid}
+        return {**detail, "resolution": resolution, "resolution_inferred": inferred}
+
+    seconds = duration or 30.0
+    mid = round(seedance_fallback_usd_per_30s() * max(seconds, 1.0) / 30.0, 4)
+    return {"low": mid, "high": mid, "mid": mid, "resolution": None, "resolution_inferred": False}
 
 
 def effective_cost_usd(row: Any) -> float:
@@ -234,17 +279,10 @@ def effective_cost_usd(row: Any) -> float:
 
 
 def manager_report_seedance_cost_usd(row: Any) -> float:
-    """Manager Excel: ~USD 17 per 30s @ 1080p when BytePlus did not store cost_usd."""
+    """Kept for compatibility: identical to the dashboard cost so reports never disagree."""
     if not is_byteplus_seedance_row(row) or not getattr(row, "success", False):
         return 0.0
-    if float(getattr(row, "cost_usd", 0) or 0) > 0:
-        return float(row.cost_usd)
-    extra = getattr(row, "extra", None) or {}
-    try:
-        duration = float(extra.get("duration_seconds") or extra.get("duration") or 30)
-    except (TypeError, ValueError):
-        duration = 30.0
-    return round(_SEEDANCE_25_USD_PER_30S_1080 * max(duration, 1.0) / 30.0, 4)
+    return effective_cost_usd(row)
 
 
 def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -> dict[str, Any]:
@@ -309,6 +347,9 @@ def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -
                 "cost_usd_high": detail["high"],
                 "cost_usd": detail["mid"],
                 "cost_estimated": float(row.cost_usd or 0) <= 0,
+                "resolution": detail.get("resolution"),
+                "resolution_inferred": bool(detail.get("resolution_inferred")),
+                "duration_seconds": extra.get("duration_seconds"),
                 "recovered": bool(extra.get("recovered")),
                 "client": tenant_names.get(row.tenant_id) if row.tenant_id else None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -744,6 +785,9 @@ async def usage_summary(
     from app.models.tenant import Tenant
     from app.models.user import User
 
+    from app.services.usage_pricing import refresh_if_stale
+
+    await refresh_if_stale()
     period_days = max(1, min(int(days or _CHART_DAYS), 366))
     since = datetime.now(timezone.utc) - timedelta(days=period_days)
     rows = await fetch_usage_events(
@@ -777,6 +821,12 @@ async def usage_summary(
         "prompt_tokens": sum(int(r.prompt_tokens or 0) for r in rows),
         "completion_tokens": sum(int(r.completion_tokens or 0) for r in rows),
         "total_tokens": sum(int(r.total_tokens or 0) for r in rows),
+        # Video tokens (Seedance / Gemini Omni) are not comparable with text tokens.
+        "video_tokens": sum(
+            int(r.total_tokens or 0)
+            for r in rows
+            if is_byteplus_seedance_row(r) or "omni" in (r.model or "").lower()
+        ),
         "credits": round(sum(float(r.credits or 0) for r in rows), 2),
         "cost_usd": round(sum(effective_cost_usd(r) for r in rows), 4),
     }

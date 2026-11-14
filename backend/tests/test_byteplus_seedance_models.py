@@ -11,6 +11,7 @@ from app.services.media.byteplus_seedance_client import (
     ark_api_key_for_model,
     clamp_seedance_duration,
     create_video_task,
+    extract_last_frame_url,
     is_seedance_25_model,
     map_aspect_to_ratio,
     map_resolution,
@@ -108,7 +109,7 @@ class SeedanceModelTests(unittest.TestCase):
             self.assertEqual(ark_api_key_for_model("ark-seedance-2-0"), "key-2-0")
             self.assertEqual(ark_api_key_for_model("ark-seedance-2-5"), "key-2-5")
             settings.ARK_API_KEY_25 = ""
-            self.assertEqual(ark_api_key_for_model("ark-seedance-2-5"), "key-2-0")
+            self.assertEqual(ark_api_key_for_model("ark-seedance-2-5"), "")
         finally:
             settings.ARK_API_KEY = original_20
             settings.ARK_API_KEY_25 = original_25
@@ -116,6 +117,38 @@ class SeedanceModelTests(unittest.TestCase):
     def test_map_aspect_includes_four_by_five(self):
         self.assertEqual(map_aspect_to_ratio("4/5"), "4:5")
         self.assertEqual(map_aspect_to_ratio("4:5"), "4:5")
+
+    def test_create_task_requests_provider_last_frame(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "status_code": 200,
+                "content": b"{}",
+                "json": lambda self: {"id": "task-last-frame"},
+                "text": "",
+            },
+        )()
+        request = AsyncMock(return_value=response)
+        with patch(
+            "app.services.media.byteplus_seedance_client.async_request_with_retry",
+            request,
+        ):
+            asyncio.run(
+                create_video_task(
+                    object(),
+                    prompt="Continue the approved scene.",
+                    model="dreamina-seedance-2-5-260628",
+                )
+            )
+        self.assertTrue(request.await_args.kwargs["json"]["return_last_frame"])
+
+    def test_extracts_original_provider_last_frame(self):
+        url = "https://ark-content-generation-ap-southeast-1.tos-ap-southeast-1.volces.com/frame.jpg"
+        self.assertEqual(
+            extract_last_frame_url({"content": {"last_frame_url": url}}),
+            url,
+        )
 
     def test_seedance_25_maps_four_by_five_to_three_by_four(self):
         ratio, note = resolve_seedance_api_ratio("4/5", model="ark-seedance-2-5")

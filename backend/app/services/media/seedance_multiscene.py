@@ -369,6 +369,46 @@ def save_continuity_frame(video_path: Path, *, tenant_id: str) -> str:
     return str(saved["file_url"])
 
 
+def save_cast_frame(video_path: Path, *, tenant_id: str, seconds: float) -> str:
+    """Persist a frame from an authored presenter scene as the cast anchor.
+
+    A chapter's last frame is often B-roll or a proof dashboard. Treating that
+    frame as a character reference causes the following chapter to invent a new
+    presenter. This helper deliberately samples inside a presenter scene.
+    """
+    from app.services.video_portrait import _extract_png_frame
+
+    ffmpeg = require_ffmpeg()
+    duration = float(probe_video_duration(video_path) or 0.0)
+    if duration <= 0.1:
+        raise RuntimeError("Could not determine video duration for cast continuity")
+    at = max(0.1, min(float(seconds), max(0.1, duration - 0.15)))
+    png = _extract_png_frame(ffmpeg, video_path, seconds=at)
+    if not png:
+        raise RuntimeError("Could not extract presenter frame for cast continuity")
+    try:
+        from PIL import Image
+
+        output = BytesIO()
+        with Image.open(BytesIO(png)) as image:
+            image.convert("RGB").save(output, format="JPEG", quality=92, optimize=True)
+        content = output.getvalue()
+        suffix = ".jpg"
+        content_type = "image/jpeg"
+    except Exception:
+        content = png
+        suffix = ".png"
+        content_type = "image/png"
+    saved = file_service.save_bytes(
+        content=content,
+        tenant_id=tenant_id,
+        subfolder="generated/cast-continuity",
+        suffix=suffix,
+        content_type=content_type,
+    )
+    return str(saved["file_url"])
+
+
 def save_privacy_safe_scene_frame(video_path: Path, *, tenant_id: str) -> str:
     """Persist the lower scene/product area without resubmitting a person's face.
 
@@ -551,7 +591,11 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
     ffmpeg = require_ffmpeg()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from app.services.ffmpeg_util import probe_has_audio, probe_video_stream_duration
+    from app.services.ffmpeg_util import (
+        probe_has_audio,
+        probe_video_resolution,
+        probe_video_stream_duration,
+    )
 
     audio_flags = [probe_has_audio(path) for path in paths]
     if any(flag is None for flag in audio_flags):
@@ -563,6 +607,22 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
     if any(duration is None or duration <= 0 for duration in durations):
         raise RuntimeError("Cannot determine every clip duration before stitching")
 
+    # The concat filter requires every input frame to share one exact
+    # width/height — Seedance chapters can come back at slightly different
+    # pixel dimensions even for the same requested aspect/resolution, which
+    # otherwise makes libx264 fail with "Could not open encoder before EOF"
+    # and leaves the output with no packets. Lock every clip to the first
+    # chapter's resolution (rounded to even, which yuv420p requires) via
+    # scale+pad before concatenation.
+    resolutions = [probe_video_resolution(path) for path in paths]
+    if any(res is None for res in resolutions):
+        raise RuntimeError("Cannot determine every clip resolution before stitching")
+    target_w, target_h = resolutions[0]  # type: ignore[misc]
+    target_w -= target_w % 2
+    target_h -= target_h % 2
+    if target_w <= 0 or target_h <= 0:
+        raise RuntimeError("Invalid target resolution for stitched video")
+
     reencode_cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
     for path in paths:
         reencode_cmd += ["-i", str(path)]
@@ -571,6 +631,8 @@ def _concat_encoded_video_files(paths: list[Path], output_path: Path) -> None:
         duration = float(durations[index] or 0.0)
         filters.append(
             f"[{index}:v:0]trim=duration={duration:.6f},fps=24,"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"format=yuv420p,setsar=1,setpts=PTS-STARTPTS[v{index}]"
         )
         if has_audio:

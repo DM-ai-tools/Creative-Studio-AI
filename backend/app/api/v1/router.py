@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import admin, assets, auth, brands, briefs, generation, meta, performance, variants
+from app.api.v1 import admin, assets, auth, brands, briefs, email_templates, generation, landing_page_ads, meta, performance, variants
 
 api_router = APIRouter()
 
@@ -13,3 +13,5 @@ api_router.include_router(variants.router)
 api_router.include_router(assets.router)
 api_router.include_router(performance.router)
 api_router.include_router(admin.router)
+api_router.include_router(landing_page_ads.router)
+api_router.include_router(email_templates.router)

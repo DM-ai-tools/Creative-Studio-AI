@@ -37,7 +37,7 @@ def is_master_production_brief(text: str) -> bool:
     t = str(text or "")
     if len(t) < 800:
         return False
-    has_image_blocks = bool(re.search(r"(?im)^[ \t]*IMAGE\s+\d+\s*[-–—]", t))
+    has_image_blocks = bool(re.search(r"(?im)^[ \t]*IMAGE\s+\d+\s*[-–—:]", t))
     has_scenes = bool(re.search(r"(?im)^[ \t]*(?:SCENE|Chapter)\s+\d+\s*[—–\-]", t))
     has_timeline = bool(re.search(r"\d{2}:\d{2}[–—\-]\d{2}:\d{2}", t))
     has_dialogue = bool(re.search(r"(?i)DIALOGUE|SPEAK EXACTLY|narration", t))
@@ -86,11 +86,7 @@ def split_scene_plan_by_audio_mode(
 
 def _scene_requests_proof_composite(body_low: str) -> bool:
     """True only when a scene positively requires editor proof compositing."""
-    if re.search(
-        r"(?i)\b(?:no|not|without|do not|don't|never|exclude|recreate|display|repeat)\b"
-        r"[^\n]{0,48}\bproof\b",
-        body_low,
-    ):
+    if _PROOF_NEGATION.search(body_low):
         return False
     return bool(
         re.search(
@@ -101,6 +97,24 @@ def _scene_requests_proof_composite(body_low: str) -> bool:
             body_low,
         )
     )
+
+
+_PROOF_NEGATION = re.compile(
+    r"(?i)\b(?:no|not|without|do not|don't|never|exclude|recreate|display|repeat)\b"
+    r"[^\n]{0,48}\bproof\b"
+)
+# A scene can reference an uploaded proof asset in plain, grammatically correct
+# English ("show the exact uploaded file named proof-before.png") without using
+# the specific phrasing _scene_requests_proof_composite looked for ("exact
+# uploaded proof image/card"). That gap reached a live render twice: the scene
+# silently fell through to a generic classification, the uploaded card was
+# never composited in, and Seedance just kept filming whatever was already on
+# screen through that whole window. parse_scene_plan already extracts the
+# filename/marker (proof_names/proof_indices below) — it just never used it
+# for classification. This closes that gap at the source.
+_PROOF_FILENAME_MARKER = re.compile(
+    r"(?i)\[insert\s+stat\s+image|\bproof[-_][a-z0-9]+\.(?:png|jpe?g|webp)\b"
+)
 
 
 def parse_scene_plan(brief: str) -> list[dict]:
@@ -134,7 +148,9 @@ def parse_scene_plan(brief: str) -> list[dict]:
             scene_type = "broll"
         elif re.search(r"\bb[ -]?roll\b|\bcutaway\b", type_text):
             scene_type = "broll"
-        elif _scene_requests_proof_composite(body_low):
+        elif _scene_requests_proof_composite(body_low) or (
+            _PROOF_FILENAME_MARKER.search(body) and not _PROOF_NEGATION.search(body_low)
+        ):
             scene_type = "proof"
         elif re.search(r"presenter|talking.head|return.*presenter", type_text):
             scene_type = "presenter"
@@ -155,6 +171,21 @@ def parse_scene_plan(brief: str) -> list[dict]:
             body,
         )
         visual = re.sub(r"\s+", " ", str(visual_m.group(1) if visual_m else "").strip())
+        proof_indices = [
+            int(value)
+            for value in re.findall(
+                r"\[INSERT\s+STAT\s+IMAGE\s+(\d+)\]",
+                body,
+                re.I,
+            )
+        ]
+        proof_names = [
+            re.sub(r"\s+", " ", value).strip()
+            for value in re.findall(
+                r"(?i)\b([A-Za-z0-9][A-Za-z0-9_().-]*\.(?:png|jpe?g|webp))\b",
+                body,
+            )
+        ]
 
         scenes.append({
             "scene": num,
@@ -164,6 +195,8 @@ def parse_scene_plan(brief: str) -> list[dict]:
             "broll_index": broll_idx,
             "dialogue": dialogue[:500],
             "visual": visual[:400],
+            "proof_indices": list(dict.fromkeys(proof_indices)),
+            "proof_names": list(dict.fromkeys(proof_names)),
         })
     return scenes
 
@@ -189,14 +222,14 @@ def is_production_setup_only_message(text: str) -> bool:
     return False
 
 _BROLL_BLOCK = re.compile(
-    r"(?is)IMAGE\s+(\d+)\s*[-–—]\s*([^\n]+)\n"
+    r"(?is)IMAGE\s+(\d+)\s*[-–—:]\s*([^\n]+)\n"
     r"(?:[^\n]*\n)*?"
     r"(?:Scene timing:\s*\n?\s*)?"
     r"(\d{1,2}(?::\d{2}(?:\.\d+)?|\.\d+)?|\d+(?:\.\d+)?)\s*[–—\-:\s]+\s*"
     r"(\d{1,2}(?::\d{2}(?:\.\d+)?|\.\d+)?|\d+(?:\.\d+)?)\s*(?:s|seconds?)?\b"
     r"(?:[^\n]*\n)*?"
     r"(?:Image generation prompt:\s*\n?)?"
-    r"(.+?)(?=\n(?:Use:|Do not reuse|\-{3,}|IMAGE\s+\d+\s*[-–—])|\Z)"
+    r"(.+?)(?=\n(?:Use:|Do not reuse|\-{3,}|IMAGE\s+\d+\s*[-–—:])|\Z)"
 )
 
 _BACKGROUND_IMAGE_HEADER = re.compile(
@@ -545,6 +578,14 @@ def presenter_identity_context(prompt: str, *, max_chars: int = 2400) -> str:
     return value[:max_chars].rstrip()
 
 
+_SILENT_CHARACTER_MARKERS = re.compile(
+    r"(?i)must\s+(?:remain\s+)?(?:not\s+)?(?:look\s+directly[^.\n]*?,\s*)?"
+    r"(?:not\s+)?(?:speak|lip[- ]?sync|open\s+(?:his|her|their)\s+mouth)|"
+    r"\bremains?\s+silent\b|\bstays?\s+silent\b|\bmust\s+not\s+speak\b|"
+    r"\bno\s+dialogue\b|\bno\s+lip[- ]?sync\b"
+)
+
+
 def presenter_text_to_video_prompt(
     *,
     duration: float,
@@ -562,15 +603,38 @@ def presenter_text_to_video_prompt(
             "presenter from the identity requirements below; never copy a real person's identity.\n"
         )
     )
-    scope = (
-        "PRESENTER-ONLY SEGMENT: Keep one continuous presenter performance for this entire call. "
-        "Do not cut away to, preview, recreate or animate any separately scheduled B-roll, approved "
-        "still, proof image, product card, dashboard close-up, montage, CTA, end card, or later scene. "
-        "Do not invent an internal edit. The compositor adds those assets in their own timeline slots. "
-        "Use natural direct-to-camera delivery, restrained gestures, realistic blinking and stable "
-        "wardrobe, location, lighting and camera direction. Speak only the narration supplied after "
-        "this instruction.\n"
-    )
+    # A gap can be an on-camera speaker (Scene 1's presenter) or a silent
+    # reaction shot (a founder who must not speak). The old "scope" text below
+    # unconditionally told Seedance "speak only the narration supplied after
+    # this instruction" for every gap — directly contradicting a scene's own
+    # "must not speak / must not open his mouth" direction in the same prompt.
+    # That contradiction is why a silent character sometimes got voiced anyway
+    # (with Seedance's own, wrong-gender voice): the model was told to both
+    # speak and not speak in one call. Detect the silent case from the scoped
+    # identity text and drop the speaking instruction entirely for it.
+    is_silent_character = bool(identity and _SILENT_CHARACTER_MARKERS.search(identity))
+    if is_silent_character:
+        scope = (
+            "SILENT REACTION SEGMENT: Keep one continuous shot of this person for this entire "
+            "call. Do not cut away to, preview, recreate or animate any separately scheduled "
+            "B-roll, approved still, proof image, product card, dashboard close-up, montage, CTA, "
+            "end card, or later scene. Do not invent an internal edit. The compositor adds those "
+            "assets in their own timeline slots. This person does not speak, does not lip-sync, "
+            "and keeps their mouth closed or naturally neutral — react only through expression, "
+            "posture and gesture. Generate NO speech, dialogue or voice for this person; any "
+            "narration heard during this shot is a separate off-camera voice that does not belong "
+            "to them and must not be lip-synced.\n"
+        )
+    else:
+        scope = (
+            "PRESENTER-ONLY SEGMENT: Keep one continuous presenter performance for this entire call. "
+            "Do not cut away to, preview, recreate or animate any separately scheduled B-roll, approved "
+            "still, proof image, product card, dashboard close-up, montage, CTA, end card, or later scene. "
+            "Do not invent an internal edit. The compositor adds those assets in their own timeline slots. "
+            "Use natural direct-to-camera delivery, restrained gestures, realistic blinking and stable "
+            "wardrobe, location, lighting and camera direction. Speak only the narration supplied after "
+            "this instruction.\n"
+        )
     prompt = (
         continuity
         + scope
@@ -636,13 +700,28 @@ def build_chapter_broll_segments(
     broll_plan: list[dict[str, Any]],
     approved_broll: dict[int, str],
     chapter_motion_prompt: str = "",
+    canonical_prompt: str = "",
+    total_duration: float = 0.0,
 ) -> list[dict[str, Any]]:
     """
     Build ordered Seedance segments for one chapter. Each segment uses exactly one
     approved still as first_frame (presenter, B-roll dashboard, or uploaded proof).
+
+    A chapter can contain more than one non-B-roll beat (e.g. a presenter hook, then
+    later a separate silent founder reaction) in the gaps between approved B-roll
+    stills. Every such gap used to receive the *entire* chapter_motion_prompt —
+    every scene's text pooled together — so presenter_identity_context pulled
+    identity details for whichever character it found anywhere in the chapter into
+    every gap's call, regardless of which character that specific gap was actually
+    about. When canonical_prompt and total_duration are supplied, each presenter gap
+    is instead scoped to only its own local window via segment_motion_prompt, so a
+    distinct second character (a silent founder, say) gets its own identity context
+    instead of inheriting the first gap's presenter description.
     """
     if chapter_end <= chapter_start:
         raise ValueError("Chapter duration must be positive")
+
+    from app.services.creative_studio_timeline import segment_motion_prompt
 
     brolls = broll_items_for_chapter(
         broll_plan, chapter_start=chapter_start, chapter_end=chapter_end
@@ -673,9 +752,23 @@ def build_chapter_broll_segments(
         if use_t2v and kind == "presenter":
             # A presenter call receives cast context only. The compositor appends
             # each approved B-roll/proof still once in its own scheduled slot.
+            # Scope the identity context to just this gap's own window when the
+            # full authored timeline is available, so a second non-B-roll
+            # character elsewhere in the chapter doesn't bleed into this call.
+            local_motion = chapter_motion_prompt
+            if canonical_prompt and total_duration > 0:
+                try:
+                    local_motion = segment_motion_prompt(
+                        canonical_prompt,
+                        start=float(start),
+                        end=float(end),
+                        total=float(total_duration),
+                    )
+                except ValueError:
+                    local_motion = chapter_motion_prompt
             motion = presenter_text_to_video_prompt(
                 duration=duration,
-                chapter_motion_prompt=chapter_motion_prompt,
+                chapter_motion_prompt=local_motion,
                 from_continuity=use_continuity,
             )
         elif kind == "product":

@@ -342,6 +342,33 @@ def _chapter_starts_with_broll(
     )
 
 
+def _chapter_opens_on_scene_cut(
+    scene_plan: list[dict[str, Any]],
+    *,
+    start: float,
+    end: float,
+) -> bool:
+    """True when the script starts this chapter on a new B-roll or proof scene.
+
+    Such a chapter is an authored cut: its first frame is not meant to match the
+    previous chapter's final frame, so the continuity handoff check must not
+    reject it.
+    """
+    chapter_scenes = sorted(
+        (
+            scene for scene in scene_plan
+            if float(scene.get("start") or 0) < float(end)
+            and float(scene.get("end") or 0) > float(start)
+        ),
+        key=lambda scene: float(scene.get("start") or 0),
+    )
+    return bool(
+        chapter_scenes
+        and str(chapter_scenes[0].get("type") or "") in {"broll", "proof"}
+        and abs(float(chapter_scenes[0].get("start") or 0) - float(start)) <= 0.1
+    )
+
+
 def _video_job_result_payload(
     *,
     result: dict[str, Any] | None,
@@ -414,6 +441,66 @@ def _video_job_result_payload(
     return payload
 
 
+def _recover_prior_chapter_paths(
+    accumulated: list[Path],
+    production_memory: dict[str, Any] | None,
+    *,
+    expected_count: int,
+    tenant_id: str,
+) -> tuple[list[Path], list[int]]:
+    """Return every earlier chapter file in order, plus the chapter numbers still missing.
+
+    The browser passes earlier chapter paths back on each request. Those paths
+    can be lost (page refresh) or point at files this server no longer has
+    (restart, another instance). Stitching only the surviving chapters produced
+    a "final" film that was just the last chapter, so recover the raw clips from
+    the production chapter log before giving up.
+    """
+    expected = max(0, int(expected_count))
+    if len(accumulated) >= expected:
+        return list(accumulated), []
+
+    from app.services.video_subtitles import _ensure_local_video
+
+    by_chapter = {
+        int(entry.get("chapter") or 0): entry
+        for entry in ((production_memory or {}).get("chapter_log") or [])
+        if isinstance(entry, dict)
+    }
+    recovered: list[Path] = []
+    missing: list[int] = []
+    for number in range(1, expected + 1):
+        entry = by_chapter.get(number) or {}
+        # Raw clips only: the logged review URL already carries chapter narration,
+        # and the final master lays narration over the stitched film again.
+        logged_path = str(entry.get("video_path") or "").strip()
+        if logged_path and Path(logged_path).is_file():
+            recovered.append(Path(logged_path))
+            continue
+        provider_url = str(entry.get("provider_video_url") or "").strip()
+        local = (
+            _ensure_local_video(provider_url, tenant_id=tenant_id)
+            if provider_url.startswith(("http://", "https://"))
+            else None
+        )
+        if local and Path(local).is_file():
+            recovered.append(Path(local))
+            continue
+        missing.append(number)
+    if missing:
+        logger.error(
+            "Creative Studio chapter stitch: chapters %s unavailable (production %s)",
+            missing,
+            (production_memory or {}).get("production_id"),
+        )
+        return list(accumulated), missing
+    logger.warning(
+        "Creative Studio chapter stitch: recovered %d earlier chapter(s) from the chapter log",
+        len(recovered),
+    )
+    return recovered, []
+
+
 async def _apply_chapter_image_staging_result(
     *,
     tenant_id: str,
@@ -456,6 +543,12 @@ async def _apply_chapter_image_staging_result(
         for value in (data.get("accumulated_segment_paths") or [])
         if Path(value).is_file()
     ]
+    accumulated, missing_chapters = _recover_prior_chapter_paths(
+        accumulated,
+        production_memory,
+        expected_count=film_chapter_index,
+        tenant_id=tenant_id,
+    )
 
     local_path = _ensure_local_video(str(result["url"]), tenant_id=tenant_id)
     if not local_path or not Path(local_path).is_file():
@@ -464,7 +557,12 @@ async def _apply_chapter_image_staging_result(
         return result
     chapter_path = Path(local_path)
     preview_duration = probe_video_duration(chapter_path) or float(generate_duration)
-    continuity_reference_url = save_continuity_frame(chapter_path, tenant_id=tenant_id)
+    provider_last_frame_url = str(result.get("last_frame_url") or "").strip()
+    continuity_reference_url = (
+        provider_last_frame_url
+        if provider_last_frame_url.startswith(("http://", "https://", "asset://"))
+        else save_continuity_frame(chapter_path, tenant_id=tenant_id)
+    )
     quality_gate = chapter_quality_report(
         chapter_path,
         expected_duration=float(generate_duration),
@@ -579,6 +677,34 @@ async def _apply_chapter_image_staging_result(
                     f"{film_chapter_index + 2} — Seedance continues the same presenter "
                     "from this clip's final frame (no new presenter photo)."
                 ),
+            }
+        )
+        return result
+
+    if missing_chapters:
+        # Never present the last chapter alone as the finished film.
+        missing_label = ", ".join(str(number) for number in missing_chapters)
+        message = (
+            f"The final film could not be stitched: chapter {missing_label} of "
+            f"{film_total_chapters} is no longer available on the server. Chapter "
+            f"{film_chapter_index + 1} is saved; regenerate the missing chapter and retry."
+        )
+        result.update(
+            {
+                "status": "failed",
+                "error": message,
+                "note": message,
+                "url": review_url,
+                "partial": True,
+                "stitch_incomplete": True,
+                "missing_chapters": missing_chapters,
+                "completed_segments": len(chapter_paths),
+                "segment_count": film_total_chapters,
+                "staged_segment_paths": staged_paths,
+                "film_chapter_index": film_chapter_index,
+                "film_total_chapters": film_total_chapters,
+                "production_id": production_memory.get("production_id"),
+                "production_report": public_production_report(production_memory),
             }
         )
         return result
@@ -1137,13 +1263,36 @@ async def recover_continuation_job(
     generated_duration_seconds: int | None = None,
     continuity_frame_count: int | None = None,
     cast_reference_url: str | None = None,
+    continuity_reference_url: str | None = None,
     continuity_video_reference_url: str | None = None,
+    credential_family: str | None = None,
+    credential_fingerprint: str | None = None,
     production_id: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rebuild a staged continuation after the in-memory job store was lost."""
     from app.services.logo_overlay import file_url_to_local_path
     from app.services.media.seedance_multiscene import save_continuity_frame
+    from app.services.media.byteplus_seedance_client import (
+        ark_credential_family,
+        ark_credential_fingerprint,
+    )
+
+    recovery_model = str((payload or {}).get("model") or "").strip()
+    expected_family = ark_credential_family(recovery_model)
+    expected_fingerprint = ark_credential_fingerprint(recovery_model)
+    saved_family = str(credential_family or "").strip()
+    saved_fingerprint = str(credential_fingerprint or "").strip()
+    if saved_family and saved_family != expected_family:
+        raise ValueError(
+            "The approved chapter belongs to a different Seedance credential family. "
+            "Continuation was stopped before submitting a paid request."
+        )
+    if saved_fingerprint and saved_fingerprint != expected_fingerprint:
+        raise ValueError(
+            "The ModelArk API key changed after the approved chapter was generated. "
+            "Continuation was stopped before submitting a paid request."
+        )
 
     video_path = file_url_to_local_path(part_video_url)
     if not video_path or not video_path.is_file():
@@ -1151,13 +1300,20 @@ async def recover_continuation_job(
             "Could not locate the reviewed video part on the server. "
             "Re-open this chat and try again, or regenerate from your brief."
         )
+    approved_frame_reference = str(continuity_reference_url or "").strip()
     approved_video_reference = str(continuity_video_reference_url or "").strip()
-    if not approved_video_reference.startswith(("http://", "https://", "asset://")):
+    frame_available = approved_frame_reference.startswith(("http://", "https://", "asset://"))
+    video_available = approved_video_reference.startswith(("http://", "https://", "asset://"))
+    if not frame_available and not video_available:
         raise ValueError(
-            "The approved chapter's original Seedance video reference is unavailable. "
+            "The approved chapter's original Seedance frame/video reference is unavailable. "
             "Continuation was stopped before submitting another billable generation."
         )
-    continuity_url = save_continuity_frame(video_path, tenant_id=tenant_id)
+    continuity_url = (
+        approved_frame_reference
+        if frame_available
+        else save_continuity_frame(video_path, tenant_id=tenant_id)
+    )
     next_id = str(uuid.uuid4())
     cont_payload = dict(payload or {})
     cont_payload.update(
@@ -1166,12 +1322,17 @@ async def recover_continuation_job(
             "staged_segment_paths": [str(video_path)],
             "continuity_reference_url": continuity_url,
             "cast_reference_url": cast_reference_url or continuity_url,
-            "continuity_video_reference_url": approved_video_reference,
+            # Exact ModelArk last-frame continuity and reference-video mode are
+            # mutually exclusive. Prefer the original provider frame whenever
+            # the client persisted it before a server restart.
+            "continuity_video_reference_url": None if frame_available else approved_video_reference,
             "continuity_frame_count": int(continuity_frame_count or 0),
             "continuity_privacy_fallback_count": 0,
             "generated_duration_seconds": int(generated_duration_seconds or 0),
             "interactive_staging": int(segment_count or 0) > 1,
             "production_id": production_id,
+            "credential_family": expected_family,
+            "credential_fingerprint": expected_fingerprint,
         }
     )
     _apply_continuation_overrides(cont_payload, overrides)
@@ -1221,7 +1382,9 @@ def _apply_continuation_overrides(
     if next_prompt:
         payload["chapter_prompt_override"] = next_prompt
 
-    allowed_roles = {"product", "logo", "scene", "character", "reference"}
+    allowed_roles = {
+        "product", "logo", "scene", "character", "reference", "proof", "reference_video"
+    }
     incoming: list[dict[str, str]] = []
     for item in values.get("next_reference_assets") or []:
         if not isinstance(item, dict):
@@ -1244,7 +1407,7 @@ def _apply_continuation_overrides(
         }
         for item in incoming:
             merged[item["url"]] = item
-        payload["reference_assets"] = list(merged.values())[:9]
+        payload["reference_assets"] = list(merged.values())[:10]
         extra = [
             str(url or "").strip()
             for url in (payload.get("additional_reference_urls") or [])
@@ -1276,6 +1439,10 @@ async def create_continuation_job(
 ) -> dict[str, Any] | None:
     """Queue the next reviewed provider chapter for a staged long video."""
     from app.services.media.gemini_omni_provider import is_gemini_omni_model
+    from app.services.media.byteplus_seedance_client import (
+        ark_credential_family,
+        ark_credential_fingerprint,
+    )
 
     async with _LOCK:
         parent = _get_job_record_unlocked(job_id, tenant_id=tenant_id)
@@ -1334,6 +1501,29 @@ async def create_continuation_job(
                     "video call was not submitted, so no continuation credits were used."
                 ),
             }
+        if not use_gemini:
+            expected_family = ark_credential_family(parent_model)
+            expected_fingerprint = ark_credential_fingerprint(parent_model)
+            saved_family = str(result.get("credential_family") or "").strip()
+            saved_fingerprint = str(result.get("credential_fingerprint") or "").strip()
+            if saved_family and saved_family != expected_family:
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": (
+                        "The approved chapter belongs to a different Seedance credential family. "
+                        "Continuation was stopped before submitting a paid request."
+                    ),
+                }
+            if saved_fingerprint and saved_fingerprint != expected_fingerprint:
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": (
+                        "The ModelArk API key changed after the approved chapter was generated. "
+                        "Continuation was stopped before submitting a paid request."
+                    ),
+                }
         next_id = str(uuid.uuid4())
         payload = dict(parent.get("payload") or {})
         payload.update({
@@ -1540,6 +1730,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                     model=model,
                     format_type=format_type,
                     reference_purpose="character",
+                    target_video_model=str(data.get("target_video_model") or "") or None,
                 )
                 generated_character_url = str((identity_result or {}).get("url") or "").strip() or None
                 if not generated_character_url:
@@ -1593,6 +1784,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 reference_image_url=reference_url,
                 reference_image_urls=character_refs if clone_mode else None,
                 reference_purpose=reference_purpose,
+                target_video_model=str(data.get("target_video_model") or "") or None,
             )
             if is_job_cancel_requested(job_id):
                 await update_job(
@@ -1659,6 +1851,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 result={
                     "url": (result or {}).get("url"),
                     "byteplus_url": (result or {}).get("byteplus_url"),
+                    "trusted_video_model": (result or {}).get("trusted_video_model"),
                     "model": str((result or {}).get("model") or model),
                     "provider": (result or {}).get("provider"),
                     "credits_estimate": credits or None,
@@ -1786,6 +1979,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                     format_type=format_type,
                     reference_image_url=ref_url,
                     reference_purpose=ref_purpose,
+                    target_video_model=str(data.get("target_video_model") or "") or None,
                 )
                 return {
                     "id": str(scene.get("id") or f"scene-{idx + 1}"),
@@ -1939,7 +2133,13 @@ async def run_creative_studio_job(job_id: str) -> None:
                         f"{frame_prompt} Keep all screens, clothing, cartons, signs and packaging clean "
                         "and unbranded. Verified brand artwork is composited after generation."
                     )
-                ref_url = style_anchor
+                # Do not automatically feed IMAGE 1 into every later B-roll
+                # request. Image models can copy the anchor's dashboard content
+                # (numbers, warning state and layout) even when the next prompt
+                # asks for a different visual. Continuity must be explicitly
+                # opted into by the plan item.
+                use_style_anchor = bool(item.get("use_style_anchor", False))
+                ref_url = style_anchor if use_style_anchor else None
                 ref_purpose = "style"
                 res = await provider.generate(
                     prompt=frame_prompt[:2200],
@@ -1948,6 +2148,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                     format_type=format_type,
                     reference_image_url=ref_url,
                     reference_purpose=ref_purpose,
+                    target_video_model=str(data.get("target_video_model") or "") or None,
                 )
                 return {
                     "id": str(item.get("id") or f"broll-{broll_idx}"),
@@ -2080,6 +2281,57 @@ async def run_creative_studio_job(job_id: str) -> None:
             10 if use_gemini else seedance_clip_cap_seconds(model) if use_byteplus else 15
         )
         seedance_label = "Seedance 2.5" if clip_cap >= 30 else "Seedance 2.0"
+        video_reference_mode = str(
+            data.get("video_reference_mode") or "reference"
+        ).strip().lower()
+        if video_reference_mode not in {"reference", "edit"}:
+            video_reference_mode = "reference"
+        uploaded_video_refs = [
+            asset
+            for asset in (data.get("reference_assets") or [])
+            if isinstance(asset, dict)
+            and str(asset.get("role") or "").strip().lower() == "reference_video"
+            and str(asset.get("url") or "").strip()
+        ]
+        if uploaded_video_refs:
+            from app.services.ffmpeg_util import probe_video_duration
+            from app.services.logo_overlay import file_url_to_local_path
+
+            reference_cap = 30.0 if clip_cap >= 30 else 15.0
+            total_reference_duration = 0.0
+            for asset in uploaded_video_refs:
+                source_url = str(asset.get("url") or "").strip()
+                source_path = file_url_to_local_path(source_url)
+                if source_path and source_path.is_file():
+                    if source_path.suffix.lower() not in {".mp4", ".mov"}:
+                        raise ValueError(
+                            f"Unsupported video format for {source_path.name}. Upload MP4 or MOV."
+                        )
+                    source_duration = float(probe_video_duration(source_path) or 0.0)
+                    if source_duration <= 0:
+                        raise ValueError(
+                            f"Could not read the duration of {source_path.name}. Re-export it as MP4 or MOV."
+                        )
+                    minimum_duration = 4.0 if video_reference_mode == "edit" else 2.0
+                    if source_duration < minimum_duration or source_duration > reference_cap:
+                        mode_label = "edit source" if video_reference_mode == "edit" else "reference"
+                        raise ValueError(
+                            f"{source_path.name} is {source_duration:.1f}s. The Seedance {mode_label} "
+                            f"must be {minimum_duration:.0f}–{reference_cap:.0f} seconds."
+                        )
+                    total_reference_duration += source_duration
+            if video_reference_mode == "reference" and total_reference_duration > reference_cap + 0.05:
+                raise ValueError(
+                    f"Uploaded reference videos total {total_reference_duration:.1f}s. "
+                    f"This model accepts at most {reference_cap:.0f}s in one request."
+                )
+        if video_reference_mode == "edit":
+            if not use_byteplus or clip_cap < 30:
+                raise ValueError("Uploaded-video editing requires Seedance 2.5.")
+            if len(uploaded_video_refs) != 1:
+                raise ValueError(
+                    "Uploaded-video editing requires exactly one 4–30 second video."
+                )
         prompt_only_video = prompt_only_requested and (use_byteplus or use_gemini)
         video_spec = resolve_video_spec(model) if is_higgsfield_video_model(model) else None
         # Chat / uploads can supply a reference frame for Seedance.
@@ -2101,7 +2353,11 @@ async def run_creative_studio_job(job_id: str) -> None:
             and not use_gemini
             and not seed_url
         )
-        requested_duration = max(5, min(600, int(data.get("duration_seconds") or 15)))
+        requested_duration = (
+            30
+            if video_reference_mode == "edit"
+            else max(5, min(600, int(data.get("duration_seconds") or 15)))
+        )
         chapter_image_staging = bool(data.get("chapter_image_staging"))
         memory_duration = (
             max(5, min(600, int(data.get("full_film_duration") or requested_duration)))
@@ -2149,11 +2405,12 @@ async def run_creative_studio_job(job_id: str) -> None:
             # revised per-chapter prompt must never erase cast/style/story context.
             finishing_brief = str(existing_production.get("canonical_prompt") or finishing_brief)
             visual_prompt = finishing_brief
-        visual_prompt = normalize_video_timeline_prompt(
-            finishing_brief,
-            visual_prompt,
-            total=float(requested_duration),
-        )
+        if video_reference_mode != "edit":
+            visual_prompt = normalize_video_timeline_prompt(
+                finishing_brief,
+                visual_prompt,
+                total=float(requested_duration),
+            )
         voice_events = extract_voiceover_events(
             finishing_brief, duration_seconds=memory_duration
         )
@@ -2265,20 +2522,29 @@ async def run_creative_studio_job(job_id: str) -> None:
                 f"every original proof card before retrying. No {provider_request_label} request was submitted."
             )
         from app.services.creative_studio_preflight import validate_video_preflight
-        preflight_report = validate_video_preflight(
-            prompt=visual_prompt,
-            duration_seconds=requested_duration,
-            storyboard_image_urls=[] if prompt_only_video else list(data.get("storyboard_image_urls") or []),
-            seed_image_url=seed_url,
-            sound_on=sound_on,
-            voice_events=voice_events,
-            speech_mode=speech_mode,
-            reference_assets=list(data.get("reference_assets") or []),
-            product_reference_url=str(data.get("product_reference_url") or "").strip() or None,
-            logo_reference_url=str(data.get("logo_reference_url") or "").strip() or None,
-            require_storyboard_coverage=bool(data.get("require_storyboard_coverage", True)),
-            # Chapter prompts are intentionally single-scene — don't require multi-scene structure
-            is_chapter=bool(data.get("film_total_chapters", 1) > 1 or data.get("film_chapter_index", 0) > 0),
+        preflight_report = (
+            {
+                "scene_count": 1,
+                "storyboard_count": 0,
+                "video_reference_count": 1,
+                "video_reference_mode": "edit",
+            }
+            if video_reference_mode == "edit"
+            else validate_video_preflight(
+                prompt=visual_prompt,
+                duration_seconds=requested_duration,
+                storyboard_image_urls=[] if prompt_only_video else list(data.get("storyboard_image_urls") or []),
+                seed_image_url=seed_url,
+                sound_on=sound_on,
+                voice_events=voice_events,
+                speech_mode=speech_mode,
+                reference_assets=list(data.get("reference_assets") or []),
+                product_reference_url=str(data.get("product_reference_url") or "").strip() or None,
+                logo_reference_url=str(data.get("logo_reference_url") or "").strip() or None,
+                require_storyboard_coverage=bool(data.get("require_storyboard_coverage", True)),
+                # Chapter prompts are intentionally single-scene — don't require multi-scene structure
+                is_chapter=bool(data.get("film_total_chapters", 1) > 1 or data.get("film_chapter_index", 0) > 0),
+            )
         )
         await update_job(
             job_id,
@@ -2387,6 +2653,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 tenant_id=tenant_id,
                 model=seed_model,
                 format_type=format_type,
+                target_video_model=model,
             )
             if (seed_result or {}).get("status") not in {"done", "mock"} or not (
                 (seed_result or {}).get("url") or (seed_result or {}).get("remote_url")
@@ -2517,6 +2784,7 @@ async def run_creative_studio_job(job_id: str) -> None:
             # audio can introduce a second speaker and a different mix per call.
             "creative_studio_generate_audio": bool(sound_on and not timed_tts),
             "creative_studio_speech_mode": speech_mode,
+            "creative_studio_video_reference_mode": video_reference_mode,
             "creative_studio_job_id": job_id,
             "seed_image_role": seed_image_role,
             "storyboard_image_urls": [] if prompt_only_video else list(data.get("storyboard_image_urls") or [])[:9],
@@ -2577,6 +2845,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                 coalesce_shot_windows,
                 concat_video_files,
                 conform_shot_duration,
+                save_cast_frame,
                 save_continuity_frame,
                 save_privacy_safe_scene_frame,
                 save_privacy_safe_storyboard_frame,
@@ -2794,6 +3063,11 @@ async def run_creative_studio_job(job_id: str) -> None:
                     end=segment_end,
                 )
                 chapter_input_continuity_url = continuity_reference_url
+                chapter_opens_on_cut = _chapter_opens_on_scene_cut(
+                    authored_scene_plan,
+                    start=segment_start,
+                    end=segment_end,
+                )
                 chapter_storyboard_urls: list[str] = []
                 if storyboard_urls:
                     board_index = next(
@@ -3276,10 +3550,50 @@ async def run_creative_studio_job(job_id: str) -> None:
                     next_video_reference = str(
                         (segment_result or {}).get("remote_url") or ""
                     ).strip()
-                    if next_video_reference.startswith(("http://", "https://", "asset://")):
+                    provider_last_frame_url = str(
+                        (segment_result or {}).get("last_frame_url") or ""
+                    ).strip()
+                    provider_last_frame_available = provider_last_frame_url.startswith(
+                        ("http://", "https://", "asset://")
+                    )
+                    if provider_last_frame_available:
+                        # Official consecutive-video handoff: preserve the exact
+                        # ModelArk frame and its trust lineage. A first-frame task
+                        # cannot also contain a reference video.
+                        continuity_reference_url = provider_last_frame_url
+                        continuity_video_reference_url = None
+                    elif next_video_reference.startswith(("http://", "https://", "asset://")):
                         continuity_video_reference_url = next_video_reference
                     chapter_elapsed += usable_duration
                     chapter_remaining = max(0.0, float(segment_duration) - chapter_elapsed)
+
+                    # Lock cast identity from an actual presenter beat, never
+                    # from an arbitrary chapter-ending proof card or B-roll frame.
+                    if cast_reference_url is None and not brief.get("strict_character_reference"):
+                        presenter_scene = next(
+                            (
+                                scene
+                                for scene in authored_scene_plan
+                                if str(scene.get("type") or "").lower() == "presenter"
+                                and float(scene.get("start") or 0.0) < segment_end
+                                and float(scene.get("end") or 0.0) > segment_start
+                            ),
+                            None,
+                        )
+                        if presenter_scene is not None:
+                            presenter_midpoint = (
+                                float(presenter_scene.get("start") or segment_start)
+                                + float(presenter_scene.get("end") or segment_start)
+                            ) / 2.0
+                            local_presenter_time = max(
+                                0.1,
+                                presenter_midpoint - segment_start,
+                            )
+                            cast_reference_url = save_cast_frame(
+                                segment_path,
+                                tenant_id=tenant_id,
+                                seconds=local_presenter_time,
+                            )
 
                     needs_handoff = (
                         (chapter_remaining > 0.08 and (not prompt_only_video or interactive_staging))
@@ -3290,12 +3604,13 @@ async def run_creative_studio_job(job_id: str) -> None:
                         )
                     )
                     if needs_handoff:
-                        continuity_reference_url = save_continuity_frame(
-                            segment_path,
-                            tenant_id=tenant_id,
-                        )
-                        if cast_reference_url is None and not brief.get("strict_character_reference"):
-                            cast_reference_url = continuity_reference_url
+                        if not provider_last_frame_available:
+                            # Legacy/provider fallback only. New Seedance tasks
+                            # request and preserve ModelArk's original last frame.
+                            continuity_reference_url = save_continuity_frame(
+                                segment_path,
+                                tenant_id=tenant_id,
+                            )
                         continuity_frame_count += 1
                     if chapter_remaining <= 0.08:
                         chapter_complete = True
@@ -3367,6 +3682,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                             )
                             and bool(production_memory.get("reference_lock_sha256"))
                         ),
+                        authored_scene_cut=chapter_opens_on_cut,
                     )
                     completed = segment_index + 1
                     if quality_gate.get("status") != "passed":
@@ -3485,6 +3801,12 @@ async def run_creative_studio_job(job_id: str) -> None:
                             "staged_segment_paths": [str(path) for path in segment_paths],
                             "continuity_reference_url": continuity_reference_url,
                             "continuity_video_reference_url": continuity_video_reference_url,
+                            "credential_family": str(
+                                (segment_results[-1] or {}).get("credential_family") or ""
+                            ) or None,
+                            "credential_fingerprint": str(
+                                (segment_results[-1] or {}).get("credential_fingerprint") or ""
+                            ) or None,
                             "cast_reference_url": cast_reference_url,
                             "generated_duration_seconds": generated_seconds,
                             "provider_usage": [
@@ -3515,6 +3837,7 @@ async def run_creative_studio_job(job_id: str) -> None:
                         expected_duration=float(segment_durations[-1]),
                         previous_continuity_url=chapter_input_continuity_url,
                         references_locked=bool(production_memory.get("reference_lock_sha256")),
+                        authored_scene_cut=chapter_opens_on_cut,
                     )
                     if final_chapter_quality.get("status") != "passed":
                         rejected = file_service.save_bytes(

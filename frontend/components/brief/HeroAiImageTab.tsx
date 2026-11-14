@@ -29,7 +29,7 @@ export default function HeroAiImageTab({
   industry = '',
   niche = '',
   productName = '',
-  imageModel = 'openai-gpt-image-2',
+  imageModel = 'openai-gpt-image-2.6-sunburst',
   brandId = '',
   brands = [],
   onBrandChange,

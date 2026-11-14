@@ -77,6 +77,9 @@ async def on_startup():
             "Run: pip install imageio-ffmpeg (in backend/), then restart."
         )
     await create_tables()
+    from app.services.usage_pricing import load_overrides_from_db
+
+    await load_overrides_from_db()
     async with AsyncSessionLocal() as db:
         await ensure_default_admin(db)
         from app.services.brief_service import BriefService

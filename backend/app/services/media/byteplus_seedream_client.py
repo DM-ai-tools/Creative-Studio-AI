@@ -37,7 +37,7 @@ SEEDREAM_CATALOG_IDS = frozenset(
 )
 
 _BYTEPLUS_TOS_HOST = re.compile(
-    r"^https://ark-acg-[^/]+\.tos-[^/]+\.volces\.com/",
+    r"^https://(?:ark-acg|ark-content-generation)[^/]*\.tos-[^/]+\.volces\.com/",
     re.IGNORECASE,
 )
 
@@ -119,6 +119,7 @@ async def generate_seedream_image(
     model: str | None = None,
     size: str = "1024x1024",
     reference_image_url: str | None = None,
+    target_video_model: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     POST /images/generations — returns (image_url, raw_response_body).
@@ -140,7 +141,10 @@ async def generate_seedream_image(
     response = await client.post(
         url,
         json=payload,
-        headers=ark_headers(api_model),
+        # A Seedream portrait is trusted by Seedance only when both generations
+        # belong to the same ModelArk account. Select the key from the user's
+        # target Seedance model instead of treating the Seedream model as 2.0.
+        headers=ark_headers(target_video_model or api_model),
         timeout=180.0,
     )
     if response.status_code >= 400:

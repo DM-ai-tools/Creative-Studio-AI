@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any
 
@@ -42,12 +43,29 @@ def ark_configured() -> bool:
 
 
 def ark_api_key_for_model(model: str | None = None) -> str:
-    """Pick the ModelArk API key — 2.5 uses ARK_API_KEY_25 when set, else ARK_API_KEY."""
+    """Pick the dedicated ModelArk key for one Seedance model family.
+
+    Never fall back between 2.0 and 2.5. ModelArk portrait trust is scoped to
+    the account/credential lineage that produced the original asset, so a
+    silent fallback can turn a trusted Seedream/Seedance output into an
+    untrusted photoreal upload during the next chapter.
+    """
     if is_seedance_25_model(model):
-        key_25 = (settings.ARK_API_KEY_25 or "").strip()
-        if key_25:
-            return key_25
+        return (settings.ARK_API_KEY_25 or "").strip()
     return (settings.ARK_API_KEY or "").strip()
+
+
+def ark_credential_family(model: str | None = None) -> str:
+    """Non-secret identifier used to keep 2.0 and 2.5 productions isolated."""
+    return "seedance-2.5" if is_seedance_25_model(model) else "seedance-2.0"
+
+
+def ark_credential_fingerprint(model: str | None = None) -> str:
+    """Short non-secret fingerprint for detecting a changed production key."""
+    key = ark_api_key_for_model(model)
+    if not key:
+        return ""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def ark_configured_for_model(model: str | None = None) -> bool:
@@ -291,6 +309,8 @@ async def create_video_task(
     image_role: str = "first_frame",
     extra_image_refs: list[dict[str, str]] | None = None,
     extra_video_refs: list[dict[str, str]] | None = None,
+    video_reference_mode: str = "reference",
+    return_last_frame: bool = True,
 ) -> str:
     """
     Create a Seedance task.
@@ -301,8 +321,23 @@ async def create_video_task(
     """
     from app.services.creative_studio_timeline import validate_video_prompt
 
+    api_model = resolve_seedance_api_model(model)
+    reference_mode = (video_reference_mode or "reference").strip().lower()
+    if reference_mode not in {"reference", "edit"}:
+        reference_mode = "reference"
+    if reference_mode == "edit" and not is_seedance_25_model(api_model):
+        raise ValueError("Uploaded-video editing requires Seedance 2.5.")
+
+    prompt_text = validate_video_prompt(prompt)
+    if generate_audio:
+        # Seedance speaks the dialogue itself and mispronounces some words
+        # ("audit", "Radius"). Respell only the spoken lines for the model;
+        # captions are built from the original script, so they stay correct.
+        from app.services.creative_studio_pronunciation import respell_spoken_lines
+
+        prompt_text = respell_spoken_lines(prompt_text)
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": validate_video_prompt(prompt)},
+        {"type": "text", "text": prompt_text},
     ]
     if image_data_uri_or_url:
         content.append(
@@ -330,7 +365,10 @@ async def create_video_task(
                 "role": role,
             }
         )
-    for ref in safe_video_refs[:3]:
+    video_ref_limit = 10 if is_seedance_25_model(api_model) else 3
+    if reference_mode == "edit" and len(safe_video_refs) != 1:
+        raise ValueError("Seedance 2.5 edit mode requires exactly one source video.")
+    for ref in safe_video_refs[:video_ref_limit]:
         url = str(ref.get("url") or "").strip()
         if not url:
             continue
@@ -343,7 +381,6 @@ async def create_video_task(
             }
         )
 
-    api_model = resolve_seedance_api_model(model)
     task_ratio = ratio
     if (
         image_data_uri_or_url
@@ -364,7 +401,16 @@ async def create_video_task(
         "resolution": map_resolution(resolution, model=api_model),
         "generate_audio": bool(generate_audio),
         "watermark": False,
+        # Use ModelArk's original last-frame output for the next chapter. Do
+        # not recreate it locally: re-encoding loses portrait trust lineage.
+        "return_last_frame": bool(return_last_frame),
     }
+    if reference_mode == "edit":
+        payload["omni_reference_task_type"] = "edit"
+        payload["duration"] = -1
+        payload["ratio"] = "adaptive"
+        payload["output_format"] = "mov"
+        payload.pop("resolution", None)
     url = f"{ark_base_url()}/contents/generations/tasks"
     response = await async_request_with_retry(
         client,
@@ -496,4 +542,28 @@ def extract_video_url(task: dict[str, Any]) -> str | None:
         if task.get(key):
             return str(task[key])
     return None
+
+
+def extract_last_frame_url(task: dict[str, Any]) -> str | None:
+    """Return ModelArk's original last-frame URL without downloading it."""
+    content = task.get("content")
+    if isinstance(content, dict):
+        value = content.get("last_frame_url")
+        if isinstance(value, dict):
+            value = value.get("url")
+        if value:
+            return str(value)
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("last_frame_url")
+            if isinstance(value, dict):
+                value = value.get("url")
+            if value:
+                return str(value)
+    value = task.get("last_frame_url")
+    if isinstance(value, dict):
+        value = value.get("url")
+    return str(value) if value else None
 

@@ -8,10 +8,43 @@ from PIL import Image
 
 from app.services.ffmpeg_util import require_ffmpeg
 from app.services.ffmpeg_util import probe_video_duration
-from app.services.proof_composite import composite_proof_windows
+from app.services.proof_composite import (
+    _assets_for_proof_scene,
+    _compose_proof_images,
+    composite_proof_windows,
+)
 
 
 class ProofCompositeTests(unittest.TestCase):
+    def test_named_proof_split_screen_is_ordered_by_scene_not_upload_order(self):
+        assets = [
+            {"url": "/files/after.png", "name": "proof-after-roas.png"},
+            {"url": "/files/before.png", "name": "proof-before-roas.png"},
+        ]
+        selected = _assets_for_proof_scene(
+            assets,
+            {
+                "proof_names": ["proof-before-roas.png", "proof-after-roas.png"],
+                "proof_indices": [1, 2],
+            },
+            0,
+        )
+        self.assertEqual(
+            [item["name"] for item in selected],
+            ["proof-before-roas.png", "proof-after-roas.png"],
+        )
+        with tempfile.TemporaryDirectory(prefix="proof-plate-test-") as tmp:
+            root = Path(tmp)
+            before = root / "before.png"
+            after = root / "after.png"
+            plate = root / "plate.png"
+            Image.new("RGB", (400, 300), (220, 20, 20)).save(before)
+            Image.new("RGB", (400, 300), (20, 20, 220)).save(after)
+            _compose_proof_images([before, after], plate, 1080)
+            image = Image.open(plate).convert("RGB")
+            self.assertGreater(image.getpixel((270, 540))[0], 180)
+            self.assertGreater(image.getpixel((810, 540))[2], 180)
+
     def test_exact_proof_windows_replace_video_and_keep_square_output(self):
         ffmpeg = require_ffmpeg()
         with tempfile.TemporaryDirectory(prefix="proof-composite-test-") as tmp:

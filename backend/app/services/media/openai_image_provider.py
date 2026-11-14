@@ -135,7 +135,9 @@ class OpenAIImageProvider(ImageGenerationProvider):
         reference_image_url: str | None = None,
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
+        target_video_model: str | None = None,
     ) -> dict:
+        _ = target_video_model
         api_model = resolve_openai_image_model(model)
         if not openai_configured():
             return {

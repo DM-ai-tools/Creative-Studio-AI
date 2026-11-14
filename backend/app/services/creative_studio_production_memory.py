@@ -313,7 +313,14 @@ def compile_locked_chapter_prompt(
     *,
     chapter_index: int,
     speech_mode: str = "external_voiceover",
+    video_reference_mode: str = "reference",
 ) -> str:
+    # video_reference_mode ('reference' | 'edit') is accepted here only so the
+    # caller's uploaded-video edit-mode toggle doesn't crash chapter-prompt
+    # compilation; it does not yet change the compiled prompt. Edit mode is
+    # resolved earlier, when the chapter's source video/image reference is
+    # chosen — this still accepts the flag so chat_service.py:2412 can pass it
+    # through without diverging signatures again.
     shots = list(memory.get("shot_list") or [])
     if chapter_index < 0 or chapter_index >= len(shots):
         raise ValueError("Requested chapter is outside the locked production timeline")

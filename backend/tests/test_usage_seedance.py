@@ -32,7 +32,8 @@ def test_estimate_byteplus_seedance_cost_range():
     est = estimate_byteplus_seedance_cost_usd(1_462_188)
     assert est["low"] == 9.358
     assert est["high"] == 15.6454
-    assert est["mid"] == round((est["low"] + est["high"]) / 2, 4)
+    # Unknown whether a reference video was used: the point estimate is the higher no-video rate.
+    assert est["mid"] == est["high"]
 
 
 def test_is_byteplus_seedance_row():
@@ -47,8 +48,9 @@ def test_manager_report_seedance_flat_30s():
 
 def test_effective_cost_usd_uses_estimate_when_provider_cost_missing():
     row = _row(completion_tokens=1_000_000, total_tokens=1_000_000)
-    # Seedance 2.5 defaults to 1080p token rates when resolution is omitted.
-    assert effective_cost_usd(row) == 9.35
+    # Seedance 2.5 defaults to 1080p when resolution is unknown, and to the no-video rate
+    # ($11.70 per 1M tokens) when it is unknown whether a reference video was used.
+    assert effective_cost_usd(row) == 11.7
 
 
 def test_effective_cost_usd_prefers_stored_cost():

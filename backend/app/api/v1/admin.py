@@ -20,6 +20,7 @@ from app.schemas.admin import (
     AdminClientResponse,
     AdminStatsResponse,
     SeedanceCreditsCheckResponse,
+    UsageAllowanceResetRequest,
 )
 from app.services.auth_service import _user_response
 from app.services.seedance_health import check_seedance_credits
@@ -27,7 +28,9 @@ from app.services.usage_export_service import (
     generate_usage_export_xlsx,
     generate_usage_summary_xlsx,
 )
+from app.services import usage_pricing as pricing
 from app.services.usage_tracker import usage_summary
+from app.services.usage_allowance import allowance_status, reset_allowance
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -306,6 +309,40 @@ async def admin_usage(
     )
 
 
+@router.get("/usage-allowances")
+async def admin_usage_allowances(
+    current_user=Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Current $30 allowance period plus immutable lifetime spend for every visible user."""
+    query = select(User).order_by(User.full_name.asc(), User.email.asc())
+    if not _is_platform_admin(current_user):
+        query = query.where(User.tenant_id == current_user.tenant_id)
+    users = list((await db.execute(query)).scalars().all())
+    return [await allowance_status(db, user) for user in users]
+
+
+@router.post("/users/{user_id}/usage-allowance/reset")
+async def admin_reset_usage_allowance(
+    user_id: UUID,
+    payload: UsageAllowanceResetRequest,
+    current_user=Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(User).where(User.id == user_id)
+    if not _is_platform_admin(current_user):
+        query = query.where(User.tenant_id == current_user.tenant_id)
+    target = (await db.execute(query)).scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    return await reset_allowance(
+        db,
+        target_user=target,
+        reset_by=current_user,
+        note=payload.note,
+    )
+
+
 @router.get("/usage/export")
 async def admin_usage_export(
     current_user=Depends(_require_admin),
@@ -316,6 +353,7 @@ async def admin_usage_export(
     db: AsyncSession = Depends(get_db),
 ):
     """Download usage detail as Excel (.xlsx) for a date range."""
+    await pricing.refresh_if_stale()
     await _ensure_usage_user_filter(db, current_user, user_id)
     platform = _is_platform_admin(current_user)
     try:
@@ -346,6 +384,7 @@ async def admin_usage_export_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """Download a manager-friendly summary Excel (per user / per brand, no API noise)."""
+    await pricing.refresh_if_stale()
     await _ensure_usage_user_filter(db, current_user, user_id)
     platform = _is_platform_admin(current_user)
     try:
@@ -364,6 +403,52 @@ async def admin_usage_export_summary(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _require_platform_admin(current_user=Depends(_require_admin)):
+    if not _is_platform_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the platform admin can change pricing",
+        )
+    return current_user
+
+
+def _pricing_payload() -> dict:
+    return {
+        "defaults": pricing.DEFAULTS,
+        "overrides": pricing.get_overrides(),
+        "effective": pricing.get_pricing(),
+    }
+
+
+@router.get("/pricing")
+async def admin_get_pricing(
+    current_user=Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Price table behind every estimated USD figure (defaults + admin overrides)."""
+    await pricing.load_overrides_from_db(db)
+    out = _pricing_payload()
+    out["can_edit"] = _is_platform_admin(current_user)
+    return out
+
+
+@router.put("/pricing")
+async def admin_put_pricing(
+    payload: dict,
+    current_user=Depends(_require_platform_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace the override document. Send {} to restore every default."""
+    try:
+        clean = pricing.validate_overrides(payload)
+    except pricing.PricingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await pricing.save_overrides_to_db(db, clean, user_id=current_user.id)
+    out = _pricing_payload()
+    out["can_edit"] = True
+    return out
 
 
 @router.post("/seedance/check-credits", response_model=SeedanceCreditsCheckResponse)

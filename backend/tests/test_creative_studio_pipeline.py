@@ -46,6 +46,7 @@ from app.services.media.seedance_multiscene import (
     coalesce_shot_windows,
     concat_video_files,
     conform_shot_duration,
+    save_cast_frame,
     save_continuity_frame,
     save_privacy_safe_scene_frame,
     _concat_encoded_video_files,
@@ -55,6 +56,32 @@ from app.services.media.byteplus_usage import video_task_usage
 
 
 class PromptTests(unittest.TestCase):
+    def test_timed_prompt_ignores_character_age_range_and_scene_continuity_sentence(self):
+        from app.services.creative_studio_chat_service import (
+            _estimate_script_duration,
+            _explicit_duration_from_text,
+        )
+
+        prompt = """SCENE 1 — 00:00–00:05
+VISUAL: A white Australian woman, 20s–30s, speaks to camera.
+SCENE 2 — 00:05–00:07
+VISUAL: Proof card.
+SCENE 3 — 00:07–00:13
+VISUAL: Dashboard.
+SCENE 4 — 00:13–00:16
+VISUAL: Founder.
+SCENE 5 — 00:16–00:23
+VISUAL: Funnel.
+SCENE 6 — 00:23–00:32
+VISUAL: Proof comparison.
+SCENE 7 — 00:32–00:38
+VISUAL: CTA.
+CHARACTER CONTINUITY: Scene 1's presenter remains consistent.
+"""
+        self.assertIsNone(_explicit_duration_from_text(prompt))
+        self.assertEqual(_estimate_script_duration(prompt), 38)
+        self.assertEqual(explicit_shot_windows(prompt)[-1], (32.0, 38.0))
+
     def test_only_an_exact_broll_boundary_can_drop_blocked_handoff(self):
         from app.services.creative_studio_job_service import _chapter_starts_with_broll
 
@@ -315,6 +342,56 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Continue handoff", second)
         self.assertIn("Finished backyard", second)
         self.assertNotIn("Before yard", second)
+
+    def test_video_chapter_excludes_preproduction_image_generation_blocks(self):
+        prompt = (
+            "TRAFFIC RADIUS — 38 SECOND AD\n"
+            "VOICE LOCK: one Australian female voice.\n"
+            "IMAGE 1 — BROKEN TRACKING\n"
+            "Scene timing: 00:07–00:13\n"
+            "Image generation prompt:\nRed pixel-error dashboard.\n"
+            "IMAGE 2 — POSITIVE FUNNEL\n"
+            "Scene timing: 00:16–00:23\n"
+            "Image generation prompt:\nBlue ROAS 4.2x funnel.\n"
+            "SCENE 1 — 00:00–00:23\nFirst chapter only.\n"
+            "SCENE 2 — 00:23–00:38\nFinal proof and CTA only.\n"
+            "AUDIO: same locked voice."
+        )
+        second = segment_motion_prompt(prompt, start=23, end=38, total=38)
+        self.assertIn("Final proof and CTA only", second)
+        self.assertNotIn("Red pixel-error dashboard", second)
+        self.assertNotIn("Blue ROAS 4.2x funnel", second)
+        self.assertNotIn("IMAGE 1", second)
+        self.assertNotIn("IMAGE 2", second)
+
+    def test_cast_anchor_uses_requested_presenter_time(self):
+        from io import BytesIO
+        from PIL import Image
+
+        image = Image.new("RGB", (32, 32), color="blue")
+        payload = BytesIO()
+        image.save(payload, format="PNG")
+        with (
+            patch(
+                "app.services.media.seedance_multiscene.probe_video_duration",
+                return_value=10.0,
+            ),
+            patch(
+                "app.services.media.seedance_multiscene.require_ffmpeg",
+                return_value="ffmpeg",
+            ),
+            patch(
+                "app.services.video_portrait._extract_png_frame",
+                return_value=payload.getvalue(),
+            ) as extract,
+            patch(
+                "app.services.media.seedance_multiscene.file_service.save_bytes",
+                return_value={"file_url": "/files/test/generated/cast-continuity/frame.jpg"},
+            ),
+        ):
+            url = save_cast_frame(Path("presenter.mp4"), tenant_id="test", seconds=2.5)
+        self.assertIn("cast-continuity", url)
+        self.assertEqual(extract.call_args.kwargs["seconds"], 2.5)
 
     def test_continuity_contract_has_opening_and_closing_handoffs(self):
         middle = build_continuity_contract(
@@ -830,6 +907,56 @@ Gentle parallax.
             [item["role"] for item in captured["content"] if item["type"] == "image_url"],
             ["reference_image"],
         )
+
+    async def test_seedance_25_uploaded_video_edit_uses_provider_edit_contract(self):
+        captured = {}
+
+        def respond(request):
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"id": "edit-task"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            task_id = await create_video_task(
+                client,
+                prompt="Replace the wall colour while preserving all other footage.",
+                model="dreamina-seedance-2-5-260628",
+                duration=12,
+                ratio="9:16",
+                resolution="1080p",
+                extra_video_refs=[{
+                    "url": "https://example.com/source.mp4",
+                    "role": "reference_video",
+                }],
+                video_reference_mode="edit",
+            )
+
+        self.assertEqual(task_id, "edit-task")
+        self.assertEqual(captured["omni_reference_task_type"], "edit")
+        self.assertEqual(captured["duration"], -1)
+        self.assertEqual(captured["ratio"], "adaptive")
+        self.assertEqual(captured["output_format"], "mov")
+        self.assertNotIn("resolution", captured)
+        self.assertEqual(
+            [item for item in captured["content"] if item["type"] == "video_url"],
+            [{
+                "type": "video_url",
+                "video_url": {"url": "https://example.com/source.mp4"},
+                "role": "reference_video",
+            }],
+        )
+
+    async def test_uploaded_video_edit_rejects_seedance_20(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"id": "must-not-submit"})
+        )) as client:
+            with self.assertRaisesRegex(ValueError, "requires Seedance 2.5"):
+                await create_video_task(
+                    client,
+                    prompt="Edit this source.",
+                    model="seedance-2-0",
+                    extra_video_refs=[{"url": "https://example.com/source.mp4"}],
+                    video_reference_mode="edit",
+                )
 
     async def test_seedance_25_first_frame_coerces_adaptive_ratio(self):
         captured = {}

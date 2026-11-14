@@ -8,6 +8,7 @@ import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
 import UsageAnalyticsDashboard from '@/components/usage/UsageAnalyticsDashboard'
 import UsageExportPanel from '@/components/usage/UsageExportPanel'
+import PricingEditor from '@/components/usage/PricingEditor'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
@@ -21,10 +22,17 @@ function money(n: number | null | undefined, estimated = false) {
   return `${prefix}$${n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`
 }
 
-function moneyRange(low: number, high: number) {
-  if (low <= 0 && high <= 0) return '—'
-  if (Math.abs(low - high) < 0.01) return money(low, true)
-  return `~$${low.toFixed(2)}–$${high.toFixed(2)}`
+/**
+ * One estimated figure — the same number every other table on this page uses.
+ * The low/high range (unknown whether a reference video was used) is only a tooltip.
+ */
+function moneyEstimate(mid: number, low: number, high: number) {
+  if (mid <= 0 && low <= 0 && high <= 0) return '—'
+  const range =
+    Math.abs(high - low) >= 0.01
+      ? `Estimated. Likely between $${low.toFixed(2)} and $${high.toFixed(2)} depending on whether a reference video was used.`
+      : 'Estimated from tokens × the pricing rate.'
+  return <span title={range}>{money(mid, true)}</span>
 }
 
 function tokens(n: number | null | undefined) {
@@ -171,8 +179,11 @@ export default function UsagePage() {
               { label: 'Image spend', value: isLoading ? '—' : money(mediaSpend('Image')) },
               { label: 'Video spend', value: isLoading ? '—' : money(mediaSpend('Video')) },
               { label: 'API calls', value: isLoading ? '—' : totals?.calls },
-              { label: 'Tokens', value: isLoading ? '—' : tokens(totals?.total_tokens) },
-              { label: 'Credits', value: isLoading ? '—' : (totals?.credits ?? 0).toFixed(1) },
+              {
+                label: 'Text tokens',
+                value: isLoading ? '—' : tokens(Math.max(0, (totals?.total_tokens ?? 0) - (totals?.video_tokens ?? 0))),
+              },
+              { label: 'Video tokens', value: isLoading ? '—' : tokens(totals?.video_tokens) },
             ].map((item) => (
               <Card key={item.label}>
                 <div className="text-xs font-bold text-lt uppercase tracking-wide mb-1">
@@ -193,6 +204,12 @@ export default function UsagePage() {
           periodDays={periodDays}
           onPeriodDaysChange={setPeriodDays}
           userId={selectedUserId || undefined}
+        />
+
+        <PricingEditor
+          onSaved={() => refetch()}
+          seedanceUsage={seedance?.by_model ?? []}
+          periodLabel={`last ${periodDays} days`}
         />
 
         <Card title="Seedance / BytePlus billing">
@@ -294,7 +311,11 @@ export default function UsagePage() {
                   { label: 'Completion tokens', value: tokens(seedance?.total_tokens) },
                   {
                     label: 'Est. spend',
-                    value: moneyRange(seedance?.cost_usd_low ?? 0, seedance?.cost_usd_high ?? 0),
+                    value: moneyEstimate(
+                      seedance?.cost_usd ?? 0,
+                      seedance?.cost_usd_low ?? 0,
+                      seedance?.cost_usd_high ?? 0,
+                    ),
                   },
                 ].map((item) => (
                   <div key={item.label} className="rounded-xl bg-light/60 px-3 py-2.5">
@@ -331,7 +352,7 @@ export default function UsagePage() {
                         <td className={tdClass}>{row.failed}</td>
                         <td className={tdClass}>{tokens(row.tokens)}</td>
                         <td className={`${tdClass} font-semibold text-navy`}>
-                          {moneyRange(row.cost_usd_low, row.cost_usd_high)}
+                          {moneyEstimate(row.cost_usd, row.cost_usd_low, row.cost_usd_high)}
                         </td>
                       </tr>
                     ))}
@@ -348,7 +369,7 @@ export default function UsagePage() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className={`${theadRowClass} sticky top-0 z-10`}>
-                      {['When', 'Client', 'Task ID', 'Model', 'Tokens', 'Est. spend', 'Open', 'Notes'].map((h) => (
+                      {['When', 'Client', 'Task ID', 'Model', 'Res.', 'Tokens', 'Est. spend', 'Open', 'Notes'].map((h) => (
                         <th key={h} className={thClass}>{h}</th>
                       ))}
                     </tr>
@@ -356,7 +377,7 @@ export default function UsagePage() {
                   <tbody>
                     {(seedance?.recent_clips ?? []).length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-6 text-center text-mid">
+                        <td colSpan={9} className="px-4 py-6 text-center text-mid">
                           No successful Seedance clips in this period.
                         </td>
                       </tr>
@@ -371,9 +392,15 @@ export default function UsagePage() {
                             {row.task_id || '—'}
                           </td>
                           <td className={`${tdClass} max-w-[160px] truncate`} title={row.model}>{row.model}</td>
+                          <td
+                            className={tdClass}
+                            title={row.resolution_inferred ? 'Worked out from tokens per second (not recorded for this older clip)' : undefined}
+                          >
+                            {row.resolution ? `${row.resolution}${row.resolution_inferred ? '*' : ''}` : '—'}
+                          </td>
                           <td className={tdClass}>{tokens(row.tokens)}</td>
                           <td className={`${tdClass} font-semibold text-navy`}>
-                            {moneyRange(row.cost_usd_low, row.cost_usd_high)}
+                            {moneyEstimate(row.cost_usd, row.cost_usd_low, row.cost_usd_high)}
                           </td>
                           <td className={tdClass}>
                             {row.media_url ? (

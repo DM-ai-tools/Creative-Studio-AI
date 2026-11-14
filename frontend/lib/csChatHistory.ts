@@ -42,7 +42,7 @@ export interface CsChatAttachment {
   url: string
   previewUrl?: string
   mime?: string
-  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' | 'document'
+  role?: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' | 'document' | 'reference_video'
   /** Extracted text and rendered page previews for an optional landing-page PDF. */
   documentText?: string
   documentPageUrls?: string[]
@@ -58,6 +58,8 @@ export interface CsChatMessage {
   mediaMode?: 'image' | 'video' | 'storyboard' | 'broll_board'
   mediaUrl?: string
   byteplusUrl?: string
+  /** Video model whose ModelArk credential generated this trusted Seedream output. */
+  trustedVideoModel?: string
   seedImageUrl?: string
   model?: string
   status?: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
@@ -83,6 +85,8 @@ export interface CsChatMessage {
     production_id?: string
     continuity_video_reference_url?: string
     continuity_reference_url?: string
+    credential_family?: string
+    credential_fingerprint?: string
     staged_segment_paths?: string[]
     chapter_index?: number
     film_total_chapters?: number
@@ -108,6 +112,7 @@ export interface CsChatSession {
   phase: string
   videoModel?: string
   speechMode: 'native_presenter' | 'external_voiceover'
+  videoReferenceMode: 'reference' | 'edit'
   promptOnlyVideo: boolean
   cloneMode: boolean
   cloneSceneId: string
@@ -221,6 +226,7 @@ export function emptyCsSession(title = 'New chat'): CsChatSession {
     additionalReferenceUrls: [],
     phase: '',
     speechMode: 'native_presenter',
+    videoReferenceMode: 'reference',
     promptOnlyVideo: true,
     cloneMode: false,
     cloneSceneId: '',
@@ -259,6 +265,7 @@ function parseStoredSessions(raw: string | null): CsChatSession[] {
       phase: String(s.phase || ''),
       speechMode:
         s.speechMode === 'external_voiceover' ? 'external_voiceover' : 'native_presenter',
+      videoReferenceMode: s.videoReferenceMode === 'edit' ? 'edit' : 'reference',
       promptOnlyVideo: s.promptOnlyVideo !== false,
       cloneMode: Boolean(s.cloneMode),
       cloneSceneId: String(s.cloneSceneId || ''),
@@ -562,9 +569,16 @@ export function saveCsChatSessions(scope: CsHistoryScope, sessions: CsChatSessio
     const complete = sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
     localStorage.setItem(csHistoryStoreKey(scope), JSON.stringify(complete))
   } catch {
-    /* quota */
+    // Usually the browser storage quota. Chats live only in this browser, so a
+    // silent failure here means new chats disappear on the next reload.
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(CS_CHAT_SAVE_FAILED_EVENT))
+    }
   }
 }
+
+/** Fired on window when chat history could not be written to browser storage. */
+export const CS_CHAT_SAVE_FAILED_EVENT = 'cs-chat-history-save-failed'
 
 export function getCsActiveChatId(scope: CsHistoryScope): string | null {
   if (!scope.userId || scope.userId === 'anonymous') return null
@@ -590,7 +604,9 @@ export function upsertCsChatSession(
   all: CsChatSession[],
 ): CsChatSession[] {
   const next = all.filter((s) => s.id !== session.id)
-  next.unshift({ ...session, updatedAt: Date.now() })
+  // Keep the caller's timestamp. Stamping "now" on every save moved an old chat
+  // to today as soon as it was opened, because opening a chat re-saves it.
+  next.unshift({ ...session, updatedAt: Number(session.updatedAt) || Date.now() })
   saveCsChatSessions(scope, next)
   return next
 }

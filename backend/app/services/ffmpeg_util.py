@@ -186,6 +186,46 @@ def probe_video_stream_duration(video_path: Path | str) -> float | None:
     return max(values) if values and max(values) > 0.1 else None
 
 
+def probe_video_resolution(video_path: Path | str) -> tuple[int, int] | None:
+    """(width, height) of the first video stream, or None if it can't be read."""
+    path = Path(video_path)
+    if not path.is_file():
+        return None
+    ffprobe = ffprobe_executable()
+    if ffprobe:
+        proc = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0", str(path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            parts = (proc.stdout or "").strip().split("x")
+            if len(parts) == 2:
+                try:
+                    width, height = int(parts[0]), int(parts[1])
+                    if width > 0 and height > 0:
+                        return width, height
+                except ValueError:
+                    pass
+    ffmpeg = ffmpeg_executable()
+    if not ffmpeg:
+        return None
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    import re
+
+    match = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", proc.stderr or "")
+    if not match:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    return (width, height) if width > 0 and height > 0 else None
+
+
 def drawtext_font_opts() -> str:
     """fontconfig name (bundled ffmpeg on Windows has libfontconfig)."""
     if os.name == "nt":

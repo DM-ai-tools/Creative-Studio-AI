@@ -67,6 +67,8 @@ def resolve_login_email(identifier: str) -> str:
         return settings.ADMIN_EMAIL.lower()
     if key == "seedance_2.5":
         return "seedance_2.5@creativestudio.tools"
+    if key == "vicky":
+        return "vicky@trafficradius.com.au"
     return key
 
 

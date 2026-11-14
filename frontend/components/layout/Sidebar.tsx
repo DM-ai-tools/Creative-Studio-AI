@@ -20,6 +20,7 @@ import {
   IconLogOut,
   IconHistory,
   IconUsage,
+  IconMail,
 } from '@/components/ui/icons'
 
 interface NavItem {
@@ -32,7 +33,9 @@ const workspaceNav: NavItem[] = [
   { href: '/dashboard', icon: <IconDashboard />, label: 'Dashboard' },
   { href: '/brand-kit', icon: <IconPalette />, label: 'Brand Kit' },
   { href: '/briefs', icon: <IconFileText />, label: UI.projects },
+  { href: '/email-templates', icon: <IconMail />, label: 'Email Templates' },
   { href: '/variants', icon: <IconFilm />, label: UI.creativeLibrary },
+  { href: '/editor', icon: <IconFilm />, label: 'Video Editor' },
   { href: '/history', icon: <IconHistory />, label: UI.generationHistory },
   { href: '/brand-safety', icon: <IconShield />, label: UI.brandContentChecks },
 ]
@@ -209,7 +212,7 @@ export default function Sidebar({
           const cs25 = isCsSeedance25WorkspaceUser(user)
           const workspaceItems = cs25
             ? workspaceNav.filter((item) =>
-                ['/brand-kit', '/briefs', '/variants'].includes(item.href),
+                ['/brand-kit', '/briefs', '/email-templates', '/variants', '/editor'].includes(item.href),
               )
             : workspaceNav
           const performanceItems = cs25 ? [] : performanceNav

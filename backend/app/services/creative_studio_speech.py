@@ -16,9 +16,14 @@ import httpx
 from app.core.config import settings
 from app.services.ffmpeg_util import require_ffmpeg, probe_video_duration
 from app.services.file_service import file_service
+from app.services.creative_studio_pronunciation import (
+    lexicon_from_brief,
+    pronunciation_instruction,
+    respell_for_speech,
+)
 
 
-_CACHE_VERSION = "fit-exact-v2"
+_CACHE_VERSION = "fit-exact-v3-pronunciation"
 
 
 def _atempo_filter(speed: float) -> str:
@@ -129,12 +134,17 @@ async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id
     root = (Path(file_service.upload_dir) / tenant_id / 'narration').resolve()
     root.mkdir(parents=True, exist_ok=True)
     lines = []
+    lexicon = lexicon_from_brief(brief)
     async with httpx.AsyncClient(timeout=180) as client:
         for start, end, text in events:
             window = end - start
             if window <= 0:
                 raise ValueError('Invalid voiceover window')
-            identity = json.dumps([_CACHE_VERSION, model, voice, style, text, window], ensure_ascii=False)
+            # The speech model hears the respelled text; captions and the stored
+            # script keep the original spelling.
+            spoken_text, used_words = respell_for_speech(text, lexicon)
+            line_style = style + pronunciation_instruction(used_words)
+            identity = json.dumps([_CACHE_VERSION, model, voice, line_style, spoken_text, window], ensure_ascii=False)
             # An 80-bit cache key is ample here and avoids MAX_PATH failures in
             # deeply nested Windows/OneDrive workspaces.
             target = (root / (hashlib.sha256(identity.encode()).hexdigest()[:20] + '.wav')).resolve()
@@ -154,8 +164,8 @@ async def prepare_narration(events: list[tuple[float, float, str]], *, tenant_id
                         response = await client.post(
                             settings.OPENAI_BASE_URL.rstrip('/') + '/audio/speech',
                             headers={'Authorization': f'Bearer {settings.OPENAI_API_KEY}'},
-                            json={'model': model, 'voice': voice, 'input': text, 'response_format': 'wav',
-                                  'instructions': style + f'Deliver this line as part of one continuous commercial narration. Complete it naturally within {delivery:.2f} seconds. Begin immediately. No elongated vowels or dramatic pauses. Speak the exact words in one fluid phrase.'},
+                            json={'model': model, 'voice': voice, 'input': spoken_text, 'response_format': 'wav',
+                                  'instructions': line_style + f'Deliver this line as part of one continuous commercial narration. Complete it naturally within {delivery:.2f} seconds. Begin immediately. No elongated vowels or dramatic pauses. Speak the exact words in one fluid phrase.'},
                         )
                         if response.status_code >= 400:
                             try:

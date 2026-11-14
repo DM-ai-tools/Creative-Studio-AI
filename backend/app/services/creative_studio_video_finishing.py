@@ -259,6 +259,19 @@ def extract_voiceover_events(prompt: str, *, duration_seconds: float = 15) -> li
         line = next((g.strip() for g in match.groups()[2:] if g), "")
         if not line:
             continue
+        # The brief convention elsewhere (parse_scene_plan) is a "DIALOGUE:"
+        # line followed by "SPEAK EXACTLY: \"...\"" on the next line. The
+        # keyword match above lands on "DIALOGUE:" and the unquoted fallback
+        # group then swallows the whole following "SPEAK EXACTLY: \"...\""
+        # line verbatim — sending OpenAI TTS the literal words "Speak
+        # exactly" plus the quote marks as part of what gets spoken. Strip
+        # that label and any wrapping quotes so only the actual line remains.
+        speak_exactly = re.match(r"(?is)^\s*SPEAK\s+EXACTLY\s*:?\s*(.+)$", line)
+        if speak_exactly:
+            line = speak_exactly.group(1).strip()
+        line = line.strip("\"“”‘’'").strip()
+        if not line:
+            continue
         timing_text = match.group(1) or match.group(2)
         timing = re.search(_RANGE, timing_text or "")
         if not timing:

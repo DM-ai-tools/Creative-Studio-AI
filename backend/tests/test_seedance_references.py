@@ -28,21 +28,30 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_deduplication_keeps_authoritative_roles_and_indices(self):
         manifest = reference_manifest(self.brief, "https://example.com/chairs.png")
-        self.assertEqual([asset["role"] for asset in manifest], ["character", "product", "scene", "logo"])
+        self.assertEqual([asset["role"] for asset in manifest], ["character", "product", "scene"])
         instructions = reference_instructions(manifest)
-        for index, role in enumerate(["CHARACTER", "PRODUCT", "SCENE", "BRAND"], 1):
+        for index, role in enumerate(["CHARACTER", "PRODUCT", "SCENE"], 1):
             self.assertIn(f"Image {index}: {role}", instructions)
+
+    def test_logo_is_never_sent_to_the_generative_model(self):
+        # The brand mark is composited in post-production only (logo_overlay.py);
+        # sending it to Seedance let the model render it into mid-film shots.
+        manifest = reference_manifest(self.brief, None)
+        self.assertNotIn("logo", [asset["role"] for asset in manifest])
+        self.assertNotIn(
+            {"url": "https://example.com/logo.png", "role": "logo"}, manifest
+        )
 
     def test_generated_storyboards_cannot_displace_anchors(self):
         self.brief["storyboard_image_urls"] = [f"https://example.com/shot{i}.png" for i in range(12)]
         manifest = reference_manifest(self.brief, "https://example.com/still.png")
         self.assertEqual(len(manifest), 9)
-        self.assertEqual([asset["role"] for asset in manifest[:4]], ["character", "product", "scene", "logo"])
+        self.assertEqual([asset["role"] for asset in manifest[:3]], ["character", "product", "scene"])
 
-    def test_privacy_filter_keeps_product_logo_scene_only(self):
+    def test_privacy_filter_keeps_product_and_scene_only(self):
         manifest = reference_manifest(self.brief, "https://example.com/still.png")
         safe = filter_manifest_for_privacy_retry(manifest)
-        self.assertEqual([asset["role"] for asset in safe], ["product", "scene", "logo"])
+        self.assertEqual([asset["role"] for asset in safe], ["product", "scene"])
 
     def test_proof_is_editor_only_while_supporting_reference_is_sent(self):
         self.brief["reference_assets"].extend([
@@ -77,12 +86,40 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["partial"])
         self.assertIn("returned 8s for a 23s request", result["duration_warning"])
 
+    async def test_short_result_is_retried_once_and_the_fuller_clip_is_kept(self):
+        module = "app.services.media.byteplus_seedance_provider"
+        poll = AsyncMock(side_effect=[{"duration": 8}, {"duration": 23}])
+        with (
+            patch(module + ".ark_configured_for_model", return_value=True),
+            patch(module + ".seedance_reference_data_uri", side_effect=lambda url: url),
+            patch(module + ".create_video_task", AsyncMock(return_value="task")),
+            patch(module + ".poll_video_task", poll),
+            patch(module + ".extract_video_url", return_value="https://example.com/video.mp4"),
+            patch(module + "._download_asset", AsyncMock(return_value={"url": "fixture.mp4"})),
+            patch("app.services.usage_tracker.record_usage"),
+        ):
+            result = await BytePlusSeedanceVideoProvider().generate(
+                prompt="A timed proof sequence.",
+                brief={"creative_studio_aspect": "1/1"},
+                copy={},
+                format_type="square",
+                model="ark-seedance-2-5",
+                tenant_id="test",
+                duration_seconds=23,
+            )
+        # The first attempt came back 8s of a 23s request — well under the 85%
+        # shortfall threshold — so a second attempt should have been made
+        # automatically, and its full-length result kept instead of the short one.
+        self.assertEqual(poll.await_count, 2)
+        self.assertEqual(result["duration_seconds"], 23)
+        self.assertNotIn("partial", result)
+
     def test_continuity_frame_is_bound_before_product_and_scene_references(self):
         self.brief["continuity_reference_url"] = "https://example.com/handoff.jpg"
         manifest = reference_manifest(self.brief, None)
         self.assertEqual(
-            [asset["role"] for asset in manifest[:5]],
-            ["character", "continuity", "product", "scene", "logo"],
+            [asset["role"] for asset in manifest[:4]],
+            ["character", "continuity", "product", "scene"],
         )
         instructions = reference_instructions(manifest)
         self.assertIn("Image 2: CONTINUITY FRAME", instructions)
@@ -151,7 +188,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         anchor_request = submit.call_args_list[1].kwargs
         self.assertEqual(
             [ref["url"].split("/")[-1] for ref in anchor_request["extra_image_refs"]],
-            ["chairs.png", "kitchen.png", "logo.png"],
+            ["chairs.png", "kitchen.png"],
         )
 
     async def test_strict_character_never_falls_back_to_a_replacement_person(self):
@@ -369,7 +406,11 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
             patch(module + ".create_video_task", submit),
             patch(module + ".poll_video_task", AsyncMock(return_value={
                 "status": "succeeded",
-                "duration": 8,
+                # Comfortably above the 85%-of-requested shortfall-retry threshold —
+                # this test is about download-failure resilience, not the separate
+                # automatic-retry-on-short-duration behavior (covered by
+                # test_short_provider_result_is_marked_partial).
+                "duration": 13,
                 "usage": {"completion_tokens": 173700, "total_tokens": 173700},
             })),
             patch(module + ".extract_video_url", return_value="https://example.com/paid-video.mp4"),

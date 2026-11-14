@@ -102,8 +102,9 @@ class HiggsfieldImageProvider(ImageGenerationProvider):
         reference_image_url: str | None = None,
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
+        target_video_model: str | None = None,
     ) -> dict:
-        _ = (reference_purpose, reference_image_url, reference_image_urls)
+        _ = (reference_purpose, reference_image_url, reference_image_urls, target_video_model)
         spec = resolve_image_spec(model)
         if not spec:
             return {

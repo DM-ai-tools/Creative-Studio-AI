@@ -110,6 +110,26 @@ SPEAK EXACTLY: "Closing line."
             "Hands and commerce screens, no front-facing faces.",
         )
 
+    def test_proof_scene_preserves_explicit_stat_markers_and_filenames(self):
+        prompt = """
+SCENE 1 — 0:05–0:07 — PROOF CARD
+VISUAL: Show proof-before-roas.png exactly.
+[INSERT STAT IMAGE 1]
+
+SCENE 2 — 0:23–0:32 — PROOF COMPARISON
+VISUAL: Put proof-before-roas.png left and proof-after-roas.png right.
+[INSERT STAT IMAGE 1]
+[INSERT STAT IMAGE 2]
+"""
+        scenes = parse_scene_plan(prompt)
+        self.assertEqual(scenes[0]["proof_indices"], [1])
+        self.assertEqual(scenes[0]["proof_names"], ["proof-before-roas.png"])
+        self.assertEqual(scenes[1]["proof_indices"], [1, 2])
+        self.assertEqual(
+            scenes[1]["proof_names"],
+            ["proof-before-roas.png", "proof-after-roas.png"],
+        )
+
     def test_parse_broll_images_reads_image_blocks(self):
         items = parse_broll_images(SAMPLE)
         self.assertEqual(len(items), 3)

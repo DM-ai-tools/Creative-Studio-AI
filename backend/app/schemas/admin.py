@@ -62,3 +62,6 @@ class SeedanceCreditsCheckResponse(BaseModel):
     task_history: Optional[SeedanceTaskHistory] = None
     models: list[SeedanceModelCheck] = []
     probe_note: Optional[str] = None
+class UsageAllowanceResetRequest(BaseModel):
+    note: str = ""
+

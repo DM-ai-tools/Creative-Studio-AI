@@ -86,6 +86,42 @@ def _norm_hex(value: Any, fallback: str) -> str:
     return fallback
 
 
+def _norm_hex_optional(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("#"):
+        raw = f"#{raw}"
+    if _HEX.match(raw):
+        return raw.upper()
+    return None
+
+
+def _palette_from_branding(colors: dict[str, Any], button_primary: dict[str, Any]) -> list[str]:
+    """Ordered unique hex palette from Firecrawl branding.colors + button component."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    candidates: list[Any] = [
+        colors.get("primary"),
+        colors.get("secondary"),
+        colors.get("accent"),
+        colors.get("link"),
+        button_primary.get("background"),
+        button_primary.get("color"),
+        colors.get("background"),
+        colors.get("textPrimary"),
+        colors.get("textSecondary"),
+    ]
+    for value in colors.values():
+        candidates.append(value)
+    for value in candidates:
+        hex_val = _norm_hex_optional(value)
+        if hex_val and hex_val not in seen:
+            seen.add(hex_val)
+            ordered.append(hex_val)
+    return ordered[:8]
+
+
 def _normalize_url(url: str) -> str:
     u = (url or "").strip()
     if not u:
@@ -322,13 +358,20 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         colors.get("primary") or button_primary.get("background"),
         "#0F1B3D",
     )
+    accent_hex = _norm_hex_optional(colors.get("accent") or colors.get("link"))
     secondary = _norm_hex(
         colors.get("secondary")
         or colors.get("accent")
         or colors.get("link")
         or colors.get("textPrimary"),
-        "#00C2A8",
+        accent_hex or "#00C2A8",
     )
+    background = _norm_hex_optional(colors.get("background"))
+    palette_hexes = _palette_from_branding(colors, button_primary)
+    if primary and primary not in palette_hexes:
+        palette_hexes.insert(0, primary)
+    if secondary and secondary not in palette_hexes:
+        palette_hexes.append(secondary)
     font_heading, font_body = _extract_fonts(branding)
 
     if not branding:
@@ -359,6 +402,9 @@ async def _fetch_via_firecrawl(url: str) -> dict[str, Any]:
         "niche": niche or str(personality.get("targetAudience") or "")[:80],
         "primary_color": primary,
         "secondary_color": secondary,
+        "accent_color": accent_hex or secondary,
+        "background_color": background,
+        "palette_hexes": palette_hexes,
         "font_heading": font_heading or None,
         "font_body": font_body or None,
         "logo_url": logo_str or None,
@@ -410,8 +456,11 @@ async def _fetch_via_fallback(url: str) -> dict[str, Any]:
         "brand_name": brand_name,
         "industry": industry or "general",
         "niche": niche or "",
-        "primary_color": "#0F1B3D",
-        "secondary_color": "#00C2A8",
+        "primary_color": None,
+        "secondary_color": None,
+        "accent_color": None,
+        "background_color": None,
+        "palette_hexes": [],
         "logo_url": favicon,
         "page_title": str(page.get("title") or ""),
         "description": str(page.get("description") or "")[:500],

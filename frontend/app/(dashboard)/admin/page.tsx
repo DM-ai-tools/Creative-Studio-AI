@@ -10,7 +10,7 @@ import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { timeAgo, formatFileSize } from '@/lib/utils'
-import type { AdminClient, AdminStats, User } from '@/types'
+import type { AdminClient, AdminStats, UsageAllowance, User } from '@/types'
 import { useRouter } from 'next/navigation'
 
 const ROLE_OPTIONS = [
@@ -23,12 +23,16 @@ export default function AdminPage() {
   const router = useRouter()
   const { user } = useAuth()
   const [updatingRole, setUpdatingRole] = useState<string | null>(null)
+  const [resettingAllowance, setResettingAllowance] = useState<string | null>(null)
 
   const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useApi(
     () => adminApi.listUsers(), []
   )
   const { data: stats, isLoading: statsLoading } = useApi(() => adminApi.getStats(), [])
   const { data: clients, isLoading: clientsLoading } = useApi(() => adminApi.listClients(), [])
+  const { data: allowances, isLoading: allowancesLoading, refetch: refetchAllowances } = useApi(
+    () => adminApi.getUsageAllowances(), []
+  )
 
   if (user?.role !== 'admin') {
     return (
@@ -63,8 +67,24 @@ export default function AdminPage() {
     }
   }
 
+  const handleAllowanceReset = async (row: UsageAllowance) => {
+    if (!confirm(`Reset ${row.full_name}'s allowance to a fresh $30? Historical and lifetime spend will be preserved.`)) return
+    const note = window.prompt('Optional management approval note', '') ?? ''
+    setResettingAllowance(row.user_id)
+    try {
+      await adminApi.resetUsageAllowance(row.user_id, note)
+      toast.success('Fresh $30 allowance started; history preserved')
+      refetchAllowances()
+    } catch {
+      toast.error('Failed to reset allowance')
+    } finally {
+      setResettingAllowance(null)
+    }
+  }
+
   const s: AdminStats | null = stats
   const clientRows: AdminClient[] = clients ?? []
+  const stoppedUsers = (allowances ?? []).filter((row: UsageAllowance) => row.limit_reached)
 
   return (
     <div>
@@ -76,6 +96,11 @@ export default function AdminPage() {
       />
 
       <div className="p-5 space-y-4">
+        {stoppedUsers.length > 0 && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <strong>Usage approval required:</strong> {stoppedUsers.map((row: UsageAllowance) => row.full_name).join(', ')} {stoppedUsers.length === 1 ? 'has' : 'have'} reached the $30 allowance and paid generation is stopped until an admin resets it.
+          </div>
+        )}
         <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-3">
           {[
             { label: 'Clients', value: statsLoading ? '—' : s?.clients },
@@ -129,6 +154,55 @@ export default function AdminPage() {
                           {c.last_activity_at ? timeAgo(c.last_activity_at) : '—'}
                         </td>
                         <td className="px-4 py-2.5 text-lt whitespace-nowrap">{timeAgo(c.created_at)}</td>
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card title="User generation allowances" padding={false}>
+          <div className="px-4 py-3 border-b border-border text-xs text-mid">
+            Non-admin users receive $30 per manual allowance period. Resetting starts a new period and keeps all prior and lifetime spend.
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-light">
+                  {['User', 'Current period', 'Remaining', 'Lifetime spend', 'Resets', 'Status', 'Action'].map((h) => (
+                    <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {allowancesLoading
+                  ? [...Array(3)].map((_, i) => (
+                      <tr key={i}><td colSpan={7} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
+                    ))
+                  : (allowances ?? []).map((row: UsageAllowance) => (
+                      <tr key={row.user_id} className={`border-b border-border ${row.limit_reached ? 'bg-red-50' : 'hover:bg-light/50'}`}>
+                        <td className="px-4 py-2.5">
+                          <div className="font-semibold text-navy">{row.full_name}</div>
+                          <div className="text-[10px] text-lt">{row.email}</div>
+                        </td>
+                        <td className="px-4 py-2.5 font-semibold text-navy">
+                          {row.exempt ? 'Exempt' : `$${row.period_spend_usd.toFixed(2)} / $${row.limit_usd.toFixed(2)}`}
+                        </td>
+                        <td className="px-4 py-2.5 text-mid">{row.exempt ? '—' : `$${(row.remaining_usd ?? 0).toFixed(2)}`}</td>
+                        <td className="px-4 py-2.5 text-mid">${row.lifetime_spend_usd.toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-mid">{row.reset_count}</td>
+                        <td className="px-4 py-2.5">
+                          <Badge variant={row.exempt ? 'blue' : row.limit_reached ? 'red' : 'green'}>
+                            {row.exempt ? 'Admin exempt' : row.limit_reached ? 'Stopped — limit reached' : 'Available'}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          {!row.exempt && (
+                            <Button size="sm" onClick={() => handleAllowanceReset(row)} disabled={resettingAllowance === row.user_id}>
+                              {resettingAllowance === row.user_id ? 'Resetting…' : 'Reset to $30'}
+                            </Button>
+                          )}
+                        </td>
                       </tr>
                     ))}
               </tbody>

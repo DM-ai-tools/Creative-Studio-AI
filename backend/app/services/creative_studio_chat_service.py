@@ -16,11 +16,12 @@ from app.services.media.gemini_omni_provider import (
     gemini_omni_configured,
     is_gemini_omni_model,
 )
+from app.services.media.openai_image_catalog import OPENAI_IMAGE_DEFAULT_CATALOG_ID
 
 logger = logging.getLogger(__name__)
 
 SEEDANCE_VIDEO_MODEL = "ark-seedance-2-0"
-DEFAULT_IMAGE_MODEL = "openai-gpt-image-2"
+DEFAULT_IMAGE_MODEL = OPENAI_IMAGE_DEFAULT_CATALOG_ID
 
 
 def _resolve_video_model(video_model: str | None) -> str:
@@ -180,7 +181,11 @@ def _explicit_duration_from_text(text: str) -> int | None:
         return max(5, min(120, int(seconds.group(1))))
     # Production briefs commonly put a compact runtime in the title, such as
     # "26s LIVE-ACTION AD". Read that before estimating from document length.
-    compact_seconds = re.search(r"(?i)\b(\d{1,3})\s*s\b", raw)
+    # Do not read demographic ranges such as "20s–30s" as a 20-second
+    # production. Both ends of an age range must be excluded.
+    compact_seconds = re.search(
+        r"(?i)(?<![–—-])\b(\d{1,3})\s*s\b(?!\s*[–—-]\s*\d)", raw
+    )
     if compact_seconds:
         return max(5, min(120, int(compact_seconds.group(1))))
     minutes = re.search(
@@ -192,14 +197,77 @@ def _explicit_duration_from_text(text: str) -> int | None:
     return None
 
 
+_AUTO_DURATION_CEILING_SECONDS = 60
+_AUTO_CAP_NOTICE_MARKER = "Auto length is limited to"
+
+
 def _estimate_script_duration(text: str) -> int:
     """Choose a useful runtime from the brief when the user selects Auto."""
+    return _script_duration_estimate(text)[0]
+
+
+def auto_duration_cap_notice(
+    messages: list[dict[str, Any]], duration_seconds: Any
+) -> str | None:
+    """Tell the user when Auto shortened a brief that reads longer than its ceiling.
+
+    Auto never plans more than 60 seconds unless the brief states a runtime or
+    carries a complete timed timeline. A two-minute script therefore stopped
+    after two 30-second chapters with no explanation. Returns None when a
+    duration was chosen, the brief fits, or the notice was already shown.
+    """
+    if duration_seconds is not None:
+        return None
+    for message in messages or []:
+        if str(message.get("role") or "") == "assistant" and _AUTO_CAP_NOTICE_MARKER in str(
+            message.get("content") or ""
+        ):
+            return None
+    planned, capped, timeline_unreadable = _script_duration_estimate(
+        _find_full_user_brief(messages or [], "")
+    )
+    if not capped:
+        return None
+    reason = (
+        " The scene timings in the script could not be read as one continuous timeline "
+        "(a gap, an overlap or a missing time range), so they were not used."
+        if timeline_unreadable
+        else ""
+    )
+    return (
+        f"Note: {_AUTO_CAP_NOTICE_MARKER} {_AUTO_DURATION_CEILING_SECONDS}s and this script "
+        f"reads longer, so this film is planned at {planned}s.{reason} For the full script, "
+        "choose 120s in the duration picker before generating, or give every scene a "
+        "continuous time range."
+    )
+
+
+def _script_duration_estimate(text: str) -> tuple[int, bool, bool]:
+    """Return (runtime, capped_by_auto_ceiling, authored_timeline_unreadable)."""
     raw = re.sub(r"\s+", " ", text or "").strip()
     if not raw:
-        return 15
+        return 15, False, False
+    # An authored SCENE/CLIP timeline is the most reliable signal available —
+    # it is the exact runtime the user wrote out shot by shot. Prefer it over
+    # a stray "N seconds" phrase or a per-scene-count guess, either of which
+    # can silently disagree with the real timeline and later fail the strict
+    # continuity check in explicit_shot_windows (operates on the original
+    # text, not the whitespace-collapsed `raw`, since its header regexes rely
+    # on line anchors).
+    try:
+        from app.services.creative_studio_timeline import explicit_shot_windows
+
+        authored_windows = explicit_shot_windows(text or "")
+        timeline_unreadable = False
+    except ValueError:
+        authored_windows = []
+        timeline_unreadable = True
+    if authored_windows:
+        return max(5, min(120, int(round(authored_windows[-1][1])))), False, False
     explicit = _explicit_duration_from_text(raw)
     if explicit is not None:
-        return explicit
+        return explicit, False, timeline_unreadable
+    ceiling = _AUTO_DURATION_CEILING_SECONDS
     scene_count = len(re.findall(r"(?i)\b(?:scene|clip)\s*\d+\b", raw))
     if scene_count >= 2:
         # Scene briefs describe shots, overlays, and production notes—not spoken
@@ -212,12 +280,14 @@ def _estimate_script_duration(text: str) -> int:
             per_scene += 1
         # Auto may suggest a useful runtime, but expensive long-form generation
         # requires the user to explicitly request the duration.
-        return max(15, min(60, int(round(scene_count * per_scene / 5) * 5)))
+        uncapped = int(round(scene_count * per_scene / 5) * 5)
+        return max(15, min(ceiling, uncapped)), uncapped > ceiling, timeline_unreadable
     # Spoken/visual script pacing: roughly 2.5 words per second, with enough
     # time for a cinematic opening, product coverage and a deliberate ending.
     words = len(re.findall(r"\b[\w'-]+\b", raw))
     estimated = max(15, round(words / 2.5))
-    return max(5, min(60, int(round(estimated / 5) * 5)))
+    uncapped = int(round(estimated / 5) * 5)
+    return max(5, min(ceiling, uncapped)), uncapped > ceiling, timeline_unreadable
 
 
 def _normalize_duration(value: Any, fallback: int) -> int:
@@ -409,6 +479,38 @@ def _image_generation_configured() -> bool:
     return bool(openai_configured() or seedream_configured() or higgsfield_configured())
 
 
+def _still_model_label(model: str | None) -> str:
+    mid = (model or "").strip().lower().replace("_", "-")
+    from app.services.media.byteplus_seedream_client import is_byteplus_seedream_model
+    from app.services.media.openai_image_catalog import is_openai_image_model
+
+    if is_byteplus_seedream_model(mid):
+        if "flash" in mid:
+            return "Dola Seedream 5.0 Flash"
+        if "pro" in mid:
+            return "Seedream 5.0 Pro"
+        return "Seedream 5.0 Lite"
+    if is_openai_image_model(mid) or not mid:
+        return "GPT Image 2"
+    return (model or "").strip()
+
+
+def _configured_for_still_model(model: str | None) -> bool:
+    from app.services.media.byteplus_seedream_client import (
+        is_byteplus_seedream_model,
+        seedream_configured,
+    )
+    from app.services.media.higgsfield_models import higgsfield_configured
+    from app.services.media.openai_image_catalog import is_openai_image_model, openai_configured
+
+    mid = (model or "").strip()
+    if is_byteplus_seedream_model(mid):
+        return seedream_configured()
+    if is_openai_image_model(mid):
+        return openai_configured()
+    return _image_generation_configured() or higgsfield_configured()
+
+
 async def _llm_plan(
     *,
     model_slug: str,
@@ -537,6 +639,7 @@ async def _start_job(
     sound_on: bool,
     seed_image_url: str | None,
     speech_mode: str = "external_voiceover",
+    video_reference_mode: str = "reference",
     seed_image_role: str = "first_frame",
     product_name: str = "",
     brand_name: str = "",
@@ -569,6 +672,7 @@ async def _start_job(
     clone_count: int = 4,
     clone_identity_prompt: str = "",
     background_only_image: bool = False,
+    target_video_model: str | None = None,
 ) -> str:
     import asyncio
 
@@ -595,6 +699,7 @@ async def _start_job(
         payload={
             "media_mode": media_mode,
             "model": model,
+            "target_video_model": target_video_model or None,
             "prompt": prompt,
             "duration_seconds": duration_seconds,
             "aspect": aspect,
@@ -604,6 +709,9 @@ async def _start_job(
                 speech_mode
                 if speech_mode in {"native_presenter", "external_voiceover"}
                 else "external_voiceover"
+            ),
+            "video_reference_mode": (
+                "edit" if video_reference_mode == "edit" else "reference"
             ),
             "product_name": product_name or "",
             "brand_name": brand_name or "",
@@ -754,6 +862,7 @@ async def run_creative_studio_chat_turn(
     resolution: str = "1080p",
     sound_on: bool = True,
     speech_mode: str = "native_presenter",
+    video_reference_mode: str = "reference",
     attachment_urls: list[str] | None = None,
     brand_name: str = "",
     brand_id: str = "",
@@ -815,6 +924,9 @@ async def run_creative_studio_chat_turn(
     speech_mode = (speech_mode or "native_presenter").strip().lower()
     if speech_mode not in {"native_presenter", "external_voiceover"}:
         speech_mode = "native_presenter"
+    video_reference_mode = (video_reference_mode or "reference").strip().lower()
+    if video_reference_mode not in {"reference", "edit"}:
+        video_reference_mode = "reference"
 
     action_norm = (action or "continue").strip().lower()
     if action_norm not in ACTIONS:
@@ -926,6 +1038,22 @@ async def run_creative_studio_chat_turn(
         ),
         "",
     )
+    uploaded_video_refs = [
+        str(asset.get("url") or "").strip()
+        for asset in (reference_assets or [])
+        if isinstance(asset, dict)
+        and str(asset.get("role") or "").strip().lower() == "reference_video"
+        and str(asset.get("url") or "").strip()
+    ]
+    if video_reference_mode == "edit":
+        if not re.search(r"(?:2[-.]5|seedance-2-5)", active_video_model, flags=re.I):
+            raise ValueError("Uploaded-video editing requires Seedance 2.5.")
+        if len(uploaded_video_refs) != 1:
+            raise ValueError(
+                "Uploaded-video editing requires exactly one video reference. "
+                "Select one 4–30 second video and retry."
+            )
+        prompt_only_video = True
 
     def _fmt_time(seconds: float) -> str:
         m, s = divmod(int(round(seconds)), 60)
@@ -962,7 +1090,7 @@ async def run_creative_studio_chat_turn(
         if chat_model and chat_model != "auto"
         else default_prompt_llm_model()
     )
-    img_model = "openai-gpt-image-2" if clone_mode else ((image_model or "").strip() or _default_image_model())
+    img_model = OPENAI_IMAGE_DEFAULT_CATALOG_ID if clone_mode else ((image_model or "").strip() or _default_image_model())
     full_brief = _find_full_user_brief(messages, last_user)
     requested_duration = (
         _normalize_duration(duration_seconds, _estimate_script_duration(full_brief))
@@ -1294,6 +1422,34 @@ async def run_creative_studio_chat_turn(
                 "aspect": out_aspect,
             }
 
+        # Refuse ambiguous multi-image briefs instead of silently routing the
+        # entire paste through the one-opening-still path.
+        _image_header_count = len(
+            _re.findall(r"(?im)^\s*IMAGE\s+\d+\s*[-–—:]", last_user or "")
+        )
+        _image_prompt_count = len(
+            _re.findall(r"(?im)^\s*Image\s+generation\s+prompt\s*:", last_user or "")
+        )
+        if _image_header_count > 1 and _image_prompt_count < _image_header_count:
+            return {
+                "assistant_message": (
+                    f"Found {_image_header_count} IMAGE blocks but only "
+                    f"{_image_prompt_count} Image generation prompt sections. "
+                    "Add 'Scene timing:' and 'Image generation prompt:' under every "
+                    "IMAGE block, then retry. No image or video request was submitted."
+                ),
+                "intent": "reply",
+                "phase": "planning",
+                "suggested_actions": [],
+                "status": "failed",
+                "error": "broll_prompt_blocks_incomplete",
+                "job_id": None,
+                "media_mode": None,
+                "model": None,
+                "duration_seconds": out_duration,
+                "aspect": out_aspect,
+            }
+
         # Merge any IMAGE blocks pasted inline into the stored plan
         inline_items = parse_broll_images(last_user) if last_user else []
         if not inline_items and last_user:
@@ -1334,7 +1490,11 @@ async def run_creative_studio_chat_turn(
 
             # Lock proof assets (editor-only composites) in memory
             proof_assets = [
-                {"url": str(a.get("url") or "").strip(), "label": str(a.get("role") or "proof")}
+                {
+                    "url": str(a.get("url") or "").strip(),
+                    "label": str(a.get("role") or "proof"),
+                    "name": str(a.get("name") or "").strip(),
+                }
                 for a in (reference_assets or [])
                 if str(a.get("role") or "").strip().lower() == "proof"
                 and str(a.get("url") or "").strip()
@@ -1419,6 +1579,7 @@ async def run_creative_studio_chat_turn(
             session_id=session_id,
             broll_plan=targets,
             storyboard_scenes=scenes,
+            target_video_model=active_video_model,
         )
         titles = ", ".join(str(s.get("title") or "")[:36] for s in scenes[:5])
         extra = f" (+{len(scenes) - 5} more)" if len(scenes) > 5 else ""
@@ -1576,6 +1737,7 @@ async def run_creative_studio_chat_turn(
             session_id=session_id,
             broll_index=idx,
             broll_title=str(item.get("title") or f"B-roll {idx}"),
+            target_video_model=active_video_model,
         )
         readable = bool(item.get("wants_readable_text", True))
         regen = action_norm == "regenerate_broll_image"
@@ -1686,11 +1848,16 @@ async def run_creative_studio_chat_turn(
                 "error": None,
             }
 
-        if not _image_generation_configured():
+        if not _configured_for_still_model(img_model):
+            still_label = _still_model_label(img_model)
+            hint = (
+                "Set ARK_API_KEY (same as Seedance) for BytePlus Seedream stills."
+                if "seedream" in still_label.lower()
+                else "Set OPENAI_API_KEY for GPT Image 2 (or Higgsfield keys as fallback)."
+            )
             return {
                 "assistant_message": (
-                    "Image generation isn’t configured. Set OPENAI_API_KEY for GPT Image 2 "
-                    "(or Higgsfield keys as fallback)."
+                    f"Image generation isn’t configured for {still_label}. {hint}"
                 ),
                 "intent": "reply",
                 "phase": "planning",
@@ -1867,11 +2034,12 @@ async def run_creative_studio_chat_turn(
                 film_total_chapters=film_chapters,
                 full_film_duration=out_duration,
                 continuity_style_url=continuity_url or None,
+                target_video_model=active_video_model,
             )
             chapter_num = active_chapter_index + 1
             return {
                 "assistant_message": (
-                    f"Generating GPT Image 2 opening still for chapter {chapter_num}/{film_chapters}. "
+                    f"Generating {_still_model_label(img_model)} opening still for chapter {chapter_num}/{film_chapters}. "
                     + (
                         "Using the previous chapter's final frame for cast and scene continuity. "
                         if continuity_url
@@ -1929,12 +2097,13 @@ async def run_creative_studio_chat_turn(
                 reference_assets=reference_assets,
                 storyboard_scenes=scenes,
                 preserve_image_text=preserve_image_text,
+                target_video_model=active_video_model,
             )
             titles = ", ".join(str(s.get("title") or f"Scene {i+1}") for i, s in enumerate(scenes[:5]))
             return {
                 "assistant_message": (
                     f"Building a {len(scenes)}-scene storyboard like Higgsfield Supercomputer "
-                    f"({titles}). Each scene gets its own GPT Image 2 still — product photo locked "
+                    f"({titles}). Each scene gets its own {_still_model_label(img_model)} still — product photo locked "
                     "on product beats. When the board is ready, review then Approve & Next for Seedance."
                 ),
                 "intent": "generate_image",
@@ -1986,6 +2155,7 @@ async def run_creative_studio_chat_turn(
                     full_brief,
                 )
             ),
+            target_video_model=active_video_model,
         )
         verb = "Regenerating" if action_norm == "regenerate_image" else "Generating"
         ref_note = (
@@ -1998,11 +2168,11 @@ async def run_creative_studio_chat_turn(
         )
         return {
             "assistant_message": (
-                f"{verb} {'clone image' if clone_mode else 'background still'} with GPT Image 2.{ref_note} "
+                f"{verb} {'clone image' if clone_mode else 'background still'} with {_still_model_label(img_model)}.{ref_note} "
                 + (
-                    "If no Character photo is selected, GPT Image 2 will first create and save one reusable identity portrait, then use it for the clone scene."
+                    f"If no Character photo is selected, {_still_model_label(img_model)} will first create and save one reusable identity portrait, then use it for the clone scene."
                     if clone_mode
-                    else "When it lands, review it — Regenerate with notes, or Approve & Next to animate with Seedance 2.0."
+                    else f"When it lands, review it — Regenerate with notes, or Approve & Next to animate with {video_model_label}."
                 )
             ),
             "intent": "generate_image",
@@ -2048,11 +2218,34 @@ async def run_creative_studio_chat_turn(
         if broll_plan:
             memory = _ensure_broll_memory()
             approved = approved_broll_urls(memory)
-            pending = pending_broll_indices(memory)
-            if pending or len(approved) < len(broll_plan):
+            # Only the B-roll stills that actually fall inside the chapter being
+            # requested right now are required. A later chapter with no IMAGE
+            # block in its own window (e.g. a pure-video CTA chapter) must not
+            # be blocked by stills that belong entirely to an earlier, already
+            # completed chapter — this previously re-asked for approval on
+            # every chapter regardless of whether that chapter used B-roll.
+            shots = list(memory.get("shot_list") or [])
+            if shots and active_chapter_index < len(shots):
+                from app.services.creative_studio_broll import broll_items_for_chapter
+
+                shot = shots[active_chapter_index]
+                required_plan = broll_items_for_chapter(
+                    broll_plan,
+                    chapter_start=float(shot.get("start") or 0.0),
+                    chapter_end=float(shot.get("end") or 0.0),
+                )
+            else:
+                required_plan = broll_plan
+            pending = [
+                int(item["index"]) for item in required_plan
+                if int(item["index"]) not in approved
+            ]
+            if pending:
                 return {
                     "assistant_message": (
-                        f"B-roll stills must be approved before Seedance ({len(approved)}/{len(broll_plan)} done). "
+                        f"B-roll stills must be approved before Seedance "
+                        f"({len(approved)}/{len(broll_plan)} done overall; "
+                        f"{len(required_plan) - len(pending)}/{len(required_plan)} done for this chapter). "
                         "Generate each IMAGE still, review, and Approve B-roll — then start chapter 1."
                     ),
                     "intent": "reply",
@@ -2374,6 +2567,7 @@ async def run_creative_studio_chat_turn(
                 memory,
                 chapter_index=active_chapter_index,
                 speech_mode=speech_mode,
+                video_reference_mode=video_reference_mode,
             )
         broll_segments: list[dict[str, Any]] = []
         if chapter_staging and session_id:
@@ -2438,6 +2632,8 @@ async def run_creative_studio_chat_turn(
                     broll_plan=plan,
                     approved_broll=approved_for_seedance,
                     chapter_motion_prompt=chapter_motion,
+                    canonical_prompt=str(memory.get("canonical_prompt") or ""),
+                    total_duration=float(memory.get("duration_seconds") or 0),
                 )
                 if chapter_brolls and not any(
                     str(seg.get("kind") or "") == "broll" for seg in built
@@ -2473,6 +2669,7 @@ async def run_creative_studio_chat_turn(
             resolution=resolution,
             sound_on=sound_on,
             speech_mode=speech_mode,
+            video_reference_mode=video_reference_mode,
             seed_image_url=(
                 None
                 if (prompt_only_video and not is_gemini_omni_model(active_video_model))
@@ -2699,6 +2896,7 @@ async def run_creative_studio_chat_turn(
             resolution=resolution,
             sound_on=sound_on,
             speech_mode=speech_mode,
+            video_reference_mode=video_reference_mode,
             attachment_urls=attachments,
             brand_name=brand_name,
             product_name=product_name,
@@ -2730,6 +2928,7 @@ async def run_creative_studio_chat_turn(
             resolution=resolution,
             sound_on=sound_on,
             speech_mode=speech_mode,
+            video_reference_mode=video_reference_mode,
             attachment_urls=attachments,
             brand_name=brand_name,
             product_name=product_name,
@@ -2783,6 +2982,7 @@ async def run_creative_studio_chat_turn(
                 resolution=resolution,
                 sound_on=sound_on,
                 speech_mode=speech_mode,
+                video_reference_mode=video_reference_mode,
                 attachment_urls=attachments,
                 brand_name=brand_name,
                 product_name=product_name,

@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     META_GRAPH_API_VERSION: str = "v21.0"
 
     UPLOAD_DIR: str = "./uploads"
-    MAX_UPLOAD_SIZE: int = 52_428_800  # 50 MB
+    MAX_UPLOAD_SIZE: int = 209_715_200  # 200 MB (Seedance video-reference ceiling)
 
     # Railway often supplies env vars as a single string.
     # Accept either JSON array (e.g. '["https://x.com"]') or comma-separated list

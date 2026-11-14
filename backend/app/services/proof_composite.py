@@ -23,8 +23,73 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _asset_filename(asset: dict[str, Any]) -> str:
+    named = str(asset.get("name") or "").strip()
+    if named:
+        return Path(named).name.lower()
+    path = urlparse(str(asset.get("url") or "")).path
+    return Path(path).name.lower()
+
+
+def _assets_for_proof_scene(
+    proof_assets: list[dict[str, Any]],
+    scene: dict[str, Any],
+    fallback_index: int,
+) -> list[dict[str, Any]]:
+    """Resolve explicit filenames/STAT markers before legacy upload order."""
+    selected: list[dict[str, Any]] = []
+    wanted_names = [
+        Path(str(name or "")).name.lower()
+        for name in (scene.get("proof_names") or [])
+        if str(name or "").strip()
+    ]
+    if wanted_names:
+        by_name = {_asset_filename(asset): asset for asset in proof_assets}
+        selected = [by_name[name] for name in wanted_names if name in by_name]
+    if not selected:
+        for value in scene.get("proof_indices") or []:
+            index = int(value) - 1
+            if 0 <= index < len(proof_assets):
+                selected.append(proof_assets[index])
+    if not selected and 0 <= fallback_index < len(proof_assets):
+        selected = [proof_assets[fallback_index]]
+    # Preserve requested order while removing duplicate URLs.
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for asset in selected:
+        url = str(asset.get("url") or "").strip()
+        if url and url not in seen:
+            seen.add(url)
+            unique.append(asset)
+    return unique
+
+
+def _compose_proof_images(paths: list[Path], output: Path, canvas_size: int) -> Path:
+    """Create an exact, non-generative full-frame or side-by-side proof plate."""
+    if len(paths) == 1:
+        shutil.copyfile(paths[0], output)
+        return output
+    from PIL import Image, ImageOps
+
+    canvas = Image.new("RGB", (canvas_size, canvas_size), (26, 28, 32))
+    cell_width = max(1, canvas_size // len(paths))
+    for index, path in enumerate(paths):
+        with Image.open(path) as source:
+            fitted = ImageOps.contain(
+                source.convert("RGB"),
+                (cell_width, canvas_size),
+                method=Image.Resampling.LANCZOS,
+            )
+            left = index * cell_width + max(0, (cell_width - fitted.width) // 2)
+            top = max(0, (canvas_size - fitted.height) // 2)
+            canvas.paste(fitted, (left, top))
+    canvas.save(output, format="PNG", optimize=True)
+    return output
 
 
 def _download_url(url: str, suffix: str = ".mp4") -> Path:
@@ -66,17 +131,22 @@ def composite_proof_windows(
     try:
         windows: list[tuple[Path, float, float]] = []
         for idx, scene in enumerate(proof_scenes):
-            if idx >= len(proof_assets):
-                break
-            proof_url = str(proof_assets[idx].get("url") or "").strip()
+            scene_assets = _assets_for_proof_scene(proof_assets, scene, idx)
             start = max(0.0, float(scene.get("start") or 0.0))
             end = max(start, float(scene.get("end") or start))
-            if not proof_url or end - start < 0.05:
+            if not scene_assets or end - start < 0.05:
                 continue
-            suffix = ".png" if ".png" in proof_url.lower() else ".jpg"
-            image_tmp = _download_url(proof_url, suffix)
-            image_tmps.append(image_tmp)
-            windows.append((image_tmp, start, end))
+            downloaded: list[Path] = []
+            for asset in scene_assets:
+                proof_url = str(asset.get("url") or "").strip()
+                suffix = ".png" if ".png" in proof_url.lower() else ".jpg"
+                image_tmp = _download_url(proof_url, suffix)
+                image_tmps.append(image_tmp)
+                downloaded.append(image_tmp)
+            plate = Path(tempfile.mktemp(suffix=".png"))
+            image_tmps.append(plate)
+            _compose_proof_images(downloaded, plate, canvas_size)
+            windows.append((plate, start, end))
         if not windows:
             return video_url, 0
 

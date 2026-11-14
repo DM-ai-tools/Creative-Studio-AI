@@ -17,14 +17,21 @@ def reference_manifest(brief: dict, source_url: str | None) -> list[dict[str, st
 
     add(brief.get("continuity_reference_url"), "continuity")
     # An explicitly selected character is the strongest identity anchor. Product
-    # and logo remain authoritative for their own identities if URLs overlap with
-    # an approved composition.
+    # remains authoritative for its own identity if its URL overlaps with an
+    # approved composition.
     for asset in assets:
         if asset.get("role") == "character":
             add(asset.get("url"), asset["role"])
     add(brief.get("cast_reference_url"), "cast")
     add(brief.get("product_reference_url"), "product")
-    add(brief.get("logo_reference_url"), "logo")
+    # The logo is never sent to Seedance as a generative reference. The brand
+    # asset-lock elsewhere already documents logo rendering as "post-production
+    # composite only" (ffmpeg overlay, after generation) — but this manifest
+    # was still attaching logo_reference_url to every chapter's reference
+    # images, and its loose instruction ("do not copy its background into the
+    # scene") let the model render the brand mark into mid-film shots (e.g. as
+    # office wall signage) instead of reserving it for the end card. Proof
+    # cards follow the same editor-only rule below; logo now does too.
     for asset in assets:
         if asset.get("role") == "scene":
             add(asset.get("url"), asset["role"])

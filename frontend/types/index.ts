@@ -42,6 +42,57 @@ export interface AdminClient {
   last_activity_at?: string | null
 }
 
+export interface UsageAllowance {
+  user_id: string
+  email: string
+  full_name: string
+  role: 'admin' | 'member' | 'viewer'
+  tenant_id?: string | null
+  exempt: boolean
+  limit_usd: number
+  period_spend_usd: number
+  remaining_usd?: number | null
+  lifetime_spend_usd: number
+  limit_reached: boolean
+  period_started_at?: string | null
+  last_reset_at?: string | null
+  reset_count: number
+}
+
+export interface EmailTemplateContent {
+  brand_name: string
+  logo_url?: string | null
+  primary_color: string
+  secondary_color: string
+  background_color: string
+  surface_color: string
+  text_color: string
+  eyebrow: string
+  headline: string
+  body: string
+  cta_text: string
+  cta_url: string
+  hero_url?: string | null
+  footer_text: string
+  show_logo: boolean
+  show_hero: boolean
+  layout_reference_url?: string | null
+  layout_html_snippet?: string | null
+}
+
+export interface EmailTemplate {
+  id: string
+  brand_id?: string | null
+  campaign_name: string
+  email_type: string
+  status: string
+  subject: string
+  preheader: string
+  content: EmailTemplateContent
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 export interface UsageBucket {
   name: string
   calls: number
@@ -85,6 +136,9 @@ export interface SeedanceUsageClip {
   cost_usd_low: number
   cost_usd_high: number
   cost_estimated: boolean
+  resolution?: string | null
+  resolution_inferred?: boolean
+  duration_seconds?: number | null
   recovered?: boolean
   client?: string | null
   created_at?: string | null
@@ -143,6 +197,7 @@ export interface AdminUsage {
     prompt_tokens: number
     completion_tokens: number
     total_tokens: number
+    video_tokens?: number
     credits: number
     cost_usd: number
   }
@@ -157,6 +212,25 @@ export interface AdminUsage {
   chart_models?: string[]
   period_days?: number
   filter_user_id?: string | null
+}
+
+export interface PricingRates {
+  /** USD per 1M completion tokens: model family -> resolution -> rate */
+  seedance_per_m_tokens: Record<string, Record<string, { no_video: number; with_video: number }>>
+  /** Used only when a Seedance row has no token count */
+  seedance_fallback_usd_per_30s: number
+  /** USD per 1M tokens, by model id */
+  llm_per_m_tokens: Record<string, { input: number; output: number }>
+  llm_default_per_m_tokens: { input: number; output: number }
+  /** OpenAI image model id -> USD per image */
+  image_usd_each: Record<string, number>
+}
+
+export interface PricingConfig {
+  defaults: PricingRates
+  overrides: Partial<PricingRates>
+  effective: PricingRates
+  can_edit: boolean
 }
 
 export interface Tenant {

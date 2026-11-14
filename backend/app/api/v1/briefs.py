@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.product_scope import require_brief_media_type, require_full_studio_access
 from app.core.security import get_current_user
+from app.services.usage_allowance import require_usage_allowance
 from app.models.brief import Brief
 from app.schemas.brief import BriefCreate, BriefListResponse, BriefResponse, BriefUpdate, GenerationRequest
 from app.services.brand_service import BrandService
@@ -211,7 +212,7 @@ async def preview_production_script(
     return ProductionScriptPreview(skeleton=skeleton, spoken_script=spoken, veo_prompt=veo)
 
 
-@router.post("/{brief_id}/generate")
+@router.post("/{brief_id}/generate", dependencies=[Depends(require_usage_allowance)])
 async def generate_variants(
     brief_id: UUID,
     data: GenerationRequest,

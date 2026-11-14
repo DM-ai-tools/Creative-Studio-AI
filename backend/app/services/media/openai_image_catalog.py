@@ -14,9 +14,13 @@ from app.schemas.generation import GenerationModelOption
 
 logger = logging.getLogger(__name__)
 
+OPENAI_IMAGE_DEFAULT_CATALOG_ID = "openai-gpt-image-2.6-sunburst"
+OPENAI_IMAGE_DEFAULT_API_MODEL = "gpt-image-2.6-sunburst"
+
 # catalog_id, label, api_model, cost_usd, est_seconds
 # DALL·E 2/3 were removed from the API on 2026-05-12; GPT Image series is current.
 _KNOWN_OPENAI_IMAGE_MODELS: list[tuple[str, str, str, float, int]] = [
+    ("openai-gpt-image-2.6-sunburst", "GPT Image 2.6 Sunburst", "gpt-image-2.6-sunburst", 0.05, 18),
     ("openai-gpt-image-2", "GPT Image 2", "gpt-image-2", 0.05, 18),
     ("openai-gpt-image-1.5", "GPT Image 1.5", "gpt-image-1.5", 0.04, 20),
     ("openai-gpt-image-1", "GPT Image 1", "gpt-image-1", 0.04, 25),

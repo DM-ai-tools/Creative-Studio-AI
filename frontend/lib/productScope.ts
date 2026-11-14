@@ -25,7 +25,7 @@ export function shouldBlockContextMenuForUser(
   return isPathAllowedForCs25(path)
 }
 
-const CS25_ALLOWED_PREFIXES = ['/brand-kit', '/variants', '/briefs']
+const CS25_ALLOWED_PREFIXES = ['/brand-kit', '/variants', '/editor', '/briefs']
 
 export function isPathAllowedForCs25(pathname: string): boolean {
   if (pathname === '/login' || pathname.startsWith('/login/')) return true

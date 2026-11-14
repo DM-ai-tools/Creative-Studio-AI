@@ -10,6 +10,7 @@ import { API_CACHE_TTL } from '@/lib/apiCache'
 import { assetUrl } from '@/lib/utils'
 import type { Asset, GenerationModelOption } from '@/types'
 import {
+  CS_CHAT_SAVE_FAILED_EVENT,
   emptyCsSession,
   csHistoryScope,
   getCsActiveChatId,
@@ -34,6 +35,7 @@ type DurationId = 'auto' | '5' | '10' | '15' | '30' | '60' | '120'
 type AspectId = '9/16' | '1/1' | '16/9' | '4/3' | '4/5'
 type ResolutionId = '360p' | '480p' | '720p' | '1080p' | '4k'
 type SpeechMode = 'native_presenter' | 'external_voiceover'
+type VideoReferenceMode = 'reference' | 'edit'
 type ContinuationReferenceMode = 'continuity' | 'first_frame'
 type PipelineAction = CsPipelineAction
 type MediaLibrarySection = 'uploads' | 'generations' | 'characters' | 'liked'
@@ -206,12 +208,19 @@ function isProductionSetupMessage(text: string): boolean {
  * Actually returns (lastEndSeconds - firstStartSeconds) as the chapter window duration.
  */
 function extractChapterDurationFromPrompt(text: string): number | undefined {
-  // Match patterns: 0:00–0:23, 0:23-0:53, 00:10–00:23 etc.
-  const timeRe = /(\d{1,2}):(\d{2})\s*[–—\-]\s*(\d{1,2}):(\d{2})/g
+  // Only read timestamps attached to an actual "SCENE N —" header line — the
+  // master timeline. A "Scene timing:" line inside an IMAGE N block is a
+  // separate, local hint for that still and can appear earlier in the text
+  // than SCENE 1 (IMAGE blocks are typically pasted first), which previously
+  // made this function pick that earlier timestamp as the start of the whole
+  // film and under-count the total duration (e.g. IMAGE 1's "0:03-0:06"
+  // ahead of "SCENE 1 - 0:00-0:03" computed 36-3=33 instead of 36-0=36).
+  const sceneHeaderRe =
+    /^[ \t]*(?:#{1,6}[ \t]*)?SCENE\s+\d+\s*[–—-]+\s*(\d{1,2}):(\d{2})\s*[–—\-]\s*(\d{1,2}):(\d{2})/gim
   let firstStart: number | undefined
   let lastEnd: number | undefined
   let m: RegExpExecArray | null
-  while ((m = timeRe.exec(text)) !== null) {
+  while ((m = sceneHeaderRe.exec(text)) !== null) {
     const startSec = parseInt(m[1]) * 60 + parseInt(m[2])
     const endSec = parseInt(m[3]) * 60 + parseInt(m[4])
     if (firstStart === undefined) firstStart = startSec
@@ -228,6 +237,12 @@ function countBrollImageBlocks(text: string): number {
   return matches ? matches.length : 0
 }
 
+/** Count IMAGE blocks that include an explicit still-generation instruction. */
+function countBrollGenerationPrompts(text: string): number {
+  const matches = text.match(/(?:^|\n)\s*Image\s+generation\s+prompt\s*:/gi)
+  return matches ? matches.length : 0
+}
+
 /** Detect IMAGE 1–9 B-roll block pastes — should generate stills, never a video */
 function isBrollImageBlock(text: string): boolean {
   return /(?:^|\n)\s*IMAGE\s+\d+\s*[-–—:]/im.test(text) &&
@@ -240,7 +255,7 @@ function isBrollImageBlock(text: string): boolean {
  */
 function isMasterProductionBrief(text: string): boolean {
   if (text.length < 800) return false
-  const hasImages = /(?:^|\n)\s*IMAGE\s+\d+\s*[-–—]/im.test(text)
+  const hasImages = /(?:^|\n)\s*IMAGE\s+\d+\s*[-–—:]/im.test(text)
   const hasScenes = /(?:^|\n)\s*SCENE\s+\d+\s*[-–—]/im.test(text)
   const hasTimeline = /\d{2}:\d{2}[–—\-]\d{2}:\d{2}/.test(text)
   const hasDialogue = /DIALOGUE|SPEAK EXACTLY|narration/i.test(text)
@@ -257,16 +272,73 @@ function seedanceModelLabel(modelId: string) {
   return seedanceClipCap(modelId) >= 30 ? 'Seedance 2.5' : 'Seedance 2.0'
 }
 
+function isBytePlusSeedreamModel(modelId: string | undefined) {
+  return /seedream/i.test(modelId || '')
+}
+
+function approvedStillUrlForVideo(
+  message: ChatMessage | undefined,
+  selectedVideoModel: string,
+  fallbackUrl: string,
+) {
+  const localUrl =
+    message?.mediaMode === 'image' && message.mediaUrl ? message.mediaUrl : fallbackUrl
+  if (
+    message?.mediaMode === 'image' &&
+    isBytePlusSeedreamModel(message.model) &&
+    /seedance/i.test(selectedVideoModel)
+  ) {
+    // BytePlus trusts the original same-account Seedream output URL. A downloaded
+    // local copy has identical pixels but no longer carries that provider provenance.
+    return message.trustedVideoModel === selectedVideoModel
+      ? message.byteplusUrl || ''
+      : ''
+  }
+  return localUrl
+}
+
 function isGeminiOmniModel(modelId: string) {
   return /gemini-omni/i.test(modelId)
 }
 
 function imageModelLabel(modelId: string) {
-  if (/seedream.*flash/i.test(modelId)) return 'Seedream 5.0 Flash'
+  if (/seedream.*flash/i.test(modelId)) return 'Dola Seedream 5.0 Flash'
   if (/seedream.*pro/i.test(modelId)) return 'Seedream 5.0 Pro'
   if (/seedream/i.test(modelId)) return 'Seedream 5.0 Lite'
-  return 'GPT Image 2'
+  if (/sunburst/i.test(modelId)) return 'GPT Image 2.6 Sunburst'
+  return 'GPT Image 2.6 Sunburst'
 }
+
+const CREATIVE_STUDIO_STILL_FALLBACKS: GenerationModelOption[] = [
+  {
+    id: 'openai-gpt-image-2.6-sunburst',
+    label: 'GPT Image 2.6 Sunburst',
+    provider_model: 'gpt-image-2.6-sunburst',
+    modality: 'image',
+    provider: 'openai',
+  },
+  {
+    id: 'ark-seedream-5-0-flash',
+    label: 'Dola Seedream 5.0 Flash (BytePlus)',
+    provider_model: 'dola-seedream-5-0-flash-260915',
+    modality: 'image',
+    provider: 'byteplus',
+  },
+  {
+    id: 'ark-seedream-5-0-lite',
+    label: 'Seedream 5.0 Lite (BytePlus)',
+    provider_model: 'seedream-5-0-260128',
+    modality: 'image',
+    provider: 'byteplus',
+  },
+  {
+    id: 'ark-seedream-5-0-pro',
+    label: 'Seedream 5.0 Pro (BytePlus)',
+    provider_model: 'dola-seedream-5-0-pro-260628',
+    modality: 'image',
+    provider: 'byteplus',
+  },
+]
 
 function buildContinuationRecoveryPayload(args: {
   sessionId: string
@@ -277,6 +349,7 @@ function buildContinuationRecoveryPayload(args: {
   resolution: ResolutionId
   soundOn: boolean
   speechMode: SpeechMode
+  videoReferenceMode: VideoReferenceMode
   promptOnlyVideo: boolean
   productName: string
   brandName: string
@@ -302,6 +375,7 @@ function buildContinuationRecoveryPayload(args: {
     resolution: args.resolution,
     sound_on: args.soundOn,
     speech_mode: args.speechMode,
+    video_reference_mode: args.videoReferenceMode,
     product_name: args.productName || '',
     brand_name: args.brandName || '',
     negative_prompt: 'watermark, random unreadable text, UI chrome',
@@ -315,6 +389,7 @@ function buildContinuationRecoveryPayload(args: {
       .map((asset) => ({
         url: asset.url,
         role: (asset.role || 'reference') as ImageReferenceRole,
+        name: asset.name || '',
       })),
     source_brief: args.videoPrompt,
     storyboard_scenes: [],
@@ -388,6 +463,7 @@ function csSessionFieldsEqual(a: CsChatSession, b: CsChatSession): boolean {
     a.phase === b.phase &&
     (a.videoModel || '') === (b.videoModel || '') &&
     a.speechMode === b.speechMode &&
+    a.videoReferenceMode === b.videoReferenceMode &&
     a.promptOnlyVideo === b.promptOnlyVideo &&
     a.cloneMode === b.cloneMode &&
     a.cloneSceneId === b.cloneSceneId &&
@@ -430,7 +506,7 @@ export default function CreativeStudioTab({
   } = useApi(
     () => generationApi.creativeStudioModels(),
     [],
-    { cacheKey: 'generation/cs-models-v4-seedance25', ttlMs: 60_000 },
+    { cacheKey: 'generation/cs-models-v5-still-models', ttlMs: 60_000 },
   )
   const { data: brands } = useApi(() => brandsApi.list(), [], {
     cacheKey: 'brands/list-cs',
@@ -477,6 +553,7 @@ export default function CreativeStudioTab({
   const [videoModel, setVideoModel] = useState('ark-seedance-2-0')
   const [soundOn, setSoundOn] = useState(true)
   const [speechMode, setSpeechMode] = useState<SpeechMode>('native_presenter')
+  const [videoReferenceMode, setVideoReferenceMode] = useState<VideoReferenceMode>('reference')
   const [continuationReferenceMode, setContinuationReferenceMode] =
     useState<ContinuationReferenceMode>('continuity')
   const [useStoryboardReferences, setUseStoryboardReferences] = useState(false)
@@ -487,6 +564,18 @@ export default function CreativeStudioTab({
   const [cloneSceneId, setCloneSceneId] = useState('')
   const [cloneCount, setCloneCount] = useState(4)
   const [busy, setBusy] = useState(false)
+  const [finishingVideoId, setFinishingVideoId] = useState<string | null>(null)
+  useEffect(() => {
+    // Chat history lives only in this browser. Say so when it cannot be saved,
+    // otherwise new chats vanish on the next reload with no explanation.
+    const warn = () =>
+      toast.error(
+        'Chat history could not be saved in this browser (storage is full). Delete old chats, then save important videos to the creative library.',
+        { id: 'cs-chat-save-failed', duration: 12000 },
+      )
+    window.addEventListener(CS_CHAT_SAVE_FAILED_EVENT, warn)
+    return () => window.removeEventListener(CS_CHAT_SAVE_FAILED_EVENT, warn)
+  }, [])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [hydrated, setHydrated] = useState(false)
@@ -507,7 +596,7 @@ export default function CreativeStudioTab({
   const [mediaLibrarySort, setMediaLibrarySort] = useState<MediaLibrarySort>('newest')
   const [likedAssetIds, setLikedAssetIds] = useState<string[]>([])
   const [phase, setPhase] = useState('')
-  const [imageModel, setImageModel] = useState('openai-gpt-image-2')
+  const [imageModel, setImageModel] = useState('openai-gpt-image-2.6-sunburst')
   const [previewFrame, setPreviewFrame] = useState<{ src: string; title: string } | null>(
     null,
   )
@@ -522,6 +611,7 @@ export default function CreativeStudioTab({
   const viewOnlyChatIdRef = useRef<string | null>(null)
   const defaultVideoModelRef = useRef('dreamina-seedance-2-0-280128')
   const resumeCheckedSessionRef = useRef('')
+  const stillModelUserPicked = useRef(false)
 
   const chatModels = useMemo(
     () => (csModels?.chat_models || []) as GenerationModelOption[],
@@ -537,6 +627,16 @@ export default function CreativeStudioTab({
     () => (csModels?.image_models || []) as GenerationModelOption[],
     [csModels],
   )
+  const stillModels = useMemo(() => {
+    const fromApi = (csModels?.still_models || []) as GenerationModelOption[]
+    if (fromApi.length) return fromApi
+    const ids = new Set(CREATIVE_STUDIO_STILL_FALLBACKS.map((m) => m.id))
+    const merged = [
+      ...CREATIVE_STUDIO_STILL_FALLBACKS,
+      ...imageModels.filter((m) => !ids.has(m.id)),
+    ]
+    return merged.length ? merged : CREATIVE_STUDIO_STILL_FALLBACKS
+  }, [csModels?.still_models, imageModels])
   const clipCap = seedanceClipCap(videoModel)
   const isGeminiOmni = isGeminiOmniModel(videoModel)
   const imageModelLabelText = imageModelLabel(imageModel)
@@ -624,6 +724,7 @@ export default function CreativeStudioTab({
     )
     if (session.videoModel) setVideoModel(session.videoModel)
     setSpeechMode(session.speechMode || 'native_presenter')
+    setVideoReferenceMode(session.videoReferenceMode || 'reference')
     setPromptOnlyVideo(session.promptOnlyVideo !== false)
     setCloneMode(Boolean(session.cloneMode))
     setCloneSceneId(session.cloneSceneId || '')
@@ -637,8 +738,15 @@ export default function CreativeStudioTab({
   }, [brandIdProp])
 
   useEffect(() => {
+    if (stillModelUserPicked.current) return
     if (csModels?.image_model_default) setImageModel(csModels.image_model_default)
   }, [csModels?.image_model_default])
+
+  useEffect(() => {
+    if (!stillModels.length) return
+    if (stillModels.some((m) => m.id === imageModel)) return
+    setImageModel(stillModels[0].id)
+  }, [stillModels, imageModel])
 
   useEffect(() => {
     if (csModels?.video_model_default) {
@@ -695,6 +803,45 @@ export default function CreativeStudioTab({
     brandId,
   ])
 
+  // TEMPORARY one-off recovery: re-insert chats listed in /cs-restore.json (built
+  // from the server's production record) into the list this tab is showing.
+  // Remove this effect and the JSON file once the chat is back.
+  useEffect(() => {
+    if (!hydrated) return
+    // Local machine only: this must never inject a chat into production users' lists.
+    if (!['localhost', '127.0.0.1'].includes(window.location.hostname)) return
+    let cancelled = false
+    fetch('/cs-restore.json', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((incoming) => {
+        if (cancelled || !Array.isArray(incoming)) return
+        const stored = loadCsChatSessions(historyScope)
+        const missing = (incoming as CsChatSession[]).filter(
+          (item) => item && typeof item.id === 'string' && !stored.some((s) => s.id === item.id),
+        )
+        if (!missing.length) return
+        const tagged = missing.map((item) => ({
+          ...item,
+          historyBrandId: brandId,
+          historyBriefId: briefId,
+        }))
+        tagged.forEach((item) => persistCsChatSession(historyScope, item))
+        setSessions((prev) =>
+          [...tagged.filter((item) => !prev.some((s) => s.id === item.id)), ...prev].sort(
+            (a, b) => b.updatedAt - a.updatedAt,
+          ),
+        )
+        toast.success(`Restored ${tagged.length} chat from the server record`, {
+          id: 'cs-chat-restored',
+          duration: 8000,
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [hydrated, historyScope, brandId, briefId])
+
   useEffect(() => {
     if (!hydrated || !activeChatId) return
     if (skipNextHistorySaveRef.current) {
@@ -729,6 +876,7 @@ export default function CreativeStudioTab({
         phase,
         videoModel,
         speechMode,
+        videoReferenceMode,
         promptOnlyVideo,
         cloneMode,
         cloneSceneId,
@@ -775,6 +923,7 @@ export default function CreativeStudioTab({
     phase,
     videoModel,
     speechMode,
+    videoReferenceMode,
     promptOnlyVideo,
     cloneMode,
     cloneSceneId,
@@ -1001,6 +1150,7 @@ export default function CreativeStudioTab({
             .map((a) => ({
               url: a.url,
               role: (a.role || 'reference') as ImageReferenceRole,
+              name: a.name || '',
             }))
             .slice(0, 9),
           document_references: messages
@@ -1217,6 +1367,7 @@ export default function CreativeStudioTab({
             progress: res.progress || undefined,
             mediaUrl: res.url || undefined,
               byteplusUrl: res.byteplus_url || undefined,
+              trustedVideoModel: res.trusted_video_model || undefined,
             seedImageUrl: res.seed_image_url || undefined,
             model: res.model || undefined,
             error: res.error || undefined,
@@ -1287,6 +1438,8 @@ export default function CreativeStudioTab({
                       production_id: res.production_id || undefined,
                       continuity_video_reference_url: res.continuity_video_reference_url || undefined,
                       continuity_reference_url: res.continuity_reference_url || undefined,
+                      credential_family: res.credential_family || undefined,
+                      credential_fingerprint: res.credential_fingerprint || undefined,
                       staged_segment_paths: res.staged_segment_paths || undefined,
                       chapter_index:
                         typeof res.chapter_index === 'number'
@@ -1494,10 +1647,19 @@ export default function CreativeStudioTab({
 
   const handleAttach = async (files: FileList | null) => {
     if (!files?.length) return
-    const remaining = Math.max(0, 9 - attachments.length)
+    const remaining = Math.max(0, 10 - attachments.length)
     let productAssigned = Boolean(productReferenceUrl)
     for (const file of Array.from(files).slice(0, remaining)) {
       try {
+        const isVideoUpload = file.type.startsWith('video/') || /\.(mp4|mov)$/i.test(file.name)
+        if (isVideoUpload && !/\.(mp4|mov)$/i.test(file.name)) {
+          toast.error(`${file.name}: upload an MP4 or MOV video`)
+          continue
+        }
+        if (isVideoUpload && file.size > 200 * 1024 * 1024) {
+          toast.error(`${file.name}: video must be 200 MB or smaller`)
+          continue
+        }
         if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
           const document = await generationApi.creativeStudioPdfReference(file)
           setAttachments((prev) => [
@@ -1528,8 +1690,11 @@ export default function CreativeStudioTab({
         )
         const url = asset.file_url || ''
         if (!url) throw new Error('Upload returned no URL')
-        const role: ChatAttachment['role'] = cloneMode
-          ? 'character'
+        const isVideo = isVideoUpload
+        const role: ChatAttachment['role'] = isVideo
+          ? 'reference_video'
+          : cloneMode
+            ? 'character'
           : /logo|wordmark|brandmark/i.test(file.name)
             ? 'logo'
             : pendingContinuationMessage
@@ -1571,7 +1736,7 @@ export default function CreativeStudioTab({
             Array.from(new Set([...prev, url])).slice(0, 7),
           )
         }
-        toast.success(`${role === 'logo' ? 'Logo' : role === 'product' ? 'Product' : role === 'character' ? 'Character' : 'Reference'} image attached`)
+        toast.success(isVideo ? 'Video attached for AI generation' : `${role === 'logo' ? 'Logo' : role === 'product' ? 'Product' : role === 'character' ? 'Character' : 'Reference'} image attached`)
       } catch (err) {
         toast.error(extractApiError(err, `Could not upload ${file.name}`))
       }
@@ -1642,9 +1807,13 @@ export default function CreativeStudioTab({
       'scene',
       'character',
       'reference',
+      'reference_video',
     ]
     const metadataRole = String(asset.metadata?.role || '') as ChatAttachment['role']
-    const role = preferredRole || (allowedRoles.includes(metadataRole) ? metadataRole : 'reference')
+    const isVideo = asset.file_type.startsWith('video/')
+    const role = preferredRole || (isVideo
+      ? 'reference_video'
+      : allowedRoles.includes(metadataRole) ? metadataRole : 'reference')
     const attachment: ChatAttachment = {
       id: asset.id,
       name: asset.file_name || 'Saved image',
@@ -1660,7 +1829,7 @@ export default function CreativeStudioTab({
           ? { ...item, role: 'reference' as const }
           : item,
       )
-      return [...withoutDuplicateRole, attachment].slice(-9)
+      return [...withoutDuplicateRole, attachment].slice(-10)
     })
     if (role === 'product') setProductReferenceUrl(url)
     if (role === 'logo') setLogoReferenceUrl(url)
@@ -1701,11 +1870,59 @@ export default function CreativeStudioTab({
       removeAttachment(existing)
       return
     }
-    if (!asset.file_type.startsWith('image/')) {
-      toast.error('Seedance reference selection currently supports images')
+    if (!asset.file_type.startsWith('image/') && !asset.file_type.startsWith('video/')) {
+      toast.error('AI video generation accepts image and video references')
       return
     }
     attachLibraryAsset(asset)
+  }
+
+  /** Optional last step: burn the spoken lines as captions and the brand logo onto a copy. */
+  const addCaptionsAndLogo = async (msg: ChatMessage) => {
+    if (!msg.mediaUrl || finishingVideoId) return
+    // The script with the timed spoken lines is the longest brief the user pasted.
+    const script = messages
+      .filter((item) => item.role === 'user')
+      .map((item) => String(item.content || ''))
+      .reduce((longest, text) => (text.length > longest.length ? text : longest), '')
+    setFinishingVideoId(msg.id)
+    const toastId = toast.loading('Adding captions and logo…')
+    try {
+      const res = await generationApi.creativeStudioFinishVideo({
+        video_url: msg.mediaUrl,
+        script: script || msg.videoPrompt || '',
+        logo_url: logoReferenceUrl || selectedBrand?.logo_url || null,
+      })
+      const added = [
+        res.captions_applied ? `${res.caption_count} captions` : '',
+        res.logo_applied ? 'brand logo' : '',
+      ].filter(Boolean).join(' and ')
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid(),
+          role: 'assistant',
+          content:
+            `Final video with ${added || 'no changes'} · ${res.width}×${res.height}. ` +
+            'The raw video above is unchanged.' +
+            (res.warnings.length ? `\n\n${res.warnings.join('\n')}` : ''),
+          mediaMode: 'video',
+          mediaUrl: res.url,
+          status: 'done',
+          model: msg.model,
+          videoPrompt: msg.videoPrompt,
+          // No durationSeconds: the chapter-handoff check would read this finished
+          // copy as "chapter 1" and offer to start another chapter.
+          phase: 'final_captions_logo',
+        },
+      ])
+      if (res.warnings.length) toast.error(res.warnings[0], { id: toastId, duration: 9000 })
+      else toast.success('Final video ready', { id: toastId })
+    } catch (err) {
+      toast.error(extractApiError(err, 'Could not add captions and logo'), { id: toastId })
+    } finally {
+      setFinishingVideoId(null)
+    }
   }
 
   const saveToVariants = async (msg: ChatMessage) => {
@@ -1807,13 +2024,14 @@ export default function CreativeStudioTab({
     }
     const referenceAssets = Array.from(referenceByUrl.values())
       .filter((asset) => asset.role === 'scene' || asset.role === 'character' ||
-        asset.role === 'reference' || asset.role === 'proof' ||
+        asset.role === 'reference' || asset.role === 'proof' || asset.role === 'reference_video' ||
         asset.url === turnProductRef || asset.url === turnLogoRef || turnAdditionalRefs.includes(asset.url))
       .map((asset) => ({
         url: asset.url,
         role: (asset.role || 'reference') as ImageReferenceRole,
+        name: asset.name || '',
       }))
-        .slice(0, 9)
+        .slice(0, 19)
     const documentByUrl = new Map<string, ChatAttachment>()
     for (const asset of referenceSource) {
       if (asset.role === 'document' && asset.url) documentByUrl.set(asset.url, asset)
@@ -1836,6 +2054,17 @@ export default function CreativeStudioTab({
       toast.error('Type a message or attach a file')
       return
     }
+    if (isVideoAction && videoReferenceMode === 'edit') {
+      const videoRefs = referenceAssets.filter((asset) => asset.role === 'reference_video')
+      if (!/2-5|2\.5/i.test(videoModel)) {
+        toast.error('Uploaded-video editing requires Seedance 2.5')
+        return
+      }
+      if (videoRefs.length !== 1) {
+        toast.error('Edit uploaded video requires exactly one selected video')
+        return
+      }
+    }
 
     let historyForApi = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -1849,7 +2078,7 @@ export default function CreativeStudioTab({
           (isVideoAction && promptOnlyVideo
             ? '\nGenerate directly from this timed prompt. Use every uploaded reference according to its assigned role and preserve the authored scene order. Exclude GPT-generated storyboard images.'
             : isVideoAction && !promptOnlyVideo && !useStoryboardReferences
-              ? '\nUse the approved GPT Image 2 still as the Seedance opening frame. Keep original uploads as supplemental identity, product, scene and logo references.'
+              ? `\nUse the approved ${imageModelLabelText} still as the ${videoModelLabel} opening frame. Keep original uploads as supplemental product, scene and logo references.`
               : ''),
         attachments: userAttachments,
       }
@@ -1891,7 +2120,7 @@ export default function CreativeStudioTab({
                 ? cloneHasCharacterReference
                   ? `Generating a ${cloneCount}-copy character scene with GPT Image 2…`
                   : `Creating a reusable character first, then generating the ${cloneCount}-copy scene…`
-                : 'Generating GPT Image 2 still…'
+                : `Generating ${imageModelLabelText} still…`
               : action === 'generate_all_broll'
                 ? 'Generating all B-roll stills…'
             : action === 'approve_next' || action === 'generate_video'
@@ -1915,6 +2144,7 @@ export default function CreativeStudioTab({
         resolution,
         sound_on: soundOn,
         speech_mode: speechMode,
+        video_reference_mode: videoReferenceMode,
         attachment_urls: turnProductRef
           ? [
               turnProductRef,
@@ -2149,8 +2379,12 @@ export default function CreativeStudioTab({
             generated_duration_seconds: fromMsg.continuationMeta?.generated_duration_seconds,
             continuity_frame_count: fromMsg.continuationMeta?.continuity_frame_count,
             production_id: fromMsg.continuationMeta?.production_id,
+            continuity_reference_url:
+              fromMsg.continuationMeta?.continuity_reference_url,
             continuity_video_reference_url:
               fromMsg.continuationMeta?.continuity_video_reference_url,
+            credential_family: fromMsg.continuationMeta?.credential_family,
+            credential_fingerprint: fromMsg.continuationMeta?.credential_fingerprint,
             payload: buildContinuationRecoveryPayload({
               sessionId: activeChatId,
               videoModel: continuationModel,
@@ -2160,6 +2394,7 @@ export default function CreativeStudioTab({
               resolution,
               soundOn,
               speechMode,
+              videoReferenceMode,
               promptOnlyVideo,
               productName: productName || '',
               brandName: effectiveBrandName,
@@ -2184,17 +2419,23 @@ export default function CreativeStudioTab({
                 ).slice(0, 6000)}\nUse only scene-relevant facts and page visuals; preserve the authored dialogue and timing.`,
             )
             .join(''),
-        next_reference_assets: draftAttachments.flatMap((asset) => {
+        next_reference_assets: draftAttachments.flatMap<{
+          url: string
+          role: ImageReferenceRole
+          name: string
+        }>((asset) => {
           if (asset.role === 'document') {
             return (asset.documentPageUrls || []).slice(0, 8).map((url) => ({
               url,
-              role: 'scene' as const,
+              role: 'scene' as ImageReferenceRole,
+              name: asset.name || 'Landing-page PDF reference',
             }))
           }
           return asset.url
             ? [{
                 url: asset.url,
                 role: (asset.role || 'reference') as ImageReferenceRole,
+                name: asset.name || '',
               }]
             : []
         }).slice(0, 9),
@@ -2233,6 +2474,18 @@ export default function CreativeStudioTab({
     const atts = [...attachments]
     if (pendingContinuationMessage && (text || atts.length)) {
       await startContinuation(pendingContinuationMessage, text, atts)
+      return
+    }
+    const requestedImageBlocks = countBrollImageBlocks(text)
+    const explicitImagePrompts = countBrollGenerationPrompts(text)
+    if (
+      !cloneMode &&
+      requestedImageBlocks > 1 &&
+      explicitImagePrompts < requestedImageBlocks
+    ) {
+      toast.error(
+        `Found ${requestedImageBlocks} IMAGE blocks but only ${explicitImagePrompts} Image generation prompt sections. Add one explicit prompt under every IMAGE block.`,
+      )
       return
     }
     setComposer('')
@@ -2414,7 +2667,7 @@ export default function CreativeStudioTab({
 
     const nextImagePrompt = fromMsg?.imagePrompt || imagePrompt
     const nextVideoPrompt = fromMsg?.videoPrompt || videoPrompt
-    const nextApproved =
+    const localApproved =
       (fromMsg?.mediaMode === 'image' && fromMsg.mediaUrl) ||
       (fromMsg?.mediaMode === 'storyboard' &&
         (fromMsg.storyboard?.find((f) => /reveal|feature|close|product/i.test(f.title || ''))
@@ -2422,6 +2675,20 @@ export default function CreativeStudioTab({
           fromMsg.storyboard?.find((f) => f.url)?.url ||
           fromMsg.mediaUrl)) ||
       approvedImageUrl
+    const nextApproved = approvedStillUrlForVideo(fromMsg, videoModel, localApproved)
+
+    if (
+      (action === 'approve_next' || action === 'generate_video') &&
+      fromMsg?.mediaMode === 'image' &&
+      isBytePlusSeedreamModel(fromMsg.model) &&
+      /seedance/i.test(videoModel) &&
+      !nextApproved
+    ) {
+      toast.error(
+        `This still was not generated with the selected ${videoModelLabel} ModelArk credential. Regenerate the Seedream still, then approve the new image.`,
+      )
+      return
+    }
 
     if (fromMsg?.imagePrompt) setImagePrompt(fromMsg.imagePrompt)
     if (fromMsg?.videoPrompt) setVideoPrompt(fromMsg.videoPrompt)
@@ -2448,7 +2715,7 @@ export default function CreativeStudioTab({
 
     const label =
       action === 'approve_next'
-        ? 'Approve still → generate Seedance video'
+        ? `Approve still → generate ${videoModelLabel} video`
         : action === 'regenerate_image'
           ? revisionNotes
             ? `Regenerate image: ${revisionNotes}`
@@ -2646,7 +2913,7 @@ export default function CreativeStudioTab({
                           disabled={busy}
                           onClick={() => toggleLibraryAttachment(asset)}
                           className="relative block w-full aspect-square text-left disabled:opacity-50"
-                          title={isImage ? 'Select image' : 'Only images can be used as Seedance references'}
+                          title={isImage ? 'Select image' : isVideo ? 'Select video for reference or editing' : 'Unsupported reference type'}
                         >
                           {isImage && src ? (
                             // eslint-disable-next-line @next/next/no-img-element
@@ -2731,6 +2998,22 @@ export default function CreativeStudioTab({
                                 Video
                               </button>
                             </div>
+                          ) : picked && isVideo ? (
+                            <div className="flex items-center gap-1.5">
+                              <span className="flex-1 rounded-lg border border-[#b8f000]/30 bg-[#b8f000]/10 px-2 py-1 text-[10px] text-[#b8f000]">
+                                Video input
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setVideoReferenceMode('edit')
+                                  setVideoModel('ark-seedance-2-5')
+                                }}
+                                className="rounded-lg border border-[#b8f000]/40 px-2 py-1 text-[10px] text-[#b8f000]"
+                              >
+                                Edit
+                              </button>
+                            </div>
                           ) : null}
                         </div>
                       </div>
@@ -2756,7 +3039,7 @@ export default function CreativeStudioTab({
 
             <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3 border-t border-white/10 bg-[#17181b]">
               <p className="text-xs text-white/45">
-                {attachments.length} of 9 selected · images use roles; PDFs are optional page references
+                {attachments.length} of 10 selected · images, videos and optional PDF references
               </p>
               <button
                 type="button"
@@ -2815,6 +3098,14 @@ export default function CreativeStudioTab({
               {a.previewUrl && (a.mime || '').startsWith('image') ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={a.previewUrl} alt={a.name} className="h-16 w-16 object-cover" />
+              ) : a.previewUrl && a.role === 'reference_video' ? (
+                <video
+                  src={a.previewUrl}
+                  muted
+                  playsInline
+                  preload="metadata"
+                  className="h-16 w-28 object-cover"
+                />
               ) : (
                 <div className="h-16 w-28 px-2 flex flex-col justify-center text-[10px] text-white/70">
                   <span className="font-semibold truncate">{a.name}</span>
@@ -2828,6 +3119,10 @@ export default function CreativeStudioTab({
               {a.role === 'document' ? (
                 <div className="mt-1 max-w-28 rounded bg-[#b8f000]/10 px-1 py-0.5 text-center text-[9px] text-[#b8f000]">
                   Landing-page reference
+                </div>
+              ) : a.role === 'reference_video' ? (
+                <div className="mt-1 max-w-28 rounded bg-[#b8f000]/10 px-1 py-0.5 text-center text-[9px] text-[#b8f000]">
+                  Video input
                 </div>
               ) : (
                 <select
@@ -2888,7 +3183,7 @@ export default function CreativeStudioTab({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*,.pdf,.txt,.md"
+            accept="image/*,video/mp4,video/quicktime,.mp4,.mov,.pdf,.txt,.md"
             multiple
             className="hidden"
             onChange={(e) => void handleAttach(e.target.files)}
@@ -2897,7 +3192,7 @@ export default function CreativeStudioTab({
             type="button"
             onClick={() => setImageLibraryOpen(true)}
             className="h-9 w-9 rounded-full border border-white/15 bg-white/5 text-white/80 hover:bg-white/10 text-lg"
-            title="Attach images or an optional landing-page PDF"
+            title="Attach images, a video, or an optional landing-page PDF"
           >
             +
           </button>
@@ -3032,6 +3327,9 @@ export default function CreativeStudioTab({
             {promptOnlyVideo
               ? ` · Direct ${videoModelLabel}`
               : ` · ${imageModelLabelText} → ${videoModelLabel}`}
+            {attachments.some((attachment) => attachment.role === 'reference_video')
+              ? videoReferenceMode === 'edit' ? ' · Edit uploaded video' : ' · Video reference'
+              : ''}
             {soundOn
               ? speechMode === 'native_presenter'
                 ? ' · Native presenter speech'
@@ -3046,19 +3344,17 @@ export default function CreativeStudioTab({
         {!promptOnlyVideo ? (
           <select
             value={imageModel}
-            onChange={(e) => setImageModel(e.target.value)}
+            onChange={(e) => {
+              stillModelUserPicked.current = true
+              setImageModel(e.target.value)
+            }}
             className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80 max-w-[240px]"
             title="Image model for B-roll stills"
             aria-label="Image model for B-roll stills"
           >
-            {(imageModels.length ? imageModels : [
-              { id: 'openai-gpt-image-2', label: 'GPT Image 2' },
-              { id: 'ark-seedream-5-0-lite', label: 'Seedream 5.0 Lite' },
-              { id: 'ark-seedream-5-0-pro', label: 'Seedream 5.0 Pro' },
-              { id: 'ark-seedream-5-0-flash', label: 'Seedream 5.0 Flash' },
-            ]).map((model) => (
+            {stillModels.map((model) => (
               <option key={model.id} value={model.id} className="bg-[#121316]">
-                Still · {model.label}
+                Still · {imageModelLabel(model.id) || model.label}
               </option>
             ))}
           </select>
@@ -3154,9 +3450,9 @@ export default function CreativeStudioTab({
                 ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
                 : 'text-white/55 hover:text-white/80'
             }`}
-            title={`Generate and review a GPT Image 2 starting scene, then animate it with ${videoModelLabel}`}
+            title={`Generate and review a still (${imageModelLabelText}), then animate it with ${videoModelLabel}`}
           >
-            GPT Image 2 → {videoModelLabel}
+            {imageModelLabelText} → {videoModelLabel}
           </button>
           <button
             type="button"
@@ -3164,7 +3460,7 @@ export default function CreativeStudioTab({
             onClick={() => {
               setCloneMode(true)
               setPromptOnlyVideo(false)
-              setImageModel('openai-gpt-image-2')
+              setImageModel('openai-gpt-image-2.6-sunburst')
               setMediaLibrarySection('characters')
             }}
             className={`border-l border-[#b8f000]/20 px-2.5 py-1 transition-colors ${
@@ -3229,10 +3525,45 @@ export default function CreativeStudioTab({
             </button>
           </>
         ) : null}
+        {attachments.some((attachment) => attachment.role === 'reference_video') ? (
+          <div
+            className="inline-flex overflow-hidden rounded-full border border-[#b8f000]/30 bg-white/5"
+            role="group"
+            aria-label="Uploaded video mode"
+          >
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setVideoReferenceMode('reference')}
+              className={`px-2.5 py-1 ${videoReferenceMode === 'reference'
+                ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
+                : 'text-white/55'}`}
+            >
+              Use as reference
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setVideoReferenceMode('edit')
+                setVideoModel('ark-seedance-2-5')
+                setPromptOnlyVideo(true)
+              }}
+              className={`border-l border-[#b8f000]/20 px-2.5 py-1 ${videoReferenceMode === 'edit'
+                ? 'bg-[#b8f000]/15 text-[#6f9000] font-semibold'
+                : 'text-white/55'}`}
+              title="Transform one uploaded 4–30 second video; source duration and aspect are preserved"
+            >
+              Edit uploaded video
+            </button>
+          </div>
+        ) : null}
         <select
           value={duration}
           onChange={(e) => setDuration(e.target.value as DurationId)}
+          disabled={videoReferenceMode === 'edit' && attachments.some((attachment) => attachment.role === 'reference_video')}
           className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-white/80"
+          title={videoReferenceMode === 'edit' ? 'Edit mode preserves the uploaded video duration' : 'Generated video duration'}
         >
           {DURATIONS.map((d) => (
             <option key={d.id} value={d.id} className="bg-[#121316]">
@@ -3494,7 +3825,7 @@ export default function CreativeStudioTab({
                 <p className="text-sm text-white/45">
                   {promptOnlyVideo
                     ? 'Send a timed prompt directly to Seedance. Product, scene and character references are optional.'
-                    : 'Generate a GPT Image 2 starting scene, review or regenerate it, then animate the approved still with Seedance.'}
+                    : `Generate a ${imageModelLabelText} starting scene, review or regenerate it, then animate the approved still with ${videoModelLabel}.`}
               </p>
             </div>
             </div>
@@ -3884,6 +4215,30 @@ export default function CreativeStudioTab({
                                 {UI.openCreativeLibrary}
                               </Link>
                             )}
+                            {m.mediaMode === 'video' && m.mediaUrl && m.status === 'done' ? (
+                              <>
+                                <a
+                                  href={preview || undefined}
+                                  download
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[11px] font-semibold px-3 py-1.5 rounded-full bg-white/10 border border-white/20 text-white"
+                                >
+                                  Download video
+                                </a>
+                                {m.phase !== 'final_captions_logo' ? (
+                                  <button
+                                    type="button"
+                                    disabled={Boolean(finishingVideoId)}
+                                    onClick={() => void addCaptionsAndLogo(m)}
+                                    title="Burns the spoken lines as captions near the bottom and the brand logo in the top-left corner. The raw video is kept."
+                                    className="text-[11px] font-semibold px-3 py-1.5 rounded-full border border-[#b8f000]/40 text-[#b8f000] disabled:opacity-50"
+                                  >
+                                    {finishingVideoId === m.id ? 'Adding captions & logo…' : 'Add captions & logo'}
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : null}
                             {m.mediaMode === 'image' && m.mediaUrl ? (
                               <button
                                 type="button"
@@ -3953,7 +4308,9 @@ export default function CreativeStudioTab({
                                     m,
                                     clipCap,
                                     messageProjectDuration,
-                                    seedanceModelLabel(m.model || videoModel),
+                                    seedanceModelLabel(
+                                      m.mediaMode === 'video' ? (m.model || videoModel) : videoModel,
+                                    ),
                                   )
                                 : ACTION_LABELS[a] || a}
                             </button>

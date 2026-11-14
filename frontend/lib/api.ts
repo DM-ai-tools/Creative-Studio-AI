@@ -1,12 +1,12 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { authStorage } from './auth'
 import type {
-  AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext, SeedanceCreditsCheck,
+  AdminClient, AdminStats, AdminUsage, Asset, AvatarScriptResult, BrandFacts, IcpImagePlanResult, IcpScriptResult, ModelSuggestion, PerformanceStatsContext, PricingConfig, PricingRates, SeedanceCreditsCheck, UsageAllowance,
   SuggestAdAnglesResult, StrategyParseResult, WebsiteBrandFetchResult,
   StatsImageExtractionResult, StrategyPreviewResult, ReferenceImageAnalysisResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
   GenerationCatalog, GenerationModelOption, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
-  TopPerformer, User, Variant,
+  TopPerformer, User, Variant, EmailTemplate,
 } from '@/types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
@@ -160,6 +160,41 @@ export const brandsApi = {
         message: string
       }>(`/brands/${brandId}/discover-competitors`, data, { timeout: 120_000 })
       .then((r) => r.data),
+}
+
+export type EmailLayoutBase = {
+  label: string
+  layout_image_url?: string | null
+  layout_asset_id?: string | null
+  layout_html?: string | null
+  updated_at?: string | null
+}
+
+export const emailTemplatesApi = {
+  list: () => api.get<EmailTemplate[]>('/email-templates').then((r) => r.data),
+  get: (id: string) => api.get<EmailTemplate>(`/email-templates/${id}`).then((r) => r.data),
+  getLayoutBase: () => api.get<EmailLayoutBase>('/email-templates/layout-base').then((r) => r.data),
+  saveLayoutBase: (data: {
+    label?: string
+    layout_image_url?: string | null
+    layout_asset_id?: string | null
+    layout_html?: string | null
+  }) => api.put<EmailLayoutBase>('/email-templates/layout-base', data).then((r) => r.data),
+  generate: (data: {
+    brand_id?: string | null
+    campaign_name: string
+    email_type: string
+    audience: string
+    offer: string
+    landing_page_url?: string | null
+    notes: string
+    image_model: string
+    use_layout_base?: boolean
+    hero_mode?: 'generate_from_layout' | 'use_layout_image' | 'generate'
+  }) => api.post<EmailTemplate>('/email-templates/generate', data, { timeout: 300_000 }).then((r) => r.data),
+  update: (id: string, data: Pick<EmailTemplate, 'campaign_name' | 'email_type' | 'subject' | 'preheader' | 'content'>) =>
+    api.put<EmailTemplate>(`/email-templates/${id}`, data).then((r) => r.data),
+  delete: (id: string) => api.delete(`/email-templates/${id}`),
 }
 
 // ── Briefs ────────────────────────────────────────────────────────────────────
@@ -681,6 +716,7 @@ export const generationApi = {
     resolution?: string
     sound_on?: boolean
     speech_mode?: 'native_presenter' | 'external_voiceover'
+    video_reference_mode?: 'reference' | 'edit'
     negative_prompt?: string
     brand_name?: string
     brand_id?: string
@@ -712,6 +748,8 @@ export const generationApi = {
         quality_gate?: Record<string, unknown> | null
         retry_chapter_available?: boolean
         continuity_video_reference_url?: string | null
+        credential_family?: string | null
+        credential_fingerprint?: string | null
       }>('/generation/creative-studio', data, { timeout: 60_000 })
       .then((r) => r.data),
 
@@ -745,6 +783,7 @@ export const generationApi = {
         broll_index?: number | null
         broll_title?: string | null
         byteplus_url?: string | null
+        trusted_video_model?: string | null
         completed_segments?: number | null
         credits_estimate?: number | null
         duration_warning?: string | null
@@ -754,6 +793,8 @@ export const generationApi = {
         quality_gate?: Record<string, unknown> | null
         retry_chapter_available?: boolean
         continuity_video_reference_url?: string | null
+        credential_family?: string | null
+        credential_fingerprint?: string | null
         storyboard?: {
           id?: string
           index?: number
@@ -783,12 +824,16 @@ export const generationApi = {
       generated_duration_seconds?: number
       continuity_frame_count?: number
       cast_reference_url?: string
+      continuity_reference_url?: string
       continuity_video_reference_url?: string
+      credential_family?: string
+      credential_fingerprint?: string
       production_id?: string
       next_prompt?: string
       next_reference_assets?: {
         url: string
-        role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof'
+        role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' | 'reference_video'
+        name?: string
       }[]
       next_reference_mode?: 'continuity' | 'first_frame'
       next_seed_image_url?: string
@@ -845,6 +890,8 @@ export const generationApi = {
         image_model_default?: string | null
         video_model_default?: string | null
         image_models: GenerationModelOption[]
+        /** GPT Image 2 + BytePlus Seedream stills for image-first workflow */
+        still_models?: GenerationModelOption[]
         video_models: GenerationModelOption[]
         message?: string | null
       }>('/generation/creative-studio/models', { timeout: 20_000 })
@@ -880,6 +927,7 @@ export const generationApi = {
     resolution?: string
     sound_on?: boolean
     speech_mode?: 'native_presenter' | 'external_voiceover'
+    video_reference_mode?: 'reference' | 'edit'
     attachment_urls?: string[]
     brand_name?: string
     brand_id?: string
@@ -904,7 +952,7 @@ export const generationApi = {
     product_reference_url?: string
     logo_reference_url?: string
     additional_reference_urls?: string[]
-    reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' }[]
+    reference_assets?: { url: string; role: 'product' | 'logo' | 'scene' | 'character' | 'reference' | 'proof' | 'reference_video' }[]
     document_references?: {
       name: string
       pdf_url: string
@@ -963,6 +1011,29 @@ export const generationApi = {
       }>('/generation/creative-studio/chat', data, { timeout: 120_000 })
       .then((r) => r.data),
 
+  /** Burn captions and the brand logo onto a copy of a finished Creative Studio video. */
+  creativeStudioFinishVideo: (data: {
+    video_url: string
+    script: string
+    logo_url?: string | null
+    logo_on_light_url?: string | null
+    add_captions?: boolean
+    add_logo?: boolean
+  }) =>
+    api
+      .post<{
+        url: string
+        source_url: string
+        captions_applied: boolean
+        caption_count: number
+        logo_applied: boolean
+        width: number
+        height: number
+        duration_seconds: number
+        warnings: string[]
+      }>('/generation/creative-studio/finish-video', data, { timeout: 600_000 })
+      .then((r) => r.data),
+
   creativeStudioPrompt: (data: {
     niche: string
     media_mode?: 'image' | 'video'
@@ -1010,6 +1081,12 @@ export const adminApi = {
   getUsage: (params?: { days?: number; user_id?: string }) =>
     api.get<AdminUsage>('/admin/usage', { params }).then((r) => r.data),
 
+    getUsageAllowances: () =>
+      api.get<UsageAllowance[]>('/admin/usage-allowances').then((r) => r.data),
+
+    resetUsageAllowance: (userId: string, note = '') =>
+      api.post<UsageAllowance>(`/admin/users/${userId}/usage-allowance/reset`, { note }).then((r) => r.data),
+
   exportUsageReport: (params: { days?: number; from?: string; to?: string; user_id?: string }) =>
     api.get<Blob>('/admin/usage/export', {
       params,
@@ -1024,6 +1101,12 @@ export const adminApi = {
 
   checkSeedanceCredits: () =>
     api.post<SeedanceCreditsCheck>('/admin/seedance/check-credits').then((r) => r.data),
+
+  getPricing: () => api.get<PricingConfig>('/admin/pricing').then((r) => r.data),
+
+  /** Send {} to restore every default. */
+  savePricing: (overrides: Partial<PricingRates>) =>
+    api.put<PricingConfig>('/admin/pricing', overrides).then((r) => r.data),
 }
 
 export default api

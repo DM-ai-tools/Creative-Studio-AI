@@ -35,8 +35,10 @@ from app.schemas.generation import GenerationCatalogResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.avatar_script_service import generate_avatar_script
 from app.services.generation_catalog import get_generation_catalog
+from app.services.media.openai_image_catalog import OPENAI_IMAGE_DEFAULT_CATALOG_ID
 from app.services.icp_service import generate_icp_script
 from app.services.model_suggestion_service import suggest_models
+from app.services.usage_allowance import require_usage_allowance
 from app.services.stats_image_service import _guess_image_mime, extract_stats_from_image
 from app.services.strategy_preview_service import generate_strategy_preview
 from app.services.website_script_service import generate_website_script
@@ -52,12 +54,19 @@ from app.services.video_script_skeleton import (
 router = APIRouter(prefix="/generation", tags=["generation"])
 
 
+def paid_post(*args, **kwargs):
+    """POST decorator that checks a user's allowance before any paid generation work."""
+    dependencies = list(kwargs.pop("dependencies", []))
+    dependencies.append(Depends(require_usage_allowance))
+    return router.post(*args, dependencies=dependencies, **kwargs)
+
+
 @router.get("/catalog", response_model=GenerationCatalogResponse)
 async def generation_catalog(refresh: bool = False):
     return get_generation_catalog(refresh=refresh)
 
 
-@router.post("/avatar-script", response_model=AvatarScriptResponse)
+@paid_post("/avatar-script", response_model=AvatarScriptResponse)
 async def avatar_script(
     data: AvatarScriptRequest,
     _current_user=Depends(require_full_studio_user),
@@ -68,7 +77,7 @@ async def avatar_script(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/master-script-preview", response_model=MasterScriptPreviewResponse)
+@paid_post("/master-script-preview", response_model=MasterScriptPreviewResponse)
 async def master_script_preview(
     data: MasterScriptPreviewRequest,
     _current_user=Depends(require_full_studio_user),
@@ -85,7 +94,7 @@ async def master_script_preview(
     return MasterScriptPreviewResponse(beats=beats, warnings=warnings, ready=ready)
 
 
-@router.post("/extract-stats-image", response_model=StatsImageExtractionResponse)
+@paid_post("/extract-stats-image", response_model=StatsImageExtractionResponse)
 async def extract_stats_image(
     file: UploadFile = File(...),
     _current_user=Depends(require_full_studio_user),
@@ -135,7 +144,7 @@ class HeroImageResponse(BaseModel):
     prompt: str
 
 
-@router.post("/analyze-reference-image", response_model=ReferenceImageAnalysisResponse)
+@paid_post("/analyze-reference-image", response_model=ReferenceImageAnalysisResponse)
 async def analyze_reference_image(
     file: UploadFile = File(...),
     brand_id: Optional[str] = Form(None),
@@ -226,7 +235,7 @@ async def analyze_reference_image(
     )
 
 
-@router.post("/product-reference", response_model=ProductReferenceResponse)
+@paid_post("/product-reference", response_model=ProductReferenceResponse)
 async def create_product_reference(
     data: ProductReferenceRequest,
     current_user=Depends(get_current_user),
@@ -292,7 +301,7 @@ async def create_product_reference(
         raise HTTPException(status_code=502, detail=f"Could not fetch product image: {exc}") from exc
 
 
-@router.post("/hero-ai-image", response_model=HeroImageResponse)
+@paid_post("/hero-ai-image", response_model=HeroImageResponse)
 async def create_hero_ai_image(
     file: UploadFile = File(...),
     brand_name: str = Form(""),
@@ -301,7 +310,7 @@ async def create_hero_ai_image(
     product_name: str = Form(""),
     hook: str = Form(""),
     headline: str = Form(""),
-    model: str = Form("openai-gpt-image-2"),
+    model: str = Form(OPENAI_IMAGE_DEFAULT_CATALOG_ID),
     logo_url: str = Form(""),
     logo_on_light_url: str = Form(""),
     prompt: str = Form(""),
@@ -402,8 +411,8 @@ async def create_hero_ai_image(
             )
         hero_model = (
             model.strip()
-            if "gpt-image-2" in model.strip().lower()
-            else "openai-gpt-image-2"
+            if "gpt-image" in model.strip().lower()
+            else OPENAI_IMAGE_DEFAULT_CATALOG_ID
         )
         generated_image = await AIService().generate_image_asset(
             prompt=generation_prompt,
@@ -482,7 +491,7 @@ class StrategyParseResponse(BaseModel):
     creative_style: str = ""
 
 
-@router.post("/parse-strategy", response_model=StrategyParseResponse)
+@paid_post("/parse-strategy", response_model=StrategyParseResponse)
 async def parse_strategy_file(
     file: UploadFile = File(...),
     _current_user=Depends(require_full_studio_user),
@@ -547,7 +556,7 @@ class ModelSuggestionResponse(BaseModel):
     copy_reason: str
 
 
-@router.post("/suggest-models", response_model=ModelSuggestionResponse)
+@paid_post("/suggest-models", response_model=ModelSuggestionResponse)
 async def suggest_models_endpoint(
     data: ModelSuggestionRequest,
     _current_user=Depends(require_full_studio_user),
@@ -572,7 +581,7 @@ async def suggest_models_endpoint(
     return ModelSuggestionResponse(**result)
 
 
-@router.post("/strategy-preview", response_model=StrategyPreviewResponse)
+@paid_post("/strategy-preview", response_model=StrategyPreviewResponse)
 async def strategy_preview(
     data: StrategyPreviewRequest,
     _current_user=Depends(require_full_studio_user),
@@ -597,7 +606,7 @@ async def strategy_preview(
     return StrategyPreviewResponse(**result)
 
 
-@router.post("/website-script", response_model=WebsiteScriptResponse)
+@paid_post("/website-script", response_model=WebsiteScriptResponse)
 async def website_script(
     data: WebsiteScriptRequest,
     _current_user=Depends(require_full_studio_user),
@@ -634,7 +643,7 @@ async def website_script(
         raise HTTPException(status_code=502, detail=f"Could not fetch website: {e}")
 
 
-@router.post("/icp-script", response_model=IcpScriptResponse)
+@paid_post("/icp-script", response_model=IcpScriptResponse)
 async def icp_script(
     data: IcpScriptRequest,
     _current_user=Depends(require_full_studio_user),
@@ -660,7 +669,7 @@ class ImagePromptResponse(BaseModel):
     prompt: str
 
 
-@router.post("/image-prompt", response_model=ImagePromptResponse)
+@paid_post("/image-prompt", response_model=ImagePromptResponse)
 async def generate_image_prompt_endpoint(
     data: ImagePromptRequest,
     _current_user=Depends(require_full_studio_user),
@@ -698,7 +707,7 @@ class ImagePlanResponse(BaseModel):
     reasoning: str
 
 
-@router.post("/preview-image-plan", response_model=ImagePlanResponse)
+@paid_post("/preview-image-plan", response_model=ImagePlanResponse)
 async def preview_image_plan(
     data: ImagePlanRequest,
     _current_user=Depends(require_full_studio_user),
@@ -765,7 +774,7 @@ class SuggestAdAnglesResponse(BaseModel):
     source: str = "rules"  # "ai" | "rules"
 
 
-@router.post("/suggest-ad-angles", response_model=SuggestAdAnglesResponse)
+@paid_post("/suggest-ad-angles", response_model=SuggestAdAnglesResponse)
 async def suggest_ad_angles_endpoint(
     data: SuggestAdAnglesRequest,
     _current_user=Depends(require_full_studio_user),
@@ -868,7 +877,7 @@ class IcpImagePlanResponse(BaseModel):
     campaign_cta: str = ""
 
 
-@router.post("/icp-image-plan", response_model=IcpImagePlanResponse)
+@paid_post("/icp-image-plan", response_model=IcpImagePlanResponse)
 async def icp_image_plan(
     data: IcpImagePlanRequest,
     current_user=Depends(require_full_studio_user),
@@ -995,7 +1004,7 @@ class FetchBrandFromUrlResponse(BaseModel):
     brand_facts: dict | None = None
 
 
-@router.post("/fetch-brand-from-url", response_model=FetchBrandFromUrlResponse)
+@paid_post("/fetch-brand-from-url", response_model=FetchBrandFromUrlResponse)
 async def fetch_brand_from_url(
     data: FetchBrandFromUrlRequest,
     current_user=Depends(get_current_user),
@@ -1051,7 +1060,7 @@ class ProductionScriptResponse(BaseModel):
     draft_only: bool = False
 
 
-@router.post("/production-script", response_model=ProductionScriptResponse)
+@paid_post("/production-script", response_model=ProductionScriptResponse)
 async def production_script_from_brief(
     data: ProductionScriptFromBriefRequest,
     _current_user=Depends(require_full_studio_user),
@@ -1248,7 +1257,7 @@ def _heygen_headers() -> dict[str, str]:
     return {"X-Api-Key": settings.HEYGEN_API_KEY, "Accept": "application/json"}
 
 
-@router.post("/photo-avatar", response_model=PhotoAvatarCreateResponse, status_code=201)
+@paid_post("/photo-avatar", response_model=PhotoAvatarCreateResponse, status_code=201)
 async def create_photo_avatar(
     photo: UploadFile = File(..., description="Portrait photo (JPEG/PNG, ≤32 MB)"),
     name: str = Form(..., description="Display name for this avatar"),
@@ -1443,9 +1452,12 @@ class CreativeStudioGenerateResponse(BaseModel):
     quality_gate: dict | None = None
     retry_chapter_available: bool = False
     continuity_video_reference_url: str | None = None
+    credential_family: str | None = None
+    credential_fingerprint: str | None = None
     broll_index: int | None = None
     broll_title: str | None = None
     byteplus_url: str | None = None
+    trusted_video_model: str | None = None
     asset_role: str | None = None
     clone_mode: bool = False
     character_reference_url: str | None = None
@@ -1461,11 +1473,14 @@ class CreativeStudioRecoverContinuationRequest(BaseModel):
     generated_duration_seconds: int | None = None
     continuity_frame_count: int | None = None
     cast_reference_url: str | None = None
+    continuity_reference_url: str | None = None
     continuity_video_reference_url: str | None = None
+    credential_family: str | None = None
+    credential_fingerprint: str | None = None
     production_id: str | None = None
     # Bind a newly authored prompt and uploads to the next reviewed chapter.
     next_prompt: str = Field(default="", max_length=32_000)
-    next_reference_assets: list[dict[str, str]] = Field(default_factory=list, max_length=9)
+    next_reference_assets: list[dict[str, str]] = Field(default_factory=list, max_length=10)
     next_reference_mode: Literal["continuity", "first_frame"] = "continuity"
     next_seed_image_url: str = ""
 
@@ -1500,7 +1515,8 @@ class CreativeStudioChatMessage(BaseModel):
 
 class CreativeStudioReference(BaseModel):
     url: str = Field(min_length=1)
-    role: Literal["product", "logo", "scene", "character", "reference", "proof"]
+    role: Literal["product", "logo", "scene", "character", "reference", "proof", "reference_video"]
+    name: str = Field(default="", max_length=240)
 
 
 class CreativeStudioDocumentReference(BaseModel):
@@ -1525,6 +1541,7 @@ class CreativeStudioChatRequest(BaseModel):
     resolution: str = "1080p"
     sound_on: bool = True
     speech_mode: Literal["native_presenter", "external_voiceover"] = "native_presenter"
+    video_reference_mode: Literal["reference", "edit"] = "reference"
     attachment_urls: list[str] = Field(default_factory=list)
     brand_name: str = ""
     brand_id: str = Field(
@@ -1550,7 +1567,7 @@ class CreativeStudioChatRequest(BaseModel):
     product_reference_url: str = ""
     logo_reference_url: str = ""
     additional_reference_urls: list[str] = Field(default_factory=list)
-    reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=9)
+    reference_assets: list[CreativeStudioReference] = Field(default_factory=list, max_length=19)
     document_references: list[CreativeStudioDocumentReference] = Field(
         default_factory=list,
         max_length=3,
@@ -1627,6 +1644,7 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
     from app.services.media.byteplus_seedance_client import ark_configured
     from app.services.media.byteplus_seedream_catalog import (
         byteplus_seedream_catalog_options,
+        creative_studio_still_model_options,
     )
     from app.services.media.higgsfield_catalog import (
         higgsfield_image_catalog_options,
@@ -1685,11 +1703,12 @@ async def creative_studio_models(current_user=Depends(get_current_user)):
         ),
         "chat_models": chat_models,
         "default_chat_model": default_prompt_llm_model(),
-        "image_model_default": "openai-gpt-image-2",
+        "image_model_default": OPENAI_IMAGE_DEFAULT_CATALOG_ID,
         "video_model_default": default_video_model_for_user(
             current_user, "ark-seedance-2-0"
         ),
         "image_models": image_models,
+        "still_models": creative_studio_still_model_options(),
         "video_models": video_models,
         "message": " ".join(messages) if messages else None,
     }
@@ -1715,7 +1734,7 @@ async def creative_studio_pdf_reference(
     )
 
 
-@router.post("/creative-studio/chat", response_model=CreativeStudioChatResponse)
+@paid_post("/creative-studio/chat", response_model=CreativeStudioChatResponse)
 async def creative_studio_chat(
     data: CreativeStudioChatRequest,
     current_user=Depends(get_current_user),
@@ -1766,6 +1785,7 @@ async def creative_studio_chat(
         resolution=data.resolution,
         sound_on=data.sound_on,
         speech_mode=data.speech_mode,
+        video_reference_mode=data.video_reference_mode,
         attachment_urls=list(data.attachment_urls or []),
         brand_name=data.brand_name,
         product_name=data.product_name,
@@ -1811,10 +1831,68 @@ async def creative_studio_chat(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from app.services.creative_studio_chat_service import auto_duration_cap_notice
+
+    cap_notice = auto_duration_cap_notice(msgs, data.duration_seconds)
+    if cap_notice and str(result.get("assistant_message") or "").strip():
+        result["assistant_message"] = f"{result['assistant_message']}\n\n{cap_notice}"
     return CreativeStudioChatResponse(**result)
 
 
-@router.post("/creative-studio/prompt", response_model=CreativeStudioPromptResponse)
+class CreativeStudioFinishVideoRequest(BaseModel):
+    video_url: str = Field(min_length=1, max_length=2000)
+    script: str = Field(default="", max_length=40000)
+    logo_url: str | None = Field(default=None, max_length=2000)
+    logo_on_light_url: str | None = Field(default=None, max_length=2000)
+    add_captions: bool = True
+    add_logo: bool = True
+
+
+class CreativeStudioFinishVideoResponse(BaseModel):
+    url: str
+    source_url: str
+    captions_applied: bool
+    caption_count: int
+    logo_applied: bool
+    width: int
+    height: int
+    duration_seconds: float
+    warnings: list[str] = Field(default_factory=list)
+
+
+@router.post(
+    "/creative-studio/finish-video",
+    response_model=CreativeStudioFinishVideoResponse,
+)
+async def creative_studio_finish_video(
+    data: CreativeStudioFinishVideoRequest,
+    current_user=Depends(get_current_user),
+):
+    """Burn captions and the brand logo onto a copy of a finished Creative Studio video."""
+    import asyncio
+
+    from app.services.creative_studio_caption_logo import finish_video_with_captions_and_logo
+
+    try:
+        # ffmpeg encode is blocking; keep the event loop free for other requests.
+        result = await asyncio.to_thread(
+            finish_video_with_captions_and_logo,
+            video_url=data.video_url,
+            script=data.script,
+            tenant_id=str(current_user.tenant_id),
+            logo_url=(data.logo_url or "").strip() or None,
+            logo_on_light_url=(data.logo_on_light_url or "").strip() or None,
+            add_captions=data.add_captions,
+            add_logo=data.add_logo,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return CreativeStudioFinishVideoResponse(**result)
+
+
+@paid_post("/creative-studio/prompt", response_model=CreativeStudioPromptResponse)
 async def creative_studio_prompt(
     data: CreativeStudioPromptRequest,
     _current_user=Depends(require_full_studio_user),
@@ -1856,7 +1934,7 @@ def _cs_format_from_aspect(aspect: str) -> str:
     return "static"
 
 
-@router.post("/creative-studio", response_model=CreativeStudioGenerateResponse)
+@paid_post("/creative-studio", response_model=CreativeStudioGenerateResponse)
 async def creative_studio_generate(
     data: CreativeStudioGenerateRequest,
     current_user=Depends(get_current_user),
@@ -1959,20 +2037,23 @@ async def creative_studio_job_status(
         quality_gate=job.get("quality_gate"),
         retry_chapter_available=bool(job.get("retry_chapter_available")),
         continuity_video_reference_url=job.get("continuity_video_reference_url"),
+        credential_family=job.get("credential_family"),
+        credential_fingerprint=job.get("credential_fingerprint"),
         broll_index=job.get("broll_index"),
         broll_title=job.get("broll_title"),
         byteplus_url=job.get("byteplus_url"),
+        trusted_video_model=job.get("trusted_video_model"),
         asset_role=job.get("asset_role"),
         clone_mode=bool(job.get("clone_mode")),
         character_reference_url=job.get("character_reference_url"),
     )
 
 
-@router.post(
+@paid_post(
     "/creative-studio/jobs/{job_id}/continue",
     response_model=CreativeStudioGenerateResponse,
 )
-async def creative_studio_job_continue(
+async def creative_studio_continue_chapter(
     job_id: str,
     data: CreativeStudioRecoverContinuationRequest | None = Body(default=None),
     current_user=Depends(get_current_user),
@@ -2004,7 +2085,10 @@ async def creative_studio_job_continue(
                 generated_duration_seconds=data.generated_duration_seconds,
                 continuity_frame_count=data.continuity_frame_count,
                 cast_reference_url=data.cast_reference_url,
+                continuity_reference_url=data.continuity_reference_url,
                 continuity_video_reference_url=data.continuity_video_reference_url,
+                credential_family=data.credential_family,
+                credential_fingerprint=data.credential_fingerprint,
                 production_id=data.production_id,
                 overrides=overrides,
             )
