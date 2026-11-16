@@ -107,6 +107,35 @@ DEFAULT_LLM_PER_M_TOKENS: dict[str, dict[str, float]] = {
     "google/veo-3.1": {"input": 0.0, "output": 0.0},
 }
 
+DEFAULT_SEEDREAM_USD_EACH: dict[str, float] = {
+    "seedream-5-0-lite": 0.035,
+    "seedream-5-0-pro": 0.05,
+    "seedream-5-0-flash": 0.02,
+}
+
+
+def seedream_tier(model: str | None) -> str | None:
+    """'lite' / 'pro' / 'flash' for a Seedream model or catalog id, else None."""
+    text = (model or "").strip().lower()
+    if "seedream" not in text:
+        return None
+    if "flash" in text:
+        return "flash"
+    if "pro" in text:
+        return "pro"
+    return "lite"
+
+
+def seedream_image_usd(model: str | None) -> float | None:
+    tier = seedream_tier(model)
+    if tier is None:
+        return None
+    key = f"seedream-5-0-{tier}"
+    table = get_pricing()["image_usd_each"]
+    value = table.get(key, DEFAULT_SEEDREAM_USD_EACH[key])
+    return float(value)
+
+
 DEFAULTS: dict[str, Any] = {
     "seedance_per_m_tokens": DEFAULT_SEEDANCE_PER_M_TOKENS,
     # Used only when a Seedance row has no token count at all.
@@ -114,8 +143,11 @@ DEFAULTS: dict[str, Any] = {
     "llm_per_m_tokens": DEFAULT_LLM_PER_M_TOKENS,
     # Applied to LLM models that are not listed above.
     "llm_default_per_m_tokens": {"input": 0.50, "output": 2.00},
-    # OpenAI image model (API id) -> USD per image. Empty = use catalog price.
-    "image_usd_each": {},
+    # Image model -> USD per image. OpenAI models: empty = use catalog price.
+    # BytePlus Seedream 5.0 tiers are priced per output image (input images are free).
+    # Lite is the BytePlus list price; Pro and Flash are estimates, so confirm them
+    # against your BytePlus invoice and edit them on the Usage page.
+    "image_usd_each": dict(DEFAULT_SEEDREAM_USD_EACH),
 }
 
 _overrides: dict[str, Any] = {}

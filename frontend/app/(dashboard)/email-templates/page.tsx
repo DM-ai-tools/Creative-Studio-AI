@@ -11,6 +11,7 @@ import Select from '@/components/ui/Select'
 import Badge from '@/components/ui/Badge'
 import { useApi } from '@/hooks/useApi'
 import { assetsApi, brandsApi, emailTemplatesApi, type EmailLayoutBase } from '@/lib/api'
+import EmailImageFitter from '@/components/email/EmailImageFitter'
 import { buildEmailHtml } from '@/lib/emailTemplateHtml'
 import { timeAgo } from '@/lib/utils'
 import type { Brand, EmailTemplate, EmailTemplateContent } from '@/types'
@@ -176,6 +177,12 @@ export default function EmailTemplatesPage() {
     <div>
       <Topbar title="Email Templates" subtitle="Generate branded hero visuals, edit responsive content and export production-ready HTML" />
       <div className="p-5 space-y-4">
+        <EmailImageFitter
+          brands={(brands ?? []) as Brand[]}
+          imageModels={IMAGE_MODELS}
+          defaultImageModel={emptyForm.image_model}
+        />
+
         <Card title="Email layout base (workspace)" subtitle="Upload a mock or HTML shell — saved for all campaigns (Creative Studio asset library)">
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <div className="space-y-2">

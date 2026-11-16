@@ -420,9 +420,11 @@ export default function PricingEditor({ onSaved, seedanceUsage = [], periodLabel
         </section>
 
         <section>
-          <h4 className="text-xs font-bold text-navy mb-1">OpenAI images — USD per image (optional override)</h4>
+          <h4 className="text-xs font-bold text-navy mb-1">Images — USD per image</h4>
           <p className="text-xs text-muted mb-2">
-            Leave empty to use the built-in price for each image model.
+            BytePlus Seedream 5.0 (lite / pro / flash) is billed per output image. Pro and Flash defaults are
+            estimates, so check them against your BytePlus invoice. For OpenAI image models, leave a row out to use the
+            built-in price.
           </p>
           {Object.keys(draft.image_usd_each).length > 0 && (
             <table className="text-xs mb-2">

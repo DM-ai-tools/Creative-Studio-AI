@@ -110,7 +110,12 @@ def estimate_media_cost(*, provider: str, model: str, duration_seconds: float = 
         return round(cost, 6), round(cost / _RUNWAY_CREDIT_USD, 4)
 
     if provider == "byteplus":
-        # Video token pricing depends on the model/resolution/account rate.
+        from app.services.usage_pricing import seedream_image_usd
+
+        image_cost = seedream_image_usd(model)
+        if image_cost is not None:
+            return round(image_cost, 6), round(image_cost / _RUNWAY_CREDIT_USD, 4)
+        # Seedance video token pricing depends on the model/resolution/account rate.
         # No Runway-equivalent credits or guessed per-second charge.
         return 0.0, 0.0
 
@@ -275,6 +280,11 @@ def effective_cost_usd(row: Any) -> float:
     if is_byteplus_seedance_row(row) and getattr(row, "success", False):
         detail = seedance_cost_detail(row)
         return float(detail["mid"]) if detail else 0.0
+    if getattr(row, "success", False) and (getattr(row, "provider", "") or "").lower() == "byteplus":
+        # Seedream stills saved before they were priced carry cost 0.
+        from app.services.usage_pricing import seedream_image_usd
+
+        return float(seedream_image_usd(getattr(row, "model", None)) or 0.0)
     return 0.0
 
 
@@ -285,7 +295,12 @@ def manager_report_seedance_cost_usd(row: Any) -> float:
     return effective_cost_usd(row)
 
 
-def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -> dict[str, Any]:
+def _build_seedance_summary(
+    rows: list[Any],
+    *,
+    tenant_names: dict[UUID, str],
+    clip_limit: int | None = 40,
+) -> dict[str, Any]:
     seedance_rows = [r for r in rows if is_byteplus_seedance_row(r)]
     successful = [r for r in seedance_rows if r.success]
     failed = [r for r in seedance_rows if not r.success]
@@ -330,7 +345,7 @@ def _build_seedance_summary(rows: list[Any], *, tenant_names: dict[UUID, str]) -
     model_rows.sort(key=lambda x: x["tokens"], reverse=True)
 
     recent_clips: list[dict[str, Any]] = []
-    for row in successful[:40]:
+    for row in (successful if clip_limit is None else successful[:clip_limit]):
         extra = row.extra or {}
         detail = seedance_cost_detail(row) or {"low": 0.0, "high": 0.0, "mid": 0.0}
         from app.services.public_urls import media_urls_from_extra, variant_library_url
@@ -680,9 +695,10 @@ def _build_daily_series(
     *,
     value_fn: Callable[[Any], float],
     days: int = _CHART_DAYS,
+    end_date: Any = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Daily stacked series — top models + Other bucket."""
-    today = datetime.now(timezone.utc).date()
+    """Daily stacked series — top models + Other bucket. Ends today unless ``end_date`` is given."""
+    today = end_date or datetime.now(timezone.utc).date()
     day_keys = [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
     by_day: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     model_totals: dict[str, float] = defaultdict(float)
@@ -781,19 +797,37 @@ async def usage_summary(
     platform: bool,
     days: int | None = None,
     user_id: UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    recent_limit: int | None = 120,
+    clip_limit: int | None = 40,
 ) -> dict[str, Any]:
+    """Figures for the Usage & costs page.
+
+    ``since``/``until`` and the two ``*_limit`` arguments exist so the Excel
+    export can run this very same calculation over an exact date range with no
+    row caps. The page itself uses the defaults.
+    """
     from app.models.tenant import Tenant
     from app.models.user import User
 
     from app.services.usage_pricing import refresh_if_stale
 
     await refresh_if_stale()
-    period_days = max(1, min(int(days or _CHART_DAYS), 366))
-    since = datetime.now(timezone.utc) - timedelta(days=period_days)
+    custom_range = since is not None and until is not None
+    if since is None:
+        period_days = max(1, min(int(days or _CHART_DAYS), 366))
+        since = datetime.now(timezone.utc) - timedelta(days=period_days)
+    else:
+        end_day = (until or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+        span = (end_day - since.astimezone(timezone.utc).date()).days + 1
+        period_days = max(1, min(span, 366))
+    chart_end = until.astimezone(timezone.utc).date() if (custom_range and until is not None) else None
     rows = await fetch_usage_events(
         tenant_id=tenant_id,
         platform=platform,
         since=since,
+        until=until,
         user_id=user_id,
     )
 
@@ -856,7 +890,7 @@ async def usage_summary(
     from app.services.public_urls import media_urls_from_extra, variant_library_url
 
     recent = []
-    for r in rows[:120]:
+    for r in (rows if recent_limit is None else rows[:recent_limit]):
         row_cost = effective_cost_usd(r)
         extra = r.extra or {}
         media_urls = media_urls_from_extra(extra)
@@ -887,9 +921,11 @@ async def usage_summary(
         )
 
     daily_cost, chart_models = _build_daily_series(
-        rows, value_fn=effective_cost_usd, days=period_days
+        rows, value_fn=effective_cost_usd, days=period_days, end_date=chart_end
     )
-    daily_requests_raw, _ = _build_daily_series(rows, value_fn=lambda r: 1.0, days=period_days)
+    daily_requests_raw, _ = _build_daily_series(
+        rows, value_fn=lambda r: 1.0, days=period_days, end_date=chart_end
+    )
     daily_requests = _align_series_to_legend(daily_requests_raw, chart_models)
 
     def _user_label(row: Any) -> str:
@@ -949,11 +985,14 @@ async def usage_summary(
         "by_model": _bucket(lambda r: r.model or r.provider),
         "by_user": by_user,
         "by_media_type": _bucket(_media_category),
-        "seedance": _build_seedance_summary(rows, tenant_names=names),
+        "seedance": _build_seedance_summary(rows, tenant_names=names, clip_limit=clip_limit),
         "recent": recent,
         "daily_cost": daily_cost,
         "daily_requests": daily_requests,
         "chart_models": chart_models,
         "period_days": period_days,
+        "period_custom": custom_range,
+        "period_from": since.astimezone(timezone.utc).date().isoformat() if custom_range else None,
+        "period_to": chart_end.isoformat() if chart_end else None,
         "filter_user_id": str(user_id) if user_id else None,
     }

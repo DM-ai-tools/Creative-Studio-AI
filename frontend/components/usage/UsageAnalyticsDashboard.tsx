@@ -103,7 +103,10 @@ export default function UsageAnalyticsDashboard({ usage, loading }: Props) {
           <div>
             <h2 className="text-lg font-semibold tracking-tight text-charcoal">Usage cost over time</h2>
             <p className="text-xs text-muted mt-0.5">
-              Last {usage.period_days ?? 30} days · estimated USD by model
+              {usage.period_custom && usage.period_from && usage.period_to
+                ? `${usage.period_from} → ${usage.period_to}`
+                : `Last ${usage.period_days ?? 30} days`}{' '}
+              · estimated USD by model
             </p>
           </div>
           <p className="text-2xl font-bold tabular-nums text-navy">

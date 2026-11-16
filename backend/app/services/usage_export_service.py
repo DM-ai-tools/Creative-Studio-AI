@@ -1408,6 +1408,7 @@ def build_usage_workbook(
     detail_rows: list[list[Any]],
     *,
     creatives_by_brand: list[list[Any]] | None = None,
+    app_sheets: list[Any] | None = None,
 ) -> bytes:
     wb = Workbook()
     readme = wb.active
@@ -1441,15 +1442,26 @@ def build_usage_workbook(
     _add_hyperlinks(mgr, url_col_indices=mgr_link_cols)
     _autosize_columns(mgr)
 
-    for title, group_col in (
-        ("By user", _COL_USER_EMAIL),
-        ("By brand", _COL_BRAND_NAME),
-        ("By model", _COL_MODEL),
-    ):
+    # When the app-figure sheets are present they replace the older By user /
+    # By model rollups (same numbers as the Usage & costs page).
+    rollups = [("By brand", _COL_BRAND_NAME)]
+    if not app_sheets:
+        rollups = [
+            ("By user", _COL_USER_EMAIL),
+            ("By brand", _COL_BRAND_NAME),
+            ("By model", _COL_MODEL),
+        ]
+    for title, group_col in rollups:
         sheet = wb.create_sheet(title=title)
         for row in _summary_rows(detail_rows, group_col=group_col, label=DETAIL_HEADERS[group_col]):
             sheet.append(row)
         _autosize_columns(sheet, max_width=36)
+
+    if app_sheets:
+        from app.services.usage_export_app_figures import add_sheets
+
+        # "Usage detail" already lists every call, so skip the page's call list.
+        add_sheets(wb, [s for s in app_sheets if s[0] != "API calls (as in app)"], start_index=1)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -1652,7 +1664,18 @@ async def generate_usage_export_xlsx(
         until=until,
         user_id=user_id,
     )
-    content = build_usage_workbook(detail, creatives_by_brand=creatives)
+    from app.services.usage_export_app_figures import build_app_figure_sheets
+
+    app_sheets = await build_app_figure_sheets(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        user_id=user_id,
+        scope_label="One user" if user_id else "All users",
+        period_label=label.replace("_", " "),
+    )
+    content = build_usage_workbook(detail, creatives_by_brand=creatives, app_sheets=app_sheets)
     filename = f"usage-report-{label}.xlsx"
     return content, filename
 
@@ -1755,6 +1778,7 @@ def build_summary_workbook(
     unassigned_by_hook: list[list[Any]] | None = None,
     no_brand_by_person: list[list[Any]] | None = None,
     api_only_no_brand: list[list[Any]] | None = None,
+    app_sheets: list[Any] | None = None,
 ) -> bytes:
     wb = Workbook()
     readme = wb.active
@@ -1783,6 +1807,11 @@ def build_summary_workbook(
     for row in by_brand:
         br.append(row)
     _autosize_columns(br)
+
+    if app_sheets:
+        from app.services.usage_export_app_figures import add_sheets
+
+        add_sheets(wb, app_sheets, start_index=1)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -1823,6 +1852,11 @@ async def _build_manager_summary_tables(
         user_id=user_id,
         limit=MAX_EXPORT_ROWS + 1,
     )
+    if len(usage_rows) > MAX_EXPORT_ROWS:
+        # Never drop the oldest events silently — the counts would be wrong.
+        raise ValueError(
+            f"Too many rows ({len(usage_rows)}). Narrow the date range (max {MAX_EXPORT_ROWS} rows per export)."
+        )
 
     user_ids = {r.user_id for r in usage_rows if r.user_id}
     brand_ids: set[UUID] = set()
@@ -2293,7 +2327,19 @@ async def generate_usage_summary_xlsx(
         period_label=label.replace("_", " "),
         user_id=user_id,
     )
+    from app.services.usage_export_app_figures import build_app_figure_sheets
+
+    app_sheets = await build_app_figure_sheets(
+        tenant_id=tenant_id,
+        platform=platform,
+        since=since,
+        until=until,
+        user_id=user_id,
+        scope_label="One user" if user_id else "All users",
+        period_label=label.replace("_", " "),
+    )
     content = build_summary_workbook(
+        app_sheets=app_sheets,
         period_label=label.replace("_", " "),
         overview=overview,
         by_user=by_user,

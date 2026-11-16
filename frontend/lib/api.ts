@@ -170,7 +170,72 @@ export type EmailLayoutBase = {
   updated_at?: string | null
 }
 
+export type EmailImportSlot = {
+  id: string
+  kind: 'img' | 'background'
+  src: string
+  alt: string
+  display_width: number | null
+  display_height: number | null
+  plan_width: number
+  plan_height: number
+  size_assumed: boolean
+  aspect: number
+  role: 'hero' | 'banner' | 'product' | 'content' | 'logo' | 'icon' | 'tracking' | 'other'
+  replaceable: boolean
+  reason: string | null
+  context_text: string
+  is_inline_data: boolean
+}
+
+export type EmailImportAnalysis = {
+  slots: EmailImportSlot[]
+  slot_count: number
+  replaceable_count: number
+  merge_tags: string[]
+  html_length: number
+}
+
+export type EmailImportImage = {
+  slot_id: string
+  url: string
+  absolute_url: string
+  width: number
+  height: number
+  display_width: number
+  display_height: number
+  file_size: number
+  prompt: string
+}
+
+export type EmailImportExport = {
+  html: string
+  applied: string[]
+  skipped: { id: string; reason: string }[]
+  warnings: string[]
+}
+
 export const emailTemplatesApi = {
+  /** Find the image spots in the customer's own HTML email. Changes nothing. */
+  analyzeImport: (html: string) =>
+    api.post<EmailImportAnalysis>('/email-templates/import/analyze', { html }).then((r) => r.data),
+  /** Generate one picture cropped to the exact shape of one image spot. */
+  generateImportImage: (data: {
+    brand_id?: string | null
+    campaign_name?: string
+    slot_id: string
+    role: string
+    width: number
+    height: number
+    description?: string
+    alt?: string
+    context_text?: string
+    notes?: string
+    image_model: string
+  }) => api.post<EmailImportImage>('/email-templates/import/generate-image', data, { timeout: 300_000 }).then((r) => r.data),
+  /** The customer's HTML with only the chosen image addresses swapped. */
+  exportImport: (html: string, replacements: Record<string, string>) =>
+    api.post<EmailImportExport>('/email-templates/import/export', { html, replacements }).then((r) => r.data),
   list: () => api.get<EmailTemplate[]>('/email-templates').then((r) => r.data),
   get: (id: string) => api.get<EmailTemplate>(`/email-templates/${id}`).then((r) => r.data),
   getLayoutBase: () => api.get<EmailLayoutBase>('/email-templates/layout-base').then((r) => r.data),
@@ -1078,7 +1143,7 @@ export const adminApi = {
 
   getStats: () => api.get<AdminStats>('/admin/stats').then((r) => r.data),
 
-  getUsage: (params?: { days?: number; user_id?: string }) =>
+  getUsage: (params?: { days?: number; from?: string; to?: string; user_id?: string }) =>
     api.get<AdminUsage>('/admin/usage', { params }).then((r) => r.data),
 
     getUsageAllowances: () =>

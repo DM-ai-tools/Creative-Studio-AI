@@ -295,12 +295,32 @@ async def admin_stats(
 async def admin_usage(
     current_user=Depends(_require_admin),
     days: int | None = Query(None, ge=1, le=366),
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
     user_id: UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Tokens, credits, and estimated USD spend across connected APIs."""
+    """Tokens, credits, and estimated USD spend across connected APIs.
+
+    Pass ``days`` for a rolling window, or ``from`` and ``to`` (inclusive dates)
+    for an exact custom range.
+    """
     await _ensure_usage_user_filter(db, current_user, user_id)
     platform = _is_platform_admin(current_user)
+    if date_from and date_to:
+        from app.services.usage_export_service import parse_usage_date_range
+
+        try:
+            since, until, _label = parse_usage_date_range(date_from=date_from, date_to=date_to)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await usage_summary(
+            tenant_id=current_user.tenant_id,
+            platform=platform,
+            user_id=user_id,
+            since=since,
+            until=until,
+        )
     return await usage_summary(
         tenant_id=current_user.tenant_id,
         platform=platform,

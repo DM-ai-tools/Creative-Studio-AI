@@ -7,7 +7,12 @@ import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
 import UsageAnalyticsDashboard from '@/components/usage/UsageAnalyticsDashboard'
-import UsageExportPanel from '@/components/usage/UsageExportPanel'
+import UsageExportPanel, {
+  daysAgoIso,
+  isValidCustomRange,
+  todayIso,
+  type UsageRange,
+} from '@/components/usage/UsageExportPanel'
 import PricingEditor from '@/components/usage/PricingEditor'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
@@ -68,16 +73,25 @@ function seedanceStatusBadge(status: SeedanceCreditsCheck['status']) {
 export default function UsagePage() {
   const router = useRouter()
   const { user } = useAuth()
-  const [periodDays, setPeriodDays] = useState(30)
+  const [range, setRange] = useState<UsageRange>(() => ({
+    preset: '30',
+    from: daysAgoIso(30),
+    to: todayIso(),
+  }))
   const [selectedUserId, setSelectedUserId] = useState('')
   const { data: users } = useApi(() => adminApi.listUsers(), [])
+  const customReady = range.preset !== 'custom' || isValidCustomRange(range.from, range.to)
+  const rangeLabel = range.preset === 'custom' ? `${range.from} → ${range.to}` : `last ${range.preset} days`
   const { data, isLoading, refetch } = useApi(
     () =>
       adminApi.getUsage({
-        days: periodDays,
+        ...(range.preset === 'custom'
+          ? { from: range.from, to: range.to }
+          : { days: Number(range.preset) }),
         ...(selectedUserId ? { user_id: selectedUserId } : {}),
       }),
-    [periodDays, selectedUserId]
+    // A half-typed custom range is not requested; the last good figures stay on screen.
+    [range.preset, customReady ? range.from : '', customReady ? range.to : '', selectedUserId]
   )
   const [seedanceCheck, setSeedanceCheck] = useState<SeedanceCreditsCheck | null>(null)
   const [seedanceChecking, setSeedanceChecking] = useState(false)
@@ -123,18 +137,14 @@ export default function UsagePage() {
   const mediaSpend = (name: string) =>
     usage?.by_media_type?.find((r) => r.name.toLowerCase() === name.toLowerCase())?.cost_usd ?? 0
 
-  const scopeLabel = selectedUserLabel
-    ? `${selectedUserLabel} — last ${periodDays} days`
-    : `All users — last ${periodDays} days`
-
   return (
     <div>
       <Topbar
         title="Usage & costs"
         subtitle={
           selectedUserLabel
-            ? `Spend and activity for ${selectedUserLabel} — last ${periodDays} days`
-            : `API spend, request volume, and model breakdown — last ${periodDays} days`
+            ? `Spend and activity for ${selectedUserLabel} — ${rangeLabel}`
+            : `API spend, request volume, and model breakdown — ${rangeLabel}`
         }
       />
 
@@ -201,15 +211,15 @@ export default function UsagePage() {
         <UsageAnalyticsDashboard usage={usage ?? { totals: { calls: 0, failed_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, credits: 0, cost_usd: 0 }, by_provider: [], by_model: [], recent: [] }} loading={isLoading} />
 
         <UsageExportPanel
-          periodDays={periodDays}
-          onPeriodDaysChange={setPeriodDays}
+          range={range}
+          onRangeChange={setRange}
           userId={selectedUserId || undefined}
         />
 
         <PricingEditor
           onSaved={() => refetch()}
           seedanceUsage={seedance?.by_model ?? []}
-          periodLabel={`last ${periodDays} days`}
+          periodLabel={rangeLabel}
         />
 
         <Card title="Seedance / BytePlus billing">
@@ -448,7 +458,7 @@ export default function UsagePage() {
 
         {!selectedUserId && (usage?.by_user?.length ?? 0) > 0 && (
           <Card title="Spend by user" padding={false}>
-            <p className="px-4 pt-3 text-xs text-muted">{scopeLabel} — select a row to drill down.</p>
+            <p className="px-4 pt-3 text-xs text-muted">{selectedUserLabel ?? 'All users'} — {rangeLabel} — select a row to drill down.</p>
             <table className="w-full text-xs mt-2">
               <thead>
                 <tr className={theadRowClass}>

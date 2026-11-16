@@ -18,7 +18,14 @@ from app.services.email_template_layout_service import (
     resolve_layout_asset_url,
     save_layout_base,
 )
+from app.services.email_template_image_service import generate_slot_image
+from app.services.email_template_import_service import (
+    MAX_HTML_CHARS,
+    analyze_email_html,
+    apply_image_replacements,
+)
 from app.services.media.openai_image_catalog import OPENAI_IMAGE_DEFAULT_CATALOG_ID
+from app.services.public_urls import absolute_media_url, normalize_stored_file_url
 from app.services.usage_allowance import require_usage_allowance
 from app.services.usage_tracker import set_usage_context
 
@@ -266,6 +273,104 @@ async def generate_email_template(
     await db.flush()
     await db.refresh(row)
     return _response(row)
+
+
+# ── Use the customer's own HTML email: find image spots, fit AI pictures, export ──────────
+
+
+class ImportAnalyzeRequest(BaseModel):
+    html: str = Field(min_length=10, max_length=MAX_HTML_CHARS)
+
+
+class ImportGenerateImageRequest(BaseModel):
+    brand_id: UUID | None = None
+    campaign_name: str = Field(default="", max_length=255)
+    slot_id: str = Field(min_length=2, max_length=20)
+    role: str = Field(default="content", max_length=20)
+    width: int = Field(ge=16, le=4000)
+    height: int = Field(ge=16, le=4000)
+    description: str = Field(default="", max_length=600)
+    alt: str = Field(default="", max_length=300)
+    context_text: str = Field(default="", max_length=300)
+    notes: str = Field(default="", max_length=1000)
+    image_model: str = Field(default=OPENAI_IMAGE_DEFAULT_CATALOG_ID, max_length=120)
+
+
+class ImportExportRequest(BaseModel):
+    html: str = Field(min_length=10, max_length=MAX_HTML_CHARS)
+    replacements: dict[str, str] = Field(default_factory=dict, max_length=60)
+
+
+@router.post("/import/analyze")
+async def analyze_imported_email(
+    payload: ImportAnalyzeRequest,
+    current_user=Depends(get_current_user),
+):
+    """List the image spots in an uploaded email. Nothing is generated or changed."""
+    try:
+        return analyze_email_html(payload.html)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/import/generate-image", dependencies=[Depends(require_usage_allowance)])
+async def generate_imported_email_image(
+    payload: ImportGenerateImageRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate one picture cropped to the exact shape of one image spot."""
+    brand = await _brand(db, current_user.tenant_id, payload.brand_id)
+    set_usage_context(
+        user_id=str(current_user.id),
+        tenant_id=str(current_user.tenant_id),
+        brand_id=str(brand.id) if brand else None,
+        brand_name=brand.name if brand else None,
+        operation="email_template_image",
+    )
+    palette = None
+    if brand and brand.primary_color and brand.secondary_color:
+        palette = (brand.primary_color, brand.secondary_color)
+    try:
+        image = await generate_slot_image(
+            tenant_id=str(current_user.tenant_id),
+            model=payload.image_model,
+            role=payload.role,
+            width=payload.width,
+            height=payload.height,
+            description=payload.description,
+            alt=payload.alt,
+            context_text=payload.context_text,
+            brand_name=brand.name if brand else "",
+            campaign_name=payload.campaign_name,
+            palette=palette,
+            notes=payload.notes,
+        )
+    except Exception as exc:  # provider errors must not look like a server crash
+        raise HTTPException(status_code=502, detail=f"Image generation failed: {str(exc)[:300]}") from exc
+    return {"slot_id": payload.slot_id, **image, "absolute_url": absolute_media_url(image["url"])}
+
+
+@router.post("/import/export")
+async def export_imported_email(
+    payload: ImportExportRequest,
+    current_user=Depends(get_current_user),
+):
+    """Return the customer's HTML with only the chosen image addresses swapped."""
+    tenant_prefix = f"/files/{current_user.tenant_id}/"
+    resolved: dict[str, str] = {}
+    for slot_id, raw_url in payload.replacements.items():
+        url = (raw_url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            # An app file path: it must belong to this workspace.
+            stored = normalize_stored_file_url(url)
+            if not stored.startswith(tenant_prefix):
+                raise HTTPException(status_code=400, detail=f"Image for {slot_id} is not from this workspace")
+        resolved[slot_id] = absolute_media_url(url)
+    try:
+        return apply_image_replacements(payload.html, resolved)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.put("/{template_id}")

@@ -211,6 +211,9 @@ export interface AdminUsage {
   daily_requests?: UsageDailyPoint[]
   chart_models?: string[]
   period_days?: number
+  period_custom?: boolean
+  period_from?: string | null
+  period_to?: string | null
   filter_user_id?: string | null
 }
 
