@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import toast from 'react-hot-toast'
 import Sidebar from '@/components/layout/Sidebar'
+import CommandPalette from '@/components/ui/CommandPalette'
 import { PageLoader } from '@/components/ui/Loading'
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
 import { ActiveBrandProvider, useActiveBrand } from '@/hooks/useActiveBrand'
@@ -129,6 +130,9 @@ function DashboardShell({ children }: { children: React.ReactNode }) {
       <main className="flex-1 min-w-0 h-screen overflow-y-auto overflow-x-hidden">
         {children}
       </main>
+      <CommandPalette
+        isAllowed={(href) => !isCsSeedance25WorkspaceUser(user) || isPathAllowedForCs25(href)}
+      />
     </div>
   )
 }

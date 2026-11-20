@@ -11,6 +11,11 @@ export type PipelineMedia = {
   subtitle_warning?: string
   logo_applied?: boolean
   logo_warning?: string
+  /** The picture without a logo: kept so the logo can be placed again anywhere. */
+  url_without_logo?: string
+  logo_corner?: string
+  logo_backing?: string
+  warnings?: string[]
   voiceover?: {
     status?: string
     script?: string

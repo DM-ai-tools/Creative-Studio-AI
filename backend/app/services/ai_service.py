@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 import re
@@ -110,8 +111,18 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
         logo_url: str | None = None,
         logo_on_light_url: str | None = None,
         reference_image_url: str | None = None,
+        aspect_ratio: str | None = None,
+        reference_image_urls: list[str] | None = None,
     ) -> dict:
         provider = get_image_provider(model)
+        extra: dict = {}
+        # Every product photo the user attached goes to the model as a real picture (not only the first),
+        # for the providers that accept more than one.
+        if reference_image_urls and "reference_image_urls" in inspect.signature(provider.generate).parameters:
+            extra["reference_image_urls"] = list(reference_image_urls)
+        # Only providers that can size by ratio get it (the others keep sizing by format name).
+        if aspect_ratio and "aspect_ratio" in inspect.signature(provider.generate).parameters:
+            extra["aspect_ratio"] = aspect_ratio
         try:
             result = await provider.generate(
                 prompt=prompt,
@@ -121,6 +132,7 @@ Key Benefits: {json.dumps(brief.get('key_benefits', {}))}"""
                 logo_url=logo_url,
                 logo_on_light_url=logo_on_light_url,
                 reference_image_url=reference_image_url,
+                **extra,
             )
         except Exception as exc:
             from app.services.usage_tracker import record_media_generation

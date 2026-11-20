@@ -41,7 +41,11 @@ def slim_generation_params_for_list(params: Dict[str, Any] | None) -> Dict[str, 
                 continue
             slim_pipeline[step] = {
                 k: step_data[k]
-                for k in ("status", "url", "model", "error", "source", "reason")
+                for k in (
+                    "status", "url", "model", "error", "source", "reason",
+                    # needed by the tile's Logo position / Logo style controls
+                    "url_without_logo", "logo_applied", "logo_corner", "logo_backing", "logo_manual", "warnings",
+                )
                 if k in step_data
             }
     out: Dict[str, Any] = {}

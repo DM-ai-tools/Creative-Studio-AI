@@ -7,13 +7,17 @@ import Button from '@/components/ui/Button'
 import ImageVariantSlotsPanel from '@/components/brief/ImageVariantSlotsPanel'
 import {
   emptyImageVariantSlot,
+  normalizeLogoPosition,
+  normalizePalette,
+  normalizePaletteColors,
   normalizeProductFocus,
   normalizeVariantAspectFromStorage,
   normalizeVariantReferenceImagesFromStorage,
   resizeImageVariantSlots,
   type ImageVariantSlot,
 } from '@/lib/imageUseCases'
-import { briefsApi } from '@/lib/api'
+import { brandsApi, briefsApi } from '@/lib/api'
+import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { extractApiError } from '@/lib/apiErrors'
 import type { Brief, BrandFacts, CatalogOption } from '@/types'
 
@@ -51,6 +55,11 @@ export function slotsFromBrief(brief: Brief): ImageVariantSlot[] {
     carousel_total: v.carousel_total ? Number(v.carousel_total) : undefined,
     product_focus: normalizeProductFocus(v.product_focus),
     product_model: String(v.product_model || ''),
+    logo_corner: normalizeLogoPosition(v.logo_corner) || undefined,
+    palette: normalizePalette(v.palette),
+    palette_colors: normalizePaletteColors(v.palette_colors),
+    brief_complete: v.brief_complete ? true : undefined,
+    prompt_source: (['strategy', 'ai', 'user'] as const).find((p) => p === v.prompt_source),
     ...normalizeVariantAspectFromStorage(v),
     ...normalizeVariantReferenceImagesFromStorage(v),
     generated_at: v.generated_at ? String(v.generated_at) : null,
@@ -83,6 +92,11 @@ export function serializeImageVariants(slots: ImageVariantSlot[]) {
       : undefined,
     product_focus: s.product_focus || undefined,
     product_model: s.product_model?.trim() || undefined,
+    logo_corner: s.logo_corner || undefined,
+    palette: s.palette?.length ? s.palette : undefined,
+    palette_colors: s.palette_colors && Object.keys(s.palette_colors).length ? s.palette_colors : undefined,
+    brief_complete: s.brief_complete || undefined,
+    prompt_source: s.prompt_source || undefined,
     generated_at: s.generated_at ?? undefined,
   }))
 }
@@ -103,6 +117,45 @@ export default function BriefImageVariantsEditor({
   onSaved,
 }: Props) {
   const [saving, setSaving] = React.useState(false)
+  const { activeBrandId } = useActiveBrand()
+  const colourBrandId = brief.brand_id || activeBrandId || ''
+  const [brandColors, setBrandColors] = React.useState<{ primary?: string; secondary?: string; tertiary?: string }>({})
+  React.useEffect(() => {
+    if (!colourBrandId) return
+    let cancelled = false
+    void (async () => {
+      let primary: string | undefined
+      let secondary: string | undefined
+      try {
+        const brand = await brandsApi.get(colourBrandId)
+        primary = brand.primary_color || undefined
+        secondary = brand.secondary_color || undefined
+      } catch {
+        try {
+          const found = (await brandsApi.list()).find((b) => b.id === colourBrandId)
+          primary = found?.primary_color || undefined
+          secondary = found?.secondary_color || undefined
+        } catch {
+          /* fall through to the Brand Kit colours */
+        }
+      }
+      let kit: Record<string, unknown> = {}
+      try {
+        kit = ((await brandsApi.getKit(colourBrandId)).colors ?? {}) as Record<string, unknown>
+      } catch {
+        /* no kit yet */
+      }
+      if (cancelled) return
+      setBrandColors({
+        primary: primary || String(kit.primary || '') || undefined,
+        secondary: secondary || String(kit.secondary || '') || undefined,
+        tertiary: String(kit.tertiary || '') || undefined,
+      })
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [colourBrandId])
 
   const handleSave = async () => {
     setSaving(true)
@@ -148,7 +201,9 @@ export default function BriefImageVariantsEditor({
           }
           angleOptions={angleOptions}
           catalogProducts={catalogProductsFromBrief(brief)}
-          brandId={brief.brand_id || undefined}
+          brandId={colourBrandId || undefined}
+          brandColors={brandColors}
+          logoCorner={normalizeLogoPosition((brief.key_benefits as Record<string, unknown> | undefined)?.image_logo_corner)}
           defaultAspectRatio={
             String(
               (brief.key_benefits as Record<string, unknown> | undefined)?.image_aspect_ratio || '',

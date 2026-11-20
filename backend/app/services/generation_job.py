@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import logging
+
+from app.services import ad_image_brand as _ad_brand
+from app.services import ad_image_design as _ad_design
+from app.services import ad_image_logo as _ad_logo
+from app.services import ad_image_punch as _ad_punch
+from app.services import ad_image_text as _ad_text
 from typing import Any
 from uuid import UUID
 
@@ -72,11 +78,14 @@ def _verbatim_slot_prompt(
     industry: str = "",
     niche: str = "",
 ) -> str:
-    """Variant prompt textarea → image model exactly as written (AI, edited, or pasted)."""
-    image_prompt = prepare_self_contained_slot_prompt(slot_prompt)
-    return enforce_no_spurious_circled_paper_prop(
-        image_prompt, industry=industry, niche=niche
-    )
+    """Variant prompt textarea → image model exactly as written (AI, edited, or pasted).
+
+    Nothing is appended. A "PROP BAN" used to be added here: it told the model to tell the story with "the
+    person's expression" (so a person appeared in briefs that never mentioned one) and it banned circles and
+    "highlighted amounts", which a designer's brief often asks for (a red-circled cost, a magnified callout).
+    """
+    del industry, niche  # kept for the callers; the prompt is the single source of truth
+    return prepare_self_contained_slot_prompt(slot_prompt)
 
 
 def _slot_has_saved_plan(slot: dict[str, Any] | None) -> bool:
@@ -391,6 +400,23 @@ def _variant_reference_image_url(
     if variant_refs:
         return str(variant_refs[0].get("file_url") or "").strip() or None
     return _exact_product_reference_from_kb(kb_models)
+
+
+def _variant_reference_image_urls(
+    kb_models: dict[str, Any],
+    slot: dict[str, Any] | None,
+) -> list[str]:
+    """Every product photo chosen for this variant, in the order the user added them, so the model
+    sees each one (the old code sent only the first and described the rest in words)."""
+    urls = [
+        str(r.get("file_url") or "").strip()
+        for r in _variant_reference_images_from_slot(slot if isinstance(slot, dict) else None)
+    ]
+    urls = [u for u in dict.fromkeys(urls) if u]
+    if urls:
+        return urls
+    single = _exact_product_reference_from_kb(kb_models)
+    return [single] if single else []
 
 
 def _append_reference_images_to_prompt(
@@ -1085,6 +1111,7 @@ async def run_brief_generation_job(
                                 format_type=fmt,
                             )
 
+                        _carousel_frame_note = ""
                         # Meta carousel = one square card per variant (not a collage).
                         if fmt == "carousel":
                             from app.services.campaign_themes import (
@@ -1162,6 +1189,10 @@ async def run_brief_generation_job(
                                 f' LAST CARD: burn a pill CTA button reading exactly "{last_cta}".'
                                 if carousel_last
                                 else " No CTA button on this card — CTA burns only on the final swipe card."
+                            )
+                            _carousel_frame_note = (
+                                f"Card {card_i + 1} of {total_cards} in one swipe story ({beat}); ONE square 1:1 card "
+                                "only, never a collage or a strip of cards."
                             )
                             image_prompt = (
                                 f"{image_prompt.rstrip()} "
@@ -1317,14 +1348,126 @@ async def run_brief_generation_job(
                                 image_prompt,
                                 image_visual_style=campaign_image_visual_style,
                             )
-                        if burn_logo_on_still and img_logo and not verbatim_slot:
+                        # A different designed look per variant, in a short prompt (opt-in per campaign;
+                        # never for a prompt the user or the strategy file wrote verbatim).
+                        _design_label = ""
+                        _design_ok = (
+                            _ad_design.scene_may_be_redesigned(slot, verbatim_slot)
+                            and fmt in {"static", "carousel"}
+                            and _ad_design.enabled(
+                                kb_models, brief_dict, campaign_on_image_style, campaign_image_visual_style
+                            )
+                        )
+                        _design_cta = (
+                            (
+                                slot_cta
+                                or _resolve_burn_in_cta(
+                                    fmt=fmt,
+                                    carousel_last=carousel_last,
+                                    slot=slot if isinstance(slot, dict) else None,
+                                    copy=copy,
+                                    brief_dict=brief_dict,
+                                    brief_cta=str(brief.cta or ""),
+                                )
+                            )
+                            if fmt == "static" or carousel_last
+                            else ""
+                        )
+                        # "Exact brand fonts": fetch the saved fonts now; if that works the picture is made
+                        # without text and the app draws the text itself afterwards.
+                        _text_fonts, _text_note = None, ""
+                        _text_zone = _ad_text.zone_for_logo(
+                            _ad_logo.resolve_mode(slot, kb_models, brief_dict) if burn_logo_on_still else ""
+                        )
+                        if _design_ok and not slot_photo_only and _ad_text.requested(kb_models, brief_dict):
+                            _text_fonts, _text_note = await _ad_text.load_fonts(
+                                str(snap.get("font_heading") or ""), str(snap.get("font_body") or "")
+                            )
+                        if _design_ok:
+                            image_prompt, _design_label = _ad_design.compose(
+                                scene_source=slot_prompt,
+                                fallback_source=image_prompt,
+                                seed=str(brief_id),
+                                index=variant_index,
+                                hook=on_image_hook,
+                                headline=on_image_message,
+                                cta=_design_cta,
+                                exact_text=bool(_text_fonts),
+                                text_zone=_text_zone,
+                                primary=str(snap.get("primary_color") or _brand_primary or ""),
+                                secondary=str(snap.get("secondary_color") or _brand_secondary or ""),
+                                font_heading=str(snap.get("font_heading") or ""),
+                                font_body=str(snap.get("font_body") or ""),
+                                photo_only=slot_photo_only,
+                                brand_name=str(snap.get("brand_name") or brand.name or ""),
+                                frame_note=_carousel_frame_note,
+                                audience=kb_models.get("audience"),
+                                focus=slot_product_focus,
+                            )
+                            logger.info(
+                                "Brief %s variant=%s design=%r prompt_len=%d",
+                                brief_id,
+                                variant_index,
+                                _design_label,
+                                len(image_prompt),
+                            )
+                        # Logo position chosen by the user (a corner, Auto, or none). Empty = the old white strip.
+                        _logo_mode = (
+                            _ad_logo.resolve_mode(slot, kb_models, brief_dict)
+                            if burn_logo_on_still
+                            else _ad_logo.LEGACY
+                        )
+                        _logo_hint = ""
+                        _brand_for_guard = str(snap.get("brand_name") or brand.name or "")
+                        if _logo_mode != _ad_logo.LEGACY:
+                            image_prompt, _logo_hint = _ad_logo.prepare_prompt(
+                                image_prompt, _logo_mode, _brand_for_guard, seed=str(brief_id), index=variant_index
+                            )
+                        elif fmt in {"static", "carousel"}:
+                            # Old white-strip look keeps its strip, but the model is still never allowed to
+                            # draw a logo or the brand's name (the strategy file may even ask for one).
+                            image_prompt = _ad_logo.guard_prompt(image_prompt, _brand_for_guard)
+                        if fmt in {"static", "carousel"} and not slot_photo_only and not _text_fonts:
+                            # How punchy it must be (hook hierarchy, highlighted payoff words, offer banner,
+                            # CTA button, the hook's angle) and no people unless the brief asks for one.
+                            # Skipped when the app draws the text itself: it adds its own highlight.
+                            _pal_p, _pal_s, _pal_t, _pal_subset = _ad_brand.select_palette(
+                                snap, slot if isinstance(slot, dict) else None, _brand_primary, _brand_secondary
+                            )
+                            _punch_accent = _pal_p or _pal_s or _pal_t
+                            image_prompt = _ad_punch.apply_punch(
+                                image_prompt,
+                                hook=_ad_punch.extract_main_headline(slot_prompt) or on_image_hook or on_image_message,
+                                accent=_ad_brand.accent_label(_punch_accent),
+                                angle=slot_ad_angle,
+                                index=variant_index,
+                                seed=str(brief_id),
+                            )
+                        if fmt in {"static", "carousel"}:
+                            # The Brand Kit's colours and fonts go on EVERY ad prompt, including the AI's,
+                            # the strategy file's and a pasted one (they used to be skipped for those).
+                            # The colours saved on the Brand page (up to three), limited to the ones ticked on this variant.
+                            _pal_p, _pal_s, _pal_t, _pal_subset = _ad_brand.select_palette(
+                                snap, slot if isinstance(slot, dict) else None, _brand_primary, _brand_secondary
+                            )
+                            image_prompt = _ad_brand.apply_brand_style(
+                                image_prompt,
+                                primary=_pal_p,
+                                secondary=_pal_s,
+                                tertiary=_pal_t,
+                                only_these=_pal_subset,
+                                font_heading=str(snap.get("font_heading") or ""),
+                                font_body=str(snap.get("font_body") or ""),
+                                photo_only=slot_photo_only,
+                            )
+                        if burn_logo_on_still and img_logo and not verbatim_slot and _logo_mode == _ad_logo.LEGACY:
                             image_prompt = (
                                 f"{image_prompt.rstrip()} "
                                 "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "
                                 "white strip in post. Do NOT leave empty white margin at the top and do NOT draw "
                                 "any brand name, wordmark, or fake logo."
                             )
-                        if burn_logo_on_still and not img_logo and not verbatim_slot:
+                        if burn_logo_on_still and not img_logo and not verbatim_slot and _logo_mode == _ad_logo.LEGACY:
                             logger.warning(
                                 "Brief %s variant=%s: no brand logo resolved — upload PNG/JPG on Brand Kit",
                                 brief_id,
@@ -1344,13 +1487,56 @@ async def run_brief_generation_job(
                             tenant_id=str(tenant_id),
                             model=image_model,
                             format_type=fmt,
-                            logo_url=img_logo if burn_logo_on_still else None,
-                            logo_on_light_url=img_logo_light if burn_logo_on_still else None,
+                            # The provider's own overlay (white strip) only runs in the old mode.
+                            logo_url=img_logo if burn_logo_on_still and _logo_mode == _ad_logo.LEGACY else None,
+                            logo_on_light_url=(
+                                img_logo_light if burn_logo_on_still and _logo_mode == _ad_logo.LEGACY else None
+                            ),
+                            # The size follows the chosen ratio (1:1 for carousel cards), not the format name.
+                            aspect_ratio=(
+                                _effective_slot_aspect_ratio(
+                                    slot if isinstance(slot, dict) else None, kb_models, brief_dict, fmt=fmt
+                                )
+                                if fmt in {"static", "carousel"}
+                                else None
+                            ),
                             reference_image_url=_variant_reference_image_url(
                                 kb_models,
                                 slot if isinstance(slot, dict) else None,
                             ),
+                            reference_image_urls=_variant_reference_image_urls(
+                                kb_models,
+                                slot if isinstance(slot, dict) else None,
+                            ),
                         )
+                        # The text goes on BEFORE the logo, so the logo is placed around it, not over it.
+                        if _text_fonts:
+                            pipeline["image"] = await _ad_text.overlay_result(
+                                pipeline["image"],
+                                fonts=_text_fonts,
+                                hook=on_image_hook,
+                                headline=on_image_message,
+                                cta=_design_cta,
+                                primary=str(snap.get("primary_color") or _brand_primary or ""),
+                                secondary=str(snap.get("secondary_color") or _brand_secondary or ""),
+                                tenant_id=str(tenant_id),
+                                zone=_text_zone,
+                                align=_ad_text.layout_for(str(brief_id), variant_index)[0],
+                                backing=_ad_text.layout_for(str(brief_id), variant_index)[1],
+                            )
+                        elif _text_note and isinstance(pipeline["image"], dict):
+                            pipeline["image"]["warnings"] = [*(pipeline["image"].get("warnings") or []), _text_note]
+                        if _logo_mode != _ad_logo.LEGACY:
+                            pipeline["image"] = await _ad_logo.apply_mode(
+                                pipeline["image"],
+                                mode=_logo_mode,
+                                suggested=_logo_hint,
+                                tenant_id=str(tenant_id),
+                                logo_url=img_logo,
+                                logo_on_light_url=img_logo_light,
+                            )
+                        if _design_label and isinstance(pipeline["image"], dict):
+                            pipeline["image"]["design_style"] = _design_label
                         img_step = pipeline["image"]
                         refs_used = _reference_images_for_variant(
                             kb_models,
@@ -1368,6 +1554,7 @@ async def run_brief_generation_job(
                         if (
                             isinstance(img_step, dict)
                             and burn_logo_on_still
+                            and _logo_mode == _ad_logo.LEGACY
                             and (snap.get("logo_url") or snap.get("logo_on_light_url"))
                             and not img_logo
                         ):
@@ -1378,6 +1565,7 @@ async def run_brief_generation_job(
                         if (
                             isinstance(img_step, dict)
                             and burn_logo_on_still
+                            and _logo_mode == _ad_logo.LEGACY
                             and img_logo
                             and img_step.get("status") == "done"
                             and not img_step.get("logo_applied")
@@ -1952,7 +2140,101 @@ async def run_regenerate_variant_image(
                     image_prompt,
                     image_visual_style=campaign_image_visual_style,
                 )
-            if burn_logo and img_logo and not verbatim_slot:
+            # A different designed look, in a short prompt (opt-in per campaign; never for a prompt the
+            # user or the strategy file wrote verbatim). The pick is stable per image id.
+            _design_label = ""
+            _design_ok = (
+                _ad_design.scene_may_be_redesigned(slot, verbatim_slot)
+                and fmt in {"static", "carousel"}
+                and _ad_design.enabled(kb_models, brief_dict, campaign_on_image_style, campaign_image_visual_style)
+            )
+            _design_cta = (effective_cta or slot_cta) if (fmt == "static" or carousel_last) else ""
+            # "Exact brand fonts": fetch the saved fonts now; if that works the picture is made without
+            # text and the app draws the text itself afterwards.
+            _text_fonts, _text_note = None, ""
+            _text_zone = _ad_text.zone_for_logo(
+                _ad_logo.resolve_mode(slot, kb_models, brief_dict) if burn_logo else ""
+            )
+            if _design_ok and not slot_photo_only and _ad_text.requested(kb_models, brief_dict):
+                _text_fonts, _text_note = await _ad_text.load_fonts(
+                    str(snap.get("font_heading") or ""), str(snap.get("font_body") or "")
+                )
+            if _design_ok:
+                image_prompt, _design_label = _ad_design.compose(
+                    scene_source=slot_prompt,
+                    fallback_source=image_prompt,
+                    seed=str(variant_id),
+                    index=None,
+                    key=str(variant_id),
+                    hook=on_image_hook,
+                    headline=on_image_headline,
+                    cta=_design_cta,
+                    exact_text=bool(_text_fonts),
+                    text_zone=_text_zone,
+                    primary=str(snap.get("primary_color") or brand_primary or ""),
+                    secondary=str(snap.get("secondary_color") or brand_secondary or ""),
+                    font_heading=str(snap.get("font_heading") or ""),
+                    font_body=str(snap.get("font_body") or ""),
+                    photo_only=slot_photo_only,
+                    brand_name=str(snap.get("brand_name") or brand.name or ""),
+                    frame_note=(
+                        "ONE square 1:1 carousel card only, never a collage or a strip of cards."
+                        if fmt == "carousel"
+                        else ""
+                    ),
+                    audience=kb_models.get("audience"),
+                    focus=slot_product_focus,
+                )
+                logger.info(
+                    "Regenerate image variant=%s design=%r prompt_len=%d", variant_id, _design_label, len(image_prompt)
+                )
+            # Logo position chosen by the user (a corner, Auto, or none). Empty = the old white strip.
+            _logo_mode = (
+                _ad_logo.resolve_mode(slot, kb_models, brief_dict) if burn_logo else _ad_logo.LEGACY
+            )
+            _logo_hint = ""
+            _brand_for_guard = str(snap.get("brand_name") or brand.name or "")
+            if _logo_mode != _ad_logo.LEGACY:
+                image_prompt, _logo_hint = _ad_logo.prepare_prompt(
+                    image_prompt, _logo_mode, _brand_for_guard, seed=str(variant.brief_id), index=variant_index
+                )
+            elif fmt in {"static", "carousel"}:
+                # Old white-strip look keeps its strip, but the model is still never allowed to draw a
+                # logo or the brand's name (the strategy file may even ask for one).
+                image_prompt = _ad_logo.guard_prompt(image_prompt, _brand_for_guard)
+            if fmt in {"static", "carousel"} and not slot_photo_only and not _text_fonts:
+                # How punchy it must be (hook hierarchy, highlighted payoff words, offer banner, CTA button,
+                # the hook's angle) and no people unless the brief asks for one. Skipped when the app draws
+                # the text itself: it adds its own highlight.
+                _pal_p, _pal_s, _pal_t, _pal_subset = _ad_brand.select_palette(
+                    snap, slot if isinstance(slot, dict) else None, brand_primary, brand_secondary
+                )
+                image_prompt = _ad_punch.apply_punch(
+                    image_prompt,
+                    hook=_ad_punch.extract_main_headline(slot_prompt) or on_image_hook or on_image_headline,
+                    accent=_ad_brand.accent_label(_pal_p or _pal_s or _pal_t),
+                    angle=str(slot.get("ad_angle") or "") if isinstance(slot, dict) else "",
+                    index=None,
+                    seed=str(variant_id),
+                )
+            if fmt in {"static", "carousel"}:
+                # The Brand Kit's colours and fonts go on EVERY ad prompt, including the AI's, the
+                # strategy file's and a pasted one (they used to be skipped for those).
+                _pal_p, _pal_s, _pal_t, _pal_subset = _ad_brand.select_palette(
+                    snap, slot if isinstance(slot, dict) else None, brand_primary, brand_secondary
+                )
+                image_prompt = _ad_brand.apply_brand_style(
+                    image_prompt,
+                    # The colours saved on the Brand page (up to three), limited to the ones ticked on this variant.
+                    primary=_pal_p,
+                    secondary=_pal_s,
+                    tertiary=_pal_t,
+                    only_these=_pal_subset,
+                    font_heading=str(snap.get("font_heading") or ""),
+                    font_body=str(snap.get("font_body") or ""),
+                    photo_only=slot_photo_only,
+                )
+            if burn_logo and img_logo and not verbatim_slot and _logo_mode == _ad_logo.LEGACY:
                 image_prompt = (
                     f"{image_prompt.rstrip()} "
                     "Full-bleed photo to the top edge — the Brand Kit logo is composited in a slim "
@@ -1964,13 +2246,54 @@ async def run_regenerate_variant_image(
                 tenant_id=str(tenant_id),
                 model=chosen_model,
                 format_type=fmt,
-                logo_url=img_logo if burn_logo else None,
-                logo_on_light_url=img_logo_light if burn_logo else None,
+                # The provider's own overlay (white strip) only runs in the old mode.
+                logo_url=img_logo if burn_logo and _logo_mode == _ad_logo.LEGACY else None,
+                logo_on_light_url=img_logo_light if burn_logo and _logo_mode == _ad_logo.LEGACY else None,
+                # The size follows the chosen ratio (1:1 for carousel cards), not the format name.
+                aspect_ratio=(
+                    _effective_slot_aspect_ratio(
+                        slot if isinstance(slot, dict) else None, kb_models, brief_dict, fmt=fmt
+                    )
+                    if fmt in {"static", "carousel"}
+                    else None
+                ),
                 reference_image_url=_variant_reference_image_url(
                     kb_models,
                     slot if isinstance(slot, dict) else None,
                 ),
+                reference_image_urls=_variant_reference_image_urls(
+                    kb_models,
+                    slot if isinstance(slot, dict) else None,
+                ),
             )
+            # The text goes on BEFORE the logo, so the logo is placed around it, not over it.
+            if _text_fonts:
+                image_result = await _ad_text.overlay_result(
+                    image_result,
+                    fonts=_text_fonts,
+                    hook=on_image_hook,
+                    headline=on_image_headline,
+                    cta=_design_cta,
+                    primary=str(snap.get("primary_color") or brand_primary or ""),
+                    secondary=str(snap.get("secondary_color") or brand_secondary or ""),
+                    tenant_id=str(tenant_id),
+                    zone=_text_zone,
+                    align=_ad_text.layout_for(str(variant.brief_id), variant_index)[0],
+                    backing=_ad_text.layout_for(str(variant.brief_id), variant_index)[1],
+                )
+            elif _text_note and isinstance(image_result, dict):
+                image_result["warnings"] = [*(image_result.get("warnings") or []), _text_note]
+            if _logo_mode != _ad_logo.LEGACY:
+                image_result = await _ad_logo.apply_mode(
+                    image_result,
+                    mode=_logo_mode,
+                    suggested=_logo_hint,
+                    tenant_id=str(tenant_id),
+                    logo_url=img_logo,
+                    logo_on_light_url=img_logo_light,
+                )
+            if _design_label and isinstance(image_result, dict):
+                image_result["design_style"] = _design_label
             if (
                 isinstance(image_result, dict)
                 and image_result.get("status") == "failed"

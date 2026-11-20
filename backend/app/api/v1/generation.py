@@ -464,6 +464,8 @@ class StrategyVariantPlan(BaseModel):
     product_name: str = ""
     design_notes: str = ""
     product_focus: str = ""
+    # The prompt is a complete designer brief read exactly from the file; it is not a short note to expand.
+    prompt_complete: bool = False
 
 
 class StrategyParseResponse(BaseModel):
@@ -1734,6 +1736,94 @@ async def creative_studio_pdf_reference(
     )
 
 
+@paid_post("/creative-studio/script/plan")
+async def creative_studio_script_plan(
+    file: UploadFile | None = File(default=None),
+    script_text: str = Form(default=""),
+    chat_model: str = Form(default="auto"),
+    video_model: str = Form(default=""),
+    aspect: str = Form(default="9/16"),
+    speech_mode: str = Form(default="native_presenter"),
+    brand_id: str = Form(default=""),
+    brand_name: str = Form(default=""),
+    product_name: str = Form(default=""),
+    notes: str = Form(default=""),
+    current_user=Depends(get_current_user),
+):
+    """Script mode: read a Word/text script and compile the prompt Creative Studio already uses.
+
+    Returns the scenes, the editor's to-do list (what to lay over which time window), the voice
+    read from the script, and ``canonical_prompt``: the sectioned timed prompt to hand to the
+    existing chat/job flow. Nothing is generated and no video credits are spent here — only one
+    prompt-model call. Voice follows the script (e.g. "Australian English female voice") with
+    Seedance's own speech by default; pass ``speech_mode=external_voiceover`` for the OpenAI voice.
+    """
+    from app.services.creative_studio_chat_service import (
+        _normalize_aspect,
+        _resolve_video_model,
+        _video_clip_cap_seconds,
+    )
+    from app.services.creative_studio_script_plan import (
+        extract_script_text,
+        plan_script,
+        script_plan_model,
+    )
+    from app.services.usage_tracker import set_usage_context
+
+    text = (script_text or "").strip()
+    if file is not None and (file.filename or "").strip():
+        content = await file.read()
+        if len(content) > 8 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Script file is too large (8 MB max).")
+        try:
+            text = extract_script_text(content, file.filename or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not text:
+        raise HTTPException(status_code=422, detail="Upload a script file or paste the script text.")
+
+    resolved_video_model = _resolve_video_model(
+        coerce_creative_studio_video_model(current_user, video_model or None)
+    )
+    clip_cap = _video_clip_cap_seconds(resolved_video_model)
+    # GPT-4.1 by default (or the model picked in the composer); always an allowed slug, so a
+    # retired model in .env cannot break script planning.
+    model_slug = script_plan_model(chat_model)
+    set_usage_context(
+        user_id=str(current_user.id),
+        tenant_id=str(current_user.tenant_id),
+        brand_id=(brand_id or "").strip() or None,
+        brand_name=(brand_name or "").strip() or None,
+        brief_id=None,
+        operation="creative_studio_script_plan",
+    )
+    try:
+        plan = await plan_script(
+            script_text=text,
+            model_slug=model_slug,
+            clip_cap=clip_cap,
+            aspect=_normalize_aspect(aspect, "9/16"),
+            brand_name=brand_name,
+            product_name=product_name,
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    chosen_speech = (speech_mode or "").strip().lower()
+    if chosen_speech not in {"native_presenter", "external_voiceover"}:
+        chosen_speech = "native_presenter"
+    plan.update(
+        {
+            "speech_mode": chosen_speech,
+            "video_model": resolved_video_model,
+            "clip_cap_seconds": clip_cap,
+            "aspect": _normalize_aspect(aspect, "9/16"),
+            "script_chars": len(text),
+        }
+    )
+    return plan
+
+
 @paid_post("/creative-studio/chat", response_model=CreativeStudioChatResponse)
 async def creative_studio_chat(
     data: CreativeStudioChatRequest,
@@ -1858,6 +1948,210 @@ class CreativeStudioFinishVideoResponse(BaseModel):
     height: int
     duration_seconds: float
     warnings: list[str] = Field(default_factory=list)
+
+
+class CreativeStudioStillRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=2500)
+    model: str = Field(min_length=1, max_length=120)
+    aspect: str = Field(default="9/16", max_length=8)
+    brand_id: str = Field(default="", max_length=80)
+    brand_name: str = Field(default="", max_length=200)
+    # Corner kept clear for the logo ("top_left", "top_right", "bottom_left", "bottom_right"); empty = none.
+    logo_corner: str = Field(default="", max_length=20)
+
+
+class CreativeStudioStillResponse(BaseModel):
+    url: str
+    model: str
+    provider: str | None = None
+    credits_estimate: float | None = None
+    note: str | None = None
+
+
+@paid_post("/creative-studio/still", response_model=CreativeStudioStillResponse)
+async def creative_studio_still(
+    data: CreativeStudioStillRequest,
+    current_user=Depends(get_current_user),
+):
+    """Draw one still (a screen, page or graphic) with GPT Image 2 or Seedream. Uses one image generation."""
+    from app.services.creative_studio_still import generate_still
+    from app.services.usage_tracker import set_usage_context
+
+    set_usage_context(
+        user_id=str(current_user.id),
+        tenant_id=str(current_user.tenant_id),
+        brand_id=(data.brand_id or "").strip() or None,
+        brand_name=(data.brand_name or "").strip() or None,
+        brief_id=None,
+        operation="creative_studio_script_still",
+    )
+    try:
+        return CreativeStudioStillResponse(
+            **await generate_still(
+                tenant_id=str(current_user.tenant_id),
+                prompt=data.prompt,
+                model=data.model.strip(),
+                aspect=data.aspect,
+                logo_corner=data.logo_corner,
+                brand_name=data.brand_name,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+class CreativeStudioStillLogoRequest(BaseModel):
+    image_url: str = Field(min_length=1, max_length=2000)
+    corner: str = Field(min_length=1, max_length=20)
+    logo_url: str | None = Field(default=None, max_length=2000)
+    logo_on_light_url: str | None = Field(default=None, max_length=2000)
+
+
+class CreativeStudioStillLogoResponse(BaseModel):
+    url: str
+    source_url: str
+    corner: str
+    background: str
+    logo_version: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+@router.post("/creative-studio/still-logo", response_model=CreativeStudioStillLogoResponse)
+async def creative_studio_still_logo(
+    data: CreativeStudioStillLogoRequest,
+    current_user=Depends(get_current_user),
+):
+    """Place the brand logo inside a drawn picture, in the chosen corner. Uses no AI and no credits."""
+    import asyncio
+
+    from app.services.creative_studio_still_logo import place_logo_in_corner
+
+    try:
+        result = await asyncio.to_thread(
+            place_logo_in_corner,
+            image_url=data.image_url,
+            corner=data.corner,
+            tenant_id=str(current_user.tenant_id),
+            logo_url=(data.logo_url or "").strip() or None,
+            logo_on_light_url=(data.logo_on_light_url or "").strip() or None,
+            avoid_text=False,  # the corner the user clicked is used exactly; they can see the picture
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return CreativeStudioStillLogoResponse(**result)
+
+
+class CreativeStudioInsertItem(BaseModel):
+    image_url: str = Field(min_length=1, max_length=2000)
+    start_seconds: float = Field(ge=0, le=3600)
+    duration_seconds: float = Field(ge=1, le=10)
+
+
+class CreativeStudioInsertsRequest(BaseModel):
+    video_url: str = Field(min_length=1, max_length=2000)
+    inserts: list[CreativeStudioInsertItem] = Field(min_length=1, max_length=8)
+    zoom: bool = True
+
+
+class CreativeStudioInsertsResponse(BaseModel):
+    url: str
+    source_url: str
+    width: int
+    height: int
+    duration_seconds: float
+    inserts: list[dict]
+    warnings: list[str] = Field(default_factory=list)
+
+
+@router.post("/creative-studio/inserts", response_model=CreativeStudioInsertsResponse)
+async def creative_studio_inserts(
+    data: CreativeStudioInsertsRequest,
+    current_user=Depends(get_current_user),
+):
+    """Lay approved still pictures over a finished video at the given seconds. Uses no AI and no credits."""
+    import asyncio
+
+    from app.services.creative_studio_inserts import add_image_inserts_to_video
+
+    try:
+        result = await asyncio.to_thread(  # ffmpeg is blocking; keep the event loop free
+            add_image_inserts_to_video,
+            video_url=data.video_url,
+            tenant_id=str(current_user.tenant_id),
+            inserts=[item.model_dump() for item in data.inserts],
+            zoom=data.zoom,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return CreativeStudioInsertsResponse(**result)
+
+
+class CreativeStudioEndCardRequest(BaseModel):
+    video_url: str = Field(min_length=1, max_length=2000)
+    headline: str = Field(min_length=1, max_length=120)
+    sublines: list[str] = Field(default_factory=list, max_length=3)
+    button_text: str = Field(default="", max_length=120)
+    logo_url: str | None = Field(default=None, max_length=2000)
+    logo_on_light_url: str | None = Field(default=None, max_length=2000)
+    button_hex: str | None = Field(default=None, max_length=9)
+    accent_hex: str | None = Field(default=None, max_length=9)
+    hold_seconds: float = Field(default=4.0, ge=2.0, le=6.0)
+    preview: bool = False
+
+
+class CreativeStudioEndCardResponse(BaseModel):
+    kind: str
+    url: str
+    source_url: str
+    width: int
+    height: int
+    duration_seconds: float
+    start_seconds: float
+    hold_seconds: float
+    logo_applied: bool
+    theme: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+@router.post("/creative-studio/end-card", response_model=CreativeStudioEndCardResponse)
+async def creative_studio_end_card(
+    data: CreativeStudioEndCardRequest,
+    current_user=Depends(get_current_user),
+):
+    """Lay the brand logo and exact call-to-action text over the last seconds of a finished video.
+
+    Uses no AI and no credits. ``preview=true`` returns one image of the card on the real frame
+    so it can be checked before the video is encoded.
+    """
+    import asyncio
+
+    from app.services.creative_studio_end_card import add_end_card_to_video
+
+    try:
+        # ffmpeg is blocking; keep the event loop free for other requests.
+        result = await asyncio.to_thread(
+            add_end_card_to_video,
+            video_url=data.video_url,
+            tenant_id=str(current_user.tenant_id),
+            headline=data.headline,
+            sublines=data.sublines,
+            button_text=data.button_text,
+            logo_url=(data.logo_url or "").strip() or None,
+            logo_on_light_url=(data.logo_on_light_url or "").strip() or None,
+            button_hex=data.button_hex,
+            accent_hex=data.accent_hex,
+            hold_seconds=data.hold_seconds,
+            preview=data.preview,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return CreativeStudioEndCardResponse(**result)
 
 
 @router.post(

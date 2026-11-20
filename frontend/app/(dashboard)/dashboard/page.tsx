@@ -1,5 +1,13 @@
 'use client'
 
+import CountUp from '@/components/ui/CountUp'
+import IconBadge from '@/components/ui/IconBadge'
+import { IconImage, IconPalette, IconTrending, IconShield, IconWand } from '@/components/ui/icons'
+import { getVariantPreviewUrls } from '@/lib/variantMedia'
+import { Flame } from 'lucide-react'
+import GeneratingDots from '@/components/variant/GeneratingDots'
+import EmptyState from '@/components/ui/EmptyState'
+import { FolderKanban, TrendingUp } from 'lucide-react'
 import React, { useCallback } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -13,7 +21,7 @@ import { API_CACHE_TTL } from '@/lib/apiCache'
 import { briefsApi, performanceApi, variantsApi } from '@/lib/api'
 import { UI, briefStatusLabel } from '@/lib/uiLabels'
 import { getBriefStatusColor, formatROAS, timeAgo } from '@/lib/utils'
-import type { Brief, BriefStatus, FatigueAlert, TopPerformer } from '@/types'
+import type { Brief, BriefStatus, FatigueAlert, TopPerformer, Variant } from '@/types'
 
 /* ── helpers ── */
 function statusConfig(s: BriefStatus): { variant: 'green' | 'mint' | 'amber' | 'red' | 'blue' | 'gray'; dot: boolean } {
@@ -33,6 +41,8 @@ function MetricCard({
   trend,
   isLoading,
   accent = false,
+  icon,
+  tone = 'accent',
 }: {
   label: string
   value: string | number
@@ -40,12 +50,15 @@ function MetricCard({
   trend?: { dir: 'up' | 'down' | 'neutral'; label: string }
   isLoading?: boolean
   accent?: boolean
+  icon?: React.ReactNode
+  tone?: 'accent' | 'dark' | 'soft' | 'sky' | 'violet' | 'amber' | 'rose'
 }) {
   return (
-    <div className={`relative bg-surface-elevated rounded-2xl p-5 border overflow-hidden transition-all duration-250 ease-premium hover:shadow-card-hover hover:-translate-y-px ${accent ? 'border-accent/25 shadow-[0_0_0_1px_rgba(163,209,107,0.2),0_4px_16px_rgba(163,209,107,0.08)]' : 'border-border shadow-card'}`}>
+    <div className={`group relative bg-surface-elevated rounded-2xl p-5 border overflow-hidden transition-all duration-250 ease-premium hover:shadow-card-hover hover:-translate-y-px ${accent ? 'border-accent/25 shadow-[0_0_0_1px_rgba(163,209,107,0.2),0_4px_16px_rgba(163,209,107,0.08)]' : 'border-border shadow-card'}`}>
       {accent && (
         <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: 'linear-gradient(180deg,#a3d16b,#8bb85a)', boxShadow: '0 0 8px rgba(163,209,107,0.45)' }} />
       )}
+      {icon && <IconBadge icon={icon} tone={tone} className="absolute right-4 top-4" />}
       {/* Label */}
       <p className="text-[10px] font-bold text-muted uppercase tracking-[0.1em] mb-3">{label}</p>
       {/* Value */}
@@ -57,7 +70,7 @@ function MetricCard({
       ) : (
         <>
           <div className="text-[2rem] font-black text-charcoal leading-none tracking-tight count-up" style={{ letterSpacing: '-0.03em' }}>
-            {value}
+            <CountUp value={value} />
           </div>
           {sub && <p className="text-[11px] text-muted mt-1.5 font-medium">{sub}</p>}
           {trend && (
@@ -73,22 +86,6 @@ function MetricCard({
   )
 }
 
-/* ── Empty State ── */
-function EmptyState({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-14 px-6 text-center">
-      <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center mb-4">
-        <svg className="w-6 h-6 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-        </svg>
-      </div>
-      <p className="text-sm font-bold text-charcoal mb-1">{title}</p>
-      <p className="text-[12px] text-muted max-w-[220px] leading-relaxed mb-4">{description}</p>
-      {action}
-    </div>
-  )
-}
-
 /* ── Page ── */
 export default function DashboardPage() {
   const router = useRouter()
@@ -100,6 +97,10 @@ export default function DashboardPage() {
   const { data: briefs, isLoading: briefsLoading } = useApi(
     () => briefsApi.list({ limit: 5 }), [],
     { cacheKey: 'briefs/recent', ttlMs: API_CACHE_TTL.briefs }
+  )
+  const { data: recentCreatives, isLoading: creativesLoading } = useApi(
+    () => variantsApi.list({ limit: 8 }), [],
+    { cacheKey: 'variants/recent', ttlMs: API_CACHE_TTL.briefs }
   )
   const { data: topPerformers, isLoading: perfLoading } = useApi(
     () => performanceApi.getTopPerformers(), [],
@@ -144,12 +145,21 @@ export default function DashboardPage() {
         }
       />
 
-      <div className="p-6 max-w-[1600px] space-y-6">
+      <div className="relative isolate p-6 max-w-[1600px] space-y-6">
+        {/* a quiet field of dots behind the top of the page */}
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 opacity-60"
+          style={{ maskImage: 'linear-gradient(to bottom, black, transparent)', WebkitMaskImage: 'linear-gradient(to bottom, black, transparent)' }}
+        >
+          <GeneratingDots ambient />
+        </div>
 
         {/* ── Metric Cards ── */}
         <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
           <MetricCard
             label="Active Variants"
+            icon={<IconImage />}
+            tone="accent"
             value={hasStats ? stats.active_variants ?? '—' : '—'}
             sub="across all campaigns"
             accent
@@ -157,6 +167,8 @@ export default function DashboardPage() {
           />
           <MetricCard
             label="Avg ROAS (7d)"
+            icon={<IconTrending />}
+            tone="sky"
             value={hasStats ? formatROAS(stats.avg_roas_7d) : '—'}
             sub="return on ad spend"
             trend={hasStats ? { dir: 'up', label: 'vs prior period' } : undefined}
@@ -164,12 +176,16 @@ export default function DashboardPage() {
           />
           <MetricCard
             label={UI.brandContentChecks}
+            icon={<IconShield />}
+            tone="violet"
             value={passRate}
             sub={hasStats && stats.brand_safety_pass_rate != null ? 'compliance pass rate' : 'No checks yet'}
             isLoading={statsLoading}
           />
           <MetricCard
             label="Fatigue Alerts"
+            icon={<Flame />}
+            tone="amber"
             value={hasStats ? stats.fatigued_count ?? 0 : '—'}
             sub="variants need attention"
             trend={hasStats && (stats.fatigued_count ?? 0) > 0 ? { dir: 'down', label: 'Replace or pause' } : { dir: 'neutral', label: 'All good' }}
@@ -206,6 +222,7 @@ export default function DashboardPage() {
                 </div>
               ) : !briefs?.length ? (
                 <EmptyState
+                  icon={FolderKanban}
                   title="No projects yet"
                   description="Create your first project to start generating AI-powered creative content."
                   action={<Button size="sm" onClick={() => router.push('/briefs/new')}>{UI.newProject}</Button>}
@@ -282,6 +299,7 @@ export default function DashboardPage() {
               </div>
             ) : !topPerformers?.length ? (
               <EmptyState
+                icon={TrendingUp}
                 title="No data yet"
                 description="Performance data appears after your ads start running."
               />
@@ -350,26 +368,79 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* ── Quick actions (empty state) ── */}
-        {!briefsLoading && !briefs?.length && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {[
-              { title: 'Set up Brand Kit', desc: 'Upload your logo, colors, and voice guidelines.', href: '/brand-kit', icon: '🎨' },
-              { title: 'Create First Brief', desc: 'Generate AI-powered video and image ad creatives.', href: '/briefs/new', icon: '✨' },
-              { title: 'View Performance', desc: 'Monitor ROAS, CTR, and fatigue across all variants.', href: '/performance', icon: '📊' },
-            ].map(({ title, desc, href, icon }) => (
-              <Link
-                key={href}
-                href={href}
-                className="group bg-surface-elevated rounded-2xl border border-border p-5 shadow-card hover:shadow-card-hover hover:border-accent/25 hover:-translate-y-px transition-all duration-250 ease-premium"
-              >
-                <div className="text-2xl mb-3">{icon}</div>
-                <p className="text-sm font-bold text-charcoal mb-1 group-hover:text-accent transition-colors">{title}</p>
-                <p className="text-[12px] text-muted leading-relaxed">{desc}</p>
-              </Link>
-            ))}
+        {/* ── Latest creatives: a gallery of the newest pictures ── */}
+        <div className="bg-surface-elevated rounded-2xl border border-border shadow-card overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border/60">
+            <div>
+              <h3 className="text-sm font-bold text-charcoal">Latest creatives</h3>
+              <p className="text-[11px] text-muted mt-0.5">Your newest images and videos</p>
+            </div>
+            <Link href="/variants" className="text-[12px] font-semibold text-[#6f9b3f] hover:underline">
+              Open library →
+            </Link>
           </div>
-        )}
+          {creativesLoading ? (
+            <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3 p-5">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="aspect-square rounded-xl skeleton" />
+              ))}
+            </div>
+          ) : (recentCreatives ?? []).length === 0 ? (
+            <EmptyState
+              compact
+              title="No creatives yet"
+              description="Generate a project and your newest pictures show up here."
+            />
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3 p-5">
+              {(recentCreatives ?? []).map((v: Variant) => {
+                const { imageUrl, videoUrl } = getVariantPreviewUrls(v)
+                return (
+                  <Link
+                    key={v.id}
+                    href={v.brief_id ? `/briefs/${v.brief_id}` : '/variants'}
+                    className="group relative aspect-square overflow-hidden rounded-xl border border-border bg-surface shadow-card transition-all duration-300 ease-premium hover:-translate-y-1 hover:shadow-card-hover"
+                    title={v.headline || v.hook}
+                  >
+                    {imageUrl ? (
+                      <img src={imageUrl} alt={v.headline || v.hook} loading="lazy" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                    ) : videoUrl ? (
+                      <video src={videoUrl} muted playsInline preload="metadata" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-lt">
+                        <IconImage className="h-6 w-6" />
+                      </div>
+                    )}
+                    <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-2 pt-6 text-[10px] font-semibold capitalize text-white opacity-0 transition-opacity group-hover:opacity-100">
+                      {v.format}
+                    </span>
+                  </Link>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ── Quick actions ── */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {[
+            { title: 'Set up Brand Kit', desc: 'Upload your logo, colours and voice guidelines.', href: '/brand-kit', icon: <IconPalette />, tone: 'violet' as const },
+            { title: 'Create a new project', desc: 'Generate AI-powered image and video ad creatives.', href: '/briefs/new', icon: <IconWand />, tone: 'accent' as const },
+            { title: 'View performance', desc: 'Watch ROAS, CTR and fatigue across all variants.', href: '/performance', icon: <IconTrending />, tone: 'sky' as const },
+          ].map(({ title, desc, href, icon, tone }) => (
+            <Link
+              key={href}
+              href={href}
+              className="group flex items-start gap-4 bg-surface-elevated rounded-2xl border border-border p-5 shadow-card hover:shadow-card-hover hover:border-accent/30 hover:-translate-y-px transition-all duration-250 ease-premium"
+            >
+              <IconBadge icon={icon} tone={tone} size="lg" />
+              <span>
+                <span className="block text-sm font-bold text-charcoal mb-1 group-hover:text-[#5b8a2d] transition-colors">{title}</span>
+                <span className="block text-[12px] text-muted leading-relaxed">{desc}</span>
+              </span>
+            </Link>
+          ))}
+        </div>
       </div>
     </div>
   )

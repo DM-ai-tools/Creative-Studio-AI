@@ -19,6 +19,7 @@ import {
   removeCsChatSession,
   sessionStorageScope,
   setCsActiveChatId,
+  syncCsChatHistoryWithServer,
   titleFromMessages,
   type CsChatMessage,
   type CsChatSession,
@@ -26,6 +27,15 @@ import {
   storyboardFramesForVideo,
 } from '@/lib/csChatHistory'
 import CsMessageContent from '@/components/brief/CsMessageContent'
+import ScriptPlanModal from '@/components/brief/ScriptPlanModal'
+import EndCardModal from '@/components/brief/EndCardModal'
+import StillInsertsModal from '@/components/brief/StillInsertsModal'
+import type {
+  CreativeStudioEndCardResult,
+  CreativeStudioEndCardSpec,
+  CreativeStudioInsertsResult,
+  CreativeStudioStill,
+} from '@/types'
 import { UI } from '@/lib/uiLabels'
 import { useAuth } from '@/hooks/useAuth'
 import { CS25_DEFAULT_VIDEO_MODEL, isCsSeedance25Only } from '@/lib/productScope'
@@ -566,11 +576,11 @@ export default function CreativeStudioTab({
   const [busy, setBusy] = useState(false)
   const [finishingVideoId, setFinishingVideoId] = useState<string | null>(null)
   useEffect(() => {
-    // Chat history lives only in this browser. Say so when it cannot be saved,
-    // otherwise new chats vanish on the next reload with no explanation.
+    // Chats are kept on the server until the user deletes them. This only fires when this browser is
+    // full AND the server cannot be reached, so the newest chat could be lost on reload.
     const warn = () =>
       toast.error(
-        'Chat history could not be saved in this browser (storage is full). Delete old chats, then save important videos to the creative library.',
+        "Your latest chat could not be saved yet: this browser's storage is full and the server could not be reached. Check your connection and keep this tab open; it retries automatically.",
         { id: 'cs-chat-save-failed', duration: 12000 },
       )
     window.addEventListener(CS_CHAT_SAVE_FAILED_EVENT, warn)
@@ -589,6 +599,15 @@ export default function CreativeStudioTab({
   const [characterReferenceUrl, setCharacterReferenceUrl] = useState('')
   const [additionalReferenceUrls, setAdditionalReferenceUrls] = useState<string[]>([])
   const [imageLibraryOpen, setImageLibraryOpen] = useState(false)
+  // Script mode (opt-in): plans a pasted/uploaded script into a prompt. It only fills the
+  // normal prompt box; generation still goes through the existing flow.
+  const [scriptPlanOpen, setScriptPlanOpen] = useState(false)
+  // End card: text from the last planned script (prefill only) and the video it is being added to.
+  const [scriptEndCard, setScriptEndCard] = useState<CreativeStudioEndCardSpec | null>(null)
+  const [endCardTarget, setEndCardTarget] = useState<ChatMessage | null>(null)
+  // Screens the planner wants drawn as pictures (prefill only) and the video they are being added to.
+  const [scriptStills, setScriptStills] = useState<CreativeStudioStill[]>([])
+  const [stillsTarget, setStillsTarget] = useState<ChatMessage | null>(null)
   const [imageLibrary, setImageLibrary] = useState<Asset[]>([])
   const [imageLibraryLoading, setImageLibraryLoading] = useState(false)
   const [mediaLibrarySection, setMediaLibrarySection] = useState<MediaLibrarySection>('uploads')
@@ -802,6 +821,37 @@ export default function CreativeStudioTab({
     briefId,
     brandId,
   ])
+
+  // Chats are kept on the server until the user deletes them. Once the list has loaded, bring in
+  // anything this browser does not have (older chats trimmed from its cache, or started on another
+  // device). It only adds or refreshes other chats, never the one being edited, and deletes nothing.
+  useEffect(() => {
+    if (!hydrated || !user?.id) return
+    let cancelled = false
+    void syncCsChatHistoryWithServer(historyScope)
+      .then((serverList) => {
+        if (cancelled || !serverList) return
+        setSessions((prev) => {
+          const byId = new Map(prev.map((s) => [s.id, s]))
+          let changed = false
+          for (const incoming of serverList) {
+            const mine = byId.get(incoming.id)
+            if (!mine) {
+              byId.set(incoming.id, incoming)
+              changed = true
+            } else if (incoming.id !== activeChatIdRef.current && Number(incoming.updatedAt) > Number(mine.updatedAt)) {
+              byId.set(incoming.id, incoming)
+              changed = true
+            }
+          }
+          return changed ? Array.from(byId.values()).sort((a, b) => b.updatedAt - a.updatedAt) : prev
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [hydrated, historyScope, user?.id])
 
   // TEMPORARY one-off recovery: re-insert chats listed in /cs-restore.json (built
   // from the server's production record) into the list this tab is showing.
@@ -2797,6 +2847,97 @@ export default function CreativeStudioTab({
 
   const composerCard = (
     <div className={hasMessages ? 'w-full' : 'w-full max-w-3xl mx-auto'}>
+      <StillInsertsModal
+        open={Boolean(stillsTarget)}
+        onClose={() => setStillsTarget(null)}
+        videoUrl={stillsTarget?.mediaUrl || ''}
+        stills={scriptStills}
+        imageModels={stillModels.map((m) => ({ id: m.id, label: m.label }))}
+        defaultModel={imageModel}
+        aspect={aspect}
+        brandId={brandIdProp}
+        brandName={effectiveBrandName}
+        logoUrl={logoReferenceUrl || selectedBrand?.logo_url || null}
+        onDone={(res: CreativeStudioInsertsResult) => {
+          const source = stillsTarget
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uid(),
+              role: 'assistant',
+              content:
+                `Final video with ${res.inserts.length} screen picture${res.inserts.length === 1 ? '' : 's'} added · ${res.width}×${res.height}. ` +
+                'The video above is unchanged.' +
+                (res.warnings.length ? `\n\n${res.warnings.join('\n')}` : ''),
+              mediaMode: 'video',
+              mediaUrl: res.url,
+              status: 'done',
+              model: source?.model,
+              videoPrompt: source?.videoPrompt,
+              // No durationSeconds: this finished copy must not be read as "chapter 1".
+              phase: 'final_screens',
+            },
+          ])
+          toast.success('Video with screens ready')
+        }}
+      />
+      <EndCardModal
+        open={Boolean(endCardTarget)}
+        onClose={() => setEndCardTarget(null)}
+        videoUrl={endCardTarget?.mediaUrl || ''}
+        logoUrl={logoReferenceUrl || selectedBrand?.logo_url || null}
+        initial={scriptEndCard}
+        onDone={(res: CreativeStudioEndCardResult) => {
+          const source = endCardTarget
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uid(),
+              role: 'assistant',
+              content:
+                `Final video with the end card over the last ${res.hold_seconds}s · ${res.width}×${res.height}. ` +
+                'The video above is unchanged.' +
+                (res.warnings.length ? `\n\n${res.warnings.join('\n')}` : ''),
+              mediaMode: 'video',
+              mediaUrl: res.url,
+              status: 'done',
+              model: source?.model,
+              videoPrompt: source?.videoPrompt,
+              // No durationSeconds, for the same reason as the captions copy: it must not be
+              // read as "chapter 1" and offer to start another chapter.
+              phase: 'final_end_card',
+            },
+          ])
+          toast.success('Video with end card ready')
+        }}
+      />
+      <ScriptPlanModal
+        open={scriptPlanOpen}
+        onClose={() => setScriptPlanOpen(false)}
+        onUsePrompt={(text, endCard, stills) => {
+          setComposer(text)
+          setScriptEndCard(endCard)
+          setScriptStills(stills)
+        }}
+        chatModel={chatModel}
+        videoModel={videoModel}
+        videoModelOptions={(videoModels.length
+          ? videoModels
+          : [
+              { id: 'ark-seedance-2-0', label: 'Seedance 2.0 · 15s clips' },
+              { id: 'ark-seedance-2-5', label: 'Seedance 2.5 · 30s clips' },
+            ]
+        )
+          .filter((m) => /seedance/i.test(m.id))
+          .map((m) => ({ id: m.id, label: m.label }))}
+        onVideoModelChange={setVideoModel}
+        videoModelLocked={seedance25Only}
+        aspect={aspect}
+        speechMode={speechMode}
+        brandId={brandIdProp}
+        brandName={brandName}
+        productName={productName}
+      />
       {imageLibraryOpen && (
         <div
           className="fixed inset-0 z-[100] bg-black/75 backdrop-blur-sm p-3 sm:p-8 grid place-items-center"
@@ -3195,6 +3336,15 @@ export default function CreativeStudioTab({
             title="Attach images, a video, or an optional landing-page PDF"
           >
             +
+          </button>
+          <button
+            type="button"
+            onClick={() => setScriptPlanOpen(true)}
+            disabled={busy}
+            className="h-9 px-3 rounded-full border border-white/15 bg-white/5 text-xs font-semibold text-white/80 hover:bg-white/10 disabled:opacity-50"
+            title="Upload a script (.docx) and let the assistant write the timed prompt"
+          >
+            Script
           </button>
 
           <div className="relative">
@@ -4235,6 +4385,26 @@ export default function CreativeStudioTab({
                                     className="text-[11px] font-semibold px-3 py-1.5 rounded-full border border-[#b8f000]/40 text-[#b8f000] disabled:opacity-50"
                                   >
                                     {finishingVideoId === m.id ? 'Adding captions & logo…' : 'Add captions & logo'}
+                                  </button>
+                                ) : null}
+                                {scriptStills.length > 0 && m.phase !== 'final_screens' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setStillsTarget(m)}
+                                    title="Draws the planned screens as pictures with an image model and shows each over your video for its seconds. The text stays exactly as you approve it."
+                                    className="text-[11px] font-semibold px-3 py-1.5 rounded-full border border-[#b8f000]/40 text-[#b8f000]"
+                                  >
+                                    Add screens
+                                  </button>
+                                ) : null}
+                                {m.phase !== 'final_end_card' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setEndCardTarget(m)}
+                                    title="Lays your logo and the exact call-to-action text over the last seconds. Preview first. The video above is kept."
+                                    className="text-[11px] font-semibold px-3 py-1.5 rounded-full border border-[#b8f000]/40 text-[#b8f000]"
+                                  >
+                                    Add end card
                                   </button>
                                 ) : null}
                               </>

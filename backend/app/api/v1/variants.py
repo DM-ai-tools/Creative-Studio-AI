@@ -201,6 +201,97 @@ async def fix_variant_portrait(
     )
 
 
+class PlaceLogoRequest(BaseModel):
+    corner: str = Field(min_length=1, max_length=20, description="top_left … bottom_center, center, auto or none")
+    backing: str = Field(default="", max_length=10, description="'' plain, 'plate' (white plate behind the logo) or 'bar' (logo in a new strip)")
+
+
+@router.post("/{variant_id}/place-logo", response_model=VariantResponse)
+async def place_variant_logo(
+    variant_id: UUID,
+    data: PlaceLogoRequest,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Put the real Brand Kit logo on a finished still, exactly where the user chose. No AI, no credits.
+
+    Always starts from the picture without a logo, so the position can be changed again and again, and
+    the logo is never moved off the chosen spot (the user is looking at the picture and decides)."""
+    import asyncio
+
+    from app.services import ad_image_logo as ad_logo
+    from app.services.brand_logo import resolve_video_logo_urls
+    from app.services.brand_prompt import brand_snapshot
+    from app.services.creative_studio_still_logo import CORNER_LABELS, place_logo_in_corner
+
+    variant = await VariantService.get_variant(db, variant_id, current_user.tenant_id)
+    if (variant.format or "static") in {"reel", "video"}:
+        raise HTTPException(status_code=400, detail="Logo placement here is for still images only")
+    backing = (data.backing or "").strip().lower()
+    if backing not in {"", "over", "plate", "bar"}:
+        raise HTTPException(status_code=422, detail="Logo style must be smart, over, plate or bar")
+    mode = ad_logo.normalize_mode(data.corner)
+    if not mode:
+        raise HTTPException(status_code=422, detail="Choose a corner, a centre position, auto or none")
+
+    params = dict(variant.generation_params or {})
+    pipeline = dict(params.get("pipeline") or {})
+    image = dict(pipeline.get("image") or {})
+    url = str(image.get("url") or "")
+    plain = str(image.get("url_without_logo") or (url if not image.get("logo_applied") else ""))
+    if not plain.startswith("/files/"):
+        raise HTTPException(
+            status_code=400,
+            detail="This image was made with the old white logo strip, so the logo cannot be moved. Regenerate it with a logo position chosen.",
+        )
+
+    if mode == ad_logo.NONE:
+        image.update({"url": plain, "url_without_logo": plain, "logo_applied": False, "logo_corner": ad_logo.NONE, "logo_manual": True, "warnings": []})
+        image.pop("logo_corner_label", None)
+    else:
+        brand = await BrandService.get_brand(db, variant.brand_id, current_user.tenant_id)
+        try:
+            kit = await BrandService.get_brand_kit(db, brand.id, current_user.tenant_id)
+        except Exception:
+            kit = None
+        logo, logo_light = resolve_video_logo_urls(brand=brand_snapshot(brand, kit), tenant_id=str(current_user.tenant_id))
+        if not logo:
+            raise HTTPException(status_code=400, detail="No Brand Kit logo found. Upload a PNG or JPG logo in the Brand Kit.")
+        try:
+            placed = await asyncio.to_thread(
+                place_logo_in_corner,
+                image_url=plain,
+                corner=mode,
+                tenant_id=str(current_user.tenant_id),
+                logo_url=logo,
+                logo_on_light_url=logo_light,
+                avoid_text=False,  # the user chose this spot: the logo goes exactly there
+                backing=backing,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        image.update(
+            {
+                "url": placed["url"],
+                "url_without_logo": plain,
+                "logo_applied": True,
+                "logo_corner": placed["corner"],
+                "logo_corner_label": CORNER_LABELS[placed["corner"]],
+                "logo_auto": placed["auto"],
+                "logo_manual": True,
+                "logo_backing": backing,
+                "logo_background": placed["background"],
+                "logo_version": placed["logo_version"],
+                "warnings": placed["warnings"],
+            }
+        )
+    pipeline["image"] = image
+    params["pipeline"] = pipeline
+    return await VariantService.update_variant(
+        db, variant_id, current_user.tenant_id, VariantUpdate(generation_params=params)
+    )
+
+
 @router.post("/{variant_id}/regenerate-image", response_model=VariantResponse, dependencies=[Depends(require_usage_allowance)])
 async def regenerate_variant_image(
     variant_id: UUID,

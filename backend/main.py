@@ -98,9 +98,12 @@ async def serve_upload(file_path: str):
     """Serve uploads with Content-Type from file bytes (fixes JPEG saved as .png)."""
     resolved = (upload_dir / file_path).resolve()
     try:
-        resolved.relative_to(upload_dir)
+        relative = resolved.relative_to(upload_dir)
     except ValueError:
         raise HTTPException(status_code=404, detail="Not found") from None
+    # "_private" holds server-side data (e.g. chat history) that must never be downloadable.
+    if relative.parts and relative.parts[0] == "_private":
+        raise HTTPException(status_code=404, detail="Not found")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     header = resolved.read_bytes()[:32]

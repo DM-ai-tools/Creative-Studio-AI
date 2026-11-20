@@ -5,6 +5,7 @@ import toast from 'react-hot-toast'
 import { useForm, type UseFormRegister } from 'react-hook-form'
 import Topbar from '@/components/layout/Topbar'
 import BrandKitPreview from '@/components/brand-kit/BrandKitPreview'
+import AgencyTypeField from '@/components/brand-kit/AgencyTypeField'
 import LogoUploadZone from '@/components/brand-kit/LogoUploadZone'
 import ReferenceImagesGallery from '@/components/brand-kit/ReferenceImagesGallery'
 import WebsiteBrandFetchBlock from '@/components/brand-kit/WebsiteBrandFetchBlock'
@@ -16,7 +17,7 @@ import { PageLoader } from '@/components/ui/Loading'
 import { IconPalette, IconShield } from '@/components/ui/icons'
 import { brandsApi } from '@/lib/api'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
-import { AGENCY_INDUSTRY_OPTIONS } from '@/lib/industries'
+import { AGENCY_INDUSTRY_OPTIONS, agencyIndustryLabel } from '@/lib/industries'
 import { assetUrl, cn } from '@/lib/utils'
 import { preserveSocialStyleKitColors, resolveSocialStyleColors, socialStyleAestheticLabel, socialStyleFromBrand, socialStyleFromVoiceRules, socialStyleAccountLabel, summarizeSocialStyle, competitorInsightsFromBrand, competitorAccountLabel, summarizeCompetitorInsight, hasSocialStyleSummary } from '@/lib/socialStyle'
 import type { Brand, BrandKit, CompetitorSocialInsight } from '@/types'
@@ -35,6 +36,8 @@ type BrandKitForm = {
   forbidden_words: string
   primary_color: string
   secondary_color: string
+  /** Third palette colour: saved in the Brand Kit colours. Empty = the brand has two colours. */
+  tertiary_color: string
   font_heading: string
   font_body: string
 }
@@ -288,14 +291,14 @@ function SectionBlock({
           <p className="text-sm text-muted mt-0.5 leading-relaxed">{description}</p>
         </div>
       </div>
-      <div className="flex flex-col">{children}</div>
+      <div className="flex flex-col flex-1">{children}</div>
     </section>
   )
 }
 
 function CardRow({ children }: { children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start w-full">{children}</div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch w-full">{children}</div>
   )
 }
 
@@ -307,23 +310,38 @@ function ColorField({
 }: {
   label: string
   register: UseFormRegister<BrandKitForm>
-  name: 'primary_color' | 'secondary_color'
+  name: 'primary_color' | 'secondary_color' | 'tertiary_color'
   value: string
 }) {
+  const valid = /^#[0-9a-f]{3,8}$/i.test((value || '').trim())
   return (
-    <div className="rounded-2xl border border-border/80 bg-surface/60 p-4 flex flex-col">
-      <p className="label-ui mb-3">{label}</p>
-      <div
-        className="h-20 rounded-xl border border-border/60 mb-3 shadow-inner transition-colors duration-300"
-        style={{ backgroundColor: value || '#cccccc' }}
-      />
-      <div className="flex items-center gap-2">
+    <div className="flex items-center gap-4 rounded-2xl border border-border/80 bg-surface/60 p-3">
+      {/* Click the square to pick a colour, or type / paste the code in the box. */}
+      <label
+        className="relative h-16 w-16 shrink-0 cursor-pointer overflow-hidden rounded-xl border border-border/60 shadow-inner transition-colors duration-300"
+        style={{ backgroundColor: valid ? value.trim() : '#e5e7eb' }}
+        title="Click to pick a colour"
+      >
+        {!valid && (
+          <span className="absolute inset-0 flex items-center justify-center text-2xl font-light text-mid">+</span>
+        )}
         <input
           type="color"
           {...register(name)}
-          className="w-10 h-10 rounded-lg border border-border cursor-pointer shrink-0"
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+          aria-label={`${label} colour picker`}
         />
-        <Input placeholder="#FF6B00" {...register(name)} className="flex-1 font-mono text-sm" />
+      </label>
+      <div className="min-w-0 flex-1">
+        <p className="label-ui mb-1">{label}</p>
+        <input
+          type="text"
+          {...register(name)}
+          placeholder="#FF6B00"
+          spellCheck={false}
+          maxLength={9}
+          className="w-full rounded-lg border border-border bg-white px-3 py-2 font-mono text-sm uppercase text-charcoal focus:border-accent focus:outline-none"
+        />
       </div>
     </div>
   )
@@ -375,7 +393,7 @@ function BrandListItem({
         <p className={cn('text-sm font-semibold truncate', active ? 'text-accent' : 'text-charcoal')}>
           {brand.name}
         </p>
-        <p className="text-[10px] text-muted truncate">{brand.industry || 'No industry set'}</p>
+        <p className="text-[10px] text-muted truncate">{agencyIndustryLabel(brand.industry) || 'No industry set'}</p>
       </div>
       {active && (
         <span className="w-2 h-2 rounded-full bg-accent shrink-0" />
@@ -398,7 +416,7 @@ export default function BrandKitPage() {
   const [isCreatingNew, setIsCreatingNew] = useState(false)
   const [referenceGalleryKey, setReferenceGalleryKey] = useState(0)
 
-  const { register, handleSubmit, reset, watch } = useForm<BrandKitForm>()
+  const { register, handleSubmit, reset, watch, setValue } = useForm<BrandKitForm>()
   const watched = watch()
 
   const activeBrand = brands.find((b) => b.id === activeBrandId) ?? null
@@ -426,6 +444,7 @@ export default function BrandKitPage() {
         forbidden_words: brand.forbidden_words?.join(', ') ?? '',
         primary_color: brand.primary_color ?? '#FF6B00',
         secondary_color: brand.secondary_color ?? '#1A1A2E',
+        tertiary_color: '',
         font_heading: '',
         font_body: '',
       })
@@ -436,6 +455,7 @@ export default function BrandKitPage() {
           ...prev,
           font_heading: (k.fonts as { heading?: string })?.heading ?? '',
           font_body: (k.fonts as { body?: string })?.body ?? '',
+          tertiary_color: String((k.colors as { tertiary?: string } | undefined)?.tertiary ?? ''),
         }))
       } catch {
         /* no kit yet — that's fine */
@@ -472,6 +492,7 @@ export default function BrandKitPage() {
             forbidden_words: '',
             primary_color: '#FF6B00',
             secondary_color: '#1A1A2E',
+            tertiary_color: '',
             font_heading: '',
             font_body: '',
           })
@@ -500,6 +521,7 @@ export default function BrandKitPage() {
       forbidden_words: '',
       primary_color: '#FF6B00',
       secondary_color: '#1A1A2E',
+      tertiary_color: '',
       font_heading: '',
       font_body: '',
     })
@@ -536,6 +558,7 @@ export default function BrandKitPage() {
         colors: {
           primary: data.primary_color,
           secondary: data.secondary_color,
+          ...(data.tertiary_color?.trim() ? { tertiary: data.tertiary_color.trim() } : {}),
           ...preservedSocial,
           ...(preservedSocial.social_style_profile || !voiceSocialStyle
             ? {}
@@ -795,10 +818,12 @@ export default function BrandKitPage() {
                   />
                   <Input label="Brand name" placeholder="Click Trends" {...register('name')} />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                    <Select
-                      label="Agency type"
-                      options={AGENCY_INDUSTRY_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-                      {...register('industry')}
+                    {/* Registered so the form saves it; the field below sets it (pick a preset or type your own). */}
+                    <input type="hidden" {...register('industry')} />
+                    <AgencyTypeField
+                      value={watched.industry ?? ''}
+                      onChange={(next) => setValue('industry', next, { shouldDirty: true })}
+                      presets={AGENCY_INDUSTRY_OPTIONS}
                     />
                     <Select label="Default language" options={LANGUAGE_OPTIONS} {...register('language')} />
                   </div>
@@ -863,7 +888,8 @@ export default function BrandKitPage() {
               </SectionBlock>
             </CardRow>
 
-            <CardRow>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch w-full">
+              <div className="flex flex-col gap-6">
               <SectionBlock
                 step="04"
                 title="Voice & tone"
@@ -876,45 +902,8 @@ export default function BrandKitPage() {
                   {...register('voice_description')}
                 />
               </SectionBlock>
-
               <SectionBlock
                 step="05"
-                title="Color palette"
-                description="Primary drives CTAs and accents; secondary supports backgrounds and type."
-              >
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <ColorField
-                      label="Primary"
-                      register={register}
-                      name="primary_color"
-                      value={watched.primary_color ?? ''}
-                    />
-                    <ColorField
-                      label="Secondary"
-                      register={register}
-                      name="secondary_color"
-                      value={watched.secondary_color ?? ''}
-                    />
-                  </div>
-                  <SocialStyleSavedCard brand={activeBrand} kit={activeKit} />
-                  {activeBrand ? (
-                    <CompetitorInsightsSavedCard
-                      brand={activeBrand}
-                      kit={activeKit}
-                      industry={watched.industry ?? activeBrand.industry ?? ''}
-                      onUpdated={(updated) => {
-                        setBrands((prev) => prev.map((b) => (b.id === updated.id ? updated : b)))
-                      }}
-                    />
-                  ) : null}
-                </div>
-              </SectionBlock>
-            </CardRow>
-
-            <CardRow>
-              <SectionBlock
-                step="06"
                 title="Compliance guardrails"
                 description="Blocked terms and claims — generation will fail compliance if these appear."
               >
@@ -932,9 +921,9 @@ export default function BrandKitPage() {
                   />
                 </div>
               </SectionBlock>
-
               <SectionBlock
-                step="07"
+                className="flex-1"
+                step="06"
                 title="Typography"
                 description="Optional — preview updates in the hero mockup above."
               >
@@ -963,7 +952,50 @@ export default function BrandKitPage() {
                   )}
                 </div>
               </SectionBlock>
-            </CardRow>
+              </div>
+              <div className="flex flex-col gap-6">
+              <SectionBlock
+                className="flex-1"
+                step="07"
+                title="Color palette"
+                description="Up to three colours. Primary drives CTAs and accents, secondary supports backgrounds and type, the third is for small accents. Each image can use all three, two or one."
+              >
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 gap-3">
+                    <ColorField
+                      label="Primary"
+                      register={register}
+                      name="primary_color"
+                      value={watched.primary_color ?? ''}
+                    />
+                    <ColorField
+                      label="Secondary"
+                      register={register}
+                      name="secondary_color"
+                      value={watched.secondary_color ?? ''}
+                    />
+                    <ColorField
+                      label="Third colour (optional)"
+                      register={register}
+                      name="tertiary_color"
+                      value={watched.tertiary_color ?? ''}
+                    />
+                  </div>
+                  <SocialStyleSavedCard brand={activeBrand} kit={activeKit} />
+                  {activeBrand ? (
+                    <CompetitorInsightsSavedCard
+                      brand={activeBrand}
+                      kit={activeKit}
+                      industry={watched.industry ?? activeBrand.industry ?? ''}
+                      onUpdated={(updated) => {
+                        setBrands((prev) => prev.map((b) => (b.id === updated.id ? updated : b)))
+                      }}
+                    />
+                  ) : null}
+                </div>
+              </SectionBlock>
+              </div>
+            </div>
           </div>
 
           <div className="lg:hidden sticky bottom-0 z-10 -mx-6 px-6 py-4 glass-topbar border-t border-border/80">

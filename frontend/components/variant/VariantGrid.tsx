@@ -1,5 +1,9 @@
 import React from 'react'
+import { motion, useReducedMotion } from 'framer-motion'
 import VariantTile from './VariantTile'
+import GeneratingDots from './GeneratingDots'
+import EmptyState from '@/components/ui/EmptyState'
+import { Images } from 'lucide-react'
 import { variantGridClass } from '@/lib/creativeFormats'
 import type { Variant } from '@/types'
 
@@ -15,6 +19,13 @@ interface VariantGridProps {
   onRegenerateBatch?(): void
   onView?(variant: Variant): void
   regeneratingId?: string | null
+  /** Creatives still being made that have no row yet: shown as live "generating" tiles. */
+  pendingCount?: number
+  /** CSS aspect-ratio for those tiles, e.g. "1 / 1". */
+  pendingAspect?: string
+  /** When the run began (ms) and the usual seconds per image, so every tile's % agrees. */
+  generatingStartedAt?: number
+  expectedSeconds?: number
 }
 
 function SkeletonTile() {
@@ -39,7 +50,13 @@ export default function VariantGrid({
   onRegenerateBatch,
   onView,
   regeneratingId,
+  pendingCount = 0,
+  pendingAspect = '1 / 1',
+  generatingStartedAt,
+  expectedSeconds,
 }: VariantGridProps) {
+  const reduce = useReducedMotion()
+
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -48,21 +65,26 @@ export default function VariantGrid({
     )
   }
 
-  if (variants.length === 0) {
+  if (variants.length === 0 && pendingCount === 0) {
     return (
-      <div className="py-16 text-center">
-        <div className="text-4xl mb-3">🎬</div>
-        <p className="text-sm font-semibold text-mid">No variants yet</p>
-        <p className="text-xs text-lt mt-1">Generate from a brief to create your first variant.</p>
-      </div>
+      <EmptyState
+        icon={Images}
+        title="No creatives yet"
+        description="Generate from a brief and your first creative will appear here."
+      />
     )
   }
 
   return (
-    <div className={variantGridClass(variants)}>
-      {variants.map((v) => (
-        <VariantTile
+    <div className={variants.length ? variantGridClass(variants) : 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3'}>
+      {variants.map((v, i) => (
+        <motion.div
           key={v.id}
+          initial={reduce ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1], delay: reduce ? 0 : Math.min(i, 8) * 0.05 }}
+        >
+        <VariantTile
           variant={v}
           onApprove={onApprove}
           onReject={onReject}
@@ -71,7 +93,24 @@ export default function VariantGrid({
           onRegenerateBatch={onRegenerateBatch}
           onView={onView ?? (() => {})}
           isRegenerating={regeneratingId === v.id || v.status === 'GENERATING'}
+          generatingStartedAt={generatingStartedAt}
+          expectedSeconds={expectedSeconds}
         />
+        </motion.div>
+      ))}
+      {Array.from({ length: pendingCount }).map((_, i) => (
+        <div
+          key={`pending-${i}`}
+          className="rounded-xl border border-border bg-surface-elevated shadow-card overflow-hidden"
+        >
+          <div className="relative w-full" style={{ aspectRatio: pendingAspect }}>
+            <GeneratingDots expectedSeconds={expectedSeconds} startedAt={generatingStartedAt} />
+          </div>
+          <div className="px-3 py-2 flex items-center justify-between">
+            <span className="text-[10px] font-semibold text-mid">Creative {variants.length + i + 1}</span>
+            <span className="text-[10px] text-lt">Creating…</span>
+          </div>
+        </div>
       ))}
     </div>
   )

@@ -170,6 +170,66 @@ export function referenceImagesPayloadForVariant(
   )
 }
 
+/**
+ * Where the brand logo goes inside an ad image. '' keeps the long-standing look (logo in a slim white
+ * strip across the top). Every other choice puts the real logo file inside the picture, in a corner the
+ * text does not use, in the light or dark version that suits the picture. Static ads and carousel
+ * cards only; reels and videos get their logo on the finished video.
+ */
+export type LogoPositionId =
+  | ''
+  | 'auto'
+  | 'top_left'
+  | 'top_right'
+  | 'bottom_left'
+  | 'bottom_right'
+  | 'top_center'
+  | 'bottom_center'
+  | 'center'
+  | 'none'
+
+export const LOGO_POSITION_OPTIONS: { value: LogoPositionId; label: string }[] = [
+  { value: '', label: 'White strip on top (current)' },
+  { value: 'auto', label: "Auto — designer's choice (varies per image)" },
+  { value: 'top_left', label: 'Top left' },
+  { value: 'top_right', label: 'Top right' },
+  { value: 'bottom_left', label: 'Bottom left' },
+  { value: 'bottom_right', label: 'Bottom right' },
+  { value: 'top_center', label: 'Top centre' },
+  { value: 'bottom_center', label: 'Bottom centre' },
+  { value: 'center', label: 'Centre (rare)' },
+  { value: 'none', label: 'No logo on the image' },
+]
+
+/** The brand's colour palette: up to three colours, set on the Brand page. */
+export type PaletteRole = 'primary' | 'secondary' | 'tertiary'
+export const PALETTE_ROLES: { id: PaletteRole; label: string }[] = [
+  { id: 'primary', label: 'Colour 1' },
+  { id: 'secondary', label: 'Colour 2' },
+  { id: 'tertiary', label: 'Colour 3' },
+]
+
+export function normalizePaletteColors(value: unknown): Partial<Record<PaletteRole, string>> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const out: Partial<Record<PaletteRole, string>> = {}
+  for (const { id } of PALETTE_ROLES) {
+    const v = String((value as Record<string, unknown>)[id] ?? '').trim()
+    if (v) out[id] = v
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+export function normalizePalette(value: unknown): PaletteRole[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const picked = PALETTE_ROLES.map((r) => r.id).filter((id) => value.includes(id))
+  return picked.length ? picked : undefined
+}
+
+export function normalizeLogoPosition(value: unknown): LogoPositionId {
+  const s = String(value ?? '').trim()
+  return LOGO_POSITION_OPTIONS.some((o) => o.value === s) ? (s as LogoPositionId) : ''
+}
+
 /** One creative direction for a single image variant. */
 export type ImageVariantSlot = {
   use_cases: string[]
@@ -212,8 +272,76 @@ export type ImageVariantSlot = {
   product_focus?: 'product_only' | 'with_person' | 'product_with_person' | ''
   /** Specific product/model from scraped catalog (e.g. NEO + 20 2026). */
   product_model?: string
+  /** Where the brand logo sits inside this image. Empty = follow the campaign setting. */
+  logo_corner?: LogoPositionId
+  /** Which of the brand's colours this image uses. Empty / missing = all of them. */
+  palette?: PaletteRole[]
+  /** Colour codes typed on this variant; they replace the brand's colour in that slot (or fill an empty third one). */
+  palette_colors?: Partial<Record<PaletteRole, string>>
+  /**
+   * Where the prompt text came from. 'strategy' = the short scene note copied from the MD file (still to
+   * be expanded by Generate AI); 'ai' = written by the prompt-writing AI; 'user' = typed or edited by hand.
+   * Only hand-written prompts are kept exactly as written; the other two are scenes to build on.
+   */
+  prompt_source?: 'strategy' | 'ai' | 'user'
+  /** The prompt is a full designer brief read from the MD file: Generate AI builds on it and keeps its exact text. */
+  brief_complete?: boolean
+  /** The MD file's own hook / primary text. Generate AI must not replace it with an invented angle. */
+  strategy_hook?: string
+  strategy_message?: string
   /** ISO timestamp when AI plan was last generated for this variant. */
   generated_at: string | null
+}
+
+/**
+ * What "Generate AI" does with a slot's prompt. A prompt a person wrote or edited is kept exactly. The short
+ * scene note copied from the strategy file is replaced by the AI's expansion of it (before this, the note
+ * always won, so the AI's prompt was thrown away and the image was made from a one-line note).
+ */
+export function promptAfterAiPlan(
+  slot: Pick<ImageVariantSlot, 'prompt' | 'prompt_source' | 'brief_complete'>,
+  aiPrompt: string | undefined,
+): { prompt: string; prompt_source: ImageVariantSlot['prompt_source'] } {
+  const prior = (slot.prompt || '').trim()
+  const ai = (aiPrompt || '').trim()
+  if (prior && slot.prompt_source !== 'strategy') return { prompt: prior, prompt_source: slot.prompt_source }
+  if (ai) return { prompt: slot.brief_complete ? ensureBriefText(ai, prior) : ai, prompt_source: 'ai' }
+  return { prompt: prior, prompt_source: slot.prompt_source }
+}
+
+/**
+ * A designer brief spells out the exact words for the image (headline, callouts, message, CTA). The AI's
+ * rewrite must carry every one of them: any line of the brief whose words are missing from the AI prompt is
+ * added back, word for word.
+ */
+export function ensureBriefText(aiPrompt: string, brief: string): string {
+  const have = aiPrompt.toLowerCase().replace(/\s+/g, ' ')
+  const keys = ['Main headline:', 'Subheadline:', 'Supporting text:', 'Benefit callouts:', 'Message:', 'CTA button:']
+  const missing: string[] = []
+  for (const line of brief.split('\n')) {
+    const key = keys.find((k) => line.startsWith(k))
+    if (!key) continue
+    const text = line.slice(key.length).trim().replace(/^"|"$/g, '').replace(/\s+/g, ' ')
+    if (text && !have.includes(text.toLowerCase())) missing.push(`${key} ${line.slice(key.length).trim()}`)
+  }
+  if (!missing.length) return aiPrompt
+  return `${aiPrompt}\n\nText that must appear on the image exactly as written:\n${missing.join('\n')}`
+}
+
+/**
+ * The copy Generate AI leaves on a slot. Text that came from the strategy file is the source of truth, so the
+ * AI cannot swap a carousel's "What happens at an Adoria consultation?" for an angle of its own.
+ */
+export function copyAfterAiPlan(
+  slot: Pick<ImageVariantSlot, 'hook' | 'message' | 'strategy_hook' | 'strategy_message'>,
+  ai: { hook?: string; message?: string },
+): { hook: string; message: string; fromStrategy: boolean } {
+  const fromStrategy = Boolean((slot.strategy_hook || '').trim())
+  return {
+    hook: (slot.strategy_hook || '').trim() || ai.hook || slot.hook,
+    message: (slot.strategy_message || '').trim() || ai.message || slot.message,
+    fromStrategy,
+  }
 }
 
 export function isCarouselSlot(slot: ImageVariantSlot, formats?: string[]): boolean {

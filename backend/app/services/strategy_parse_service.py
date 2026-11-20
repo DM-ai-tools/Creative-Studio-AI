@@ -9,6 +9,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.ad_angle_library import VALID_ANGLE_IDS, normalize_angle_id
+from app.services.strategy_designer_brief import parse_designer_creatives
 
 logger = logging.getLogger(__name__)
 
@@ -345,11 +346,15 @@ def _normalize_parsed_product_focus(raw: str, prompt: str = "") -> str:
             "being used", "in use", "technician using", "worker using",
             "holding the", "applying the", "spraying the",
         )
-        if any(s in p for s in _product_lifestyle_signals):
+        # Whole words only: "man" must not fire inside "management", "stat" inside "state", "hand" inside "handle".
+        def _has(signals: tuple[str, ...]) -> bool:
+            return any(re.search(r"(?<![a-z])" + re.escape(s) + r"(?:s|es)?(?![a-z])", p) for s in signals)
+
+        if _has(_product_lifestyle_signals):
             return "product_with_person"
-        if any(s in p for s in _person_hero_signals):
+        if _has(_person_hero_signals):
             return "with_person"
-        if any(s in p for s in _graphic_signals):
+        if _has(_graphic_signals):
             return "product_only"
     return ""
 
@@ -399,6 +404,9 @@ def _normalize_variant(item: dict[str, Any], fallback_cta: str, fallback_offer: 
         "post_type": str(item.get("post_type") or "").strip()[:80],
         "design_notes": str(item.get("design_notes") or "").strip()[:1200],
         "product_focus": _normalize_parsed_product_focus(str(item.get("product_focus") or ""), prompt),
+        # True when the prompt is a complete designer brief read exactly from the file (not a short scene
+        # note to be expanded): it is sent to the image model as written.
+        "prompt_complete": bool(item.get("prompt_complete")),
     }
 
 
@@ -1577,9 +1585,11 @@ async def _expand_variant_image_prompts(
             "Headline: elegant serif in Title Case or sentence case — NEVER ALL CAPS. "
             "Supporting line: thin tracked sans-serif sentence case. "
             "Romantic/engagement line: flowing gold script calligraphy (natural casing). "
-            f"BRAND NAME LOCK: the only store name allowed on-image is "
-            f"\"{brief.get('brand_name') or 'the Brand Kit name'}\" letter-for-letter. "
-            "Never invent Lusso, Shop Dimad, She Diamond, or treat 'Shop Diamonds' as the brand. "
+            "NO BRAND TEXT: never put the brand or store name, a logo, a wordmark or a watermark on the image "
+            "and never write them into the prompt; the real logo is added afterwards from the Brand Kit. "
+            "Even if the strategy scene says 'logo bottom right', leave that out of the prompt. "
+            "CASTING: people must fit the stated audience and location; do not introduce a different "
+            "ethnicity, cultural costume, traditional dress or accessories, or shop setting unless the scene says so. "
             "No cheap white Impact or generic black sans as hero type. "
             "PRODUCT HERO: name the specific jewel and zoom it as the main subject "
             "(large in frame, macro/tight close-up). People and scene may stay as supporting "
@@ -1889,7 +1899,13 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
         campaign_cta=cta,
         campaign_offer=offer,
     )
-    fashion_retail = _is_fashion_retail_doc(text, variants)
+    # Designer-style briefs ("Creative N" sections with MAIN HEADLINE / VISUAL DIRECTION / CTA...) are read
+    # by their structure, never by an AI's guess: one section = one image, every field exactly as written.
+    designer = parse_designer_creatives(text, fallback_cta=cta)
+    designer_doc = bool(designer)
+    if designer_doc:
+        variants = [_normalize_variant(v, cta, offer) for v in designer]
+    fashion_retail = (not designer_doc) and _is_fashion_retail_doc(text, variants)
     if not variants:
         raise ValueError("No creative variants found in the strategy document")
     variants = _explode_carousel_variants(variants, cta)
@@ -1926,6 +1942,8 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
     )
     if not formats:
         formats = ["static"]
+    if designer_doc:
+        formats = ["static"]  # every "Creative N" section is one still image
     if fashion_retail:
         formats = ["static"]
         # One ad angle per static creative for Generate AI.
@@ -1982,5 +2000,5 @@ async def parse_strategy_markdown(markdown: str, *, filename: str = "") -> dict[
             if fashion_retail and variants
             else ("4:3" if fashion_retail else "")
         ),
-        "creative_style": "fashion_retail_promo" if fashion_retail else "",
+        "creative_style": "designer_brief" if designer_doc else ("fashion_retail_promo" if fashion_retail else ""),
     }

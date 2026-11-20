@@ -190,6 +190,134 @@ export interface SeedanceCreditsCheck {
   probe_note?: string | null
 }
 
+/** A screen or graphic the planner wants drawn as a picture and shown over the video. */
+export interface CreativeStudioStill {
+  id: string
+  scene: number
+  label: string
+  start: number
+  end: number
+  duration: number
+  image_prompt: string
+}
+
+/** Result of drawing one still with GPT Image 2 or Seedream. */
+export interface CreativeStudioStillResult {
+  url: string
+  model: string
+  provider?: string | null
+  credits_estimate?: number | null
+  note?: string | null
+}
+
+/** Where the brand logo sits inside a drawn picture. */
+export type CreativeStudioLogoCorner = 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right'
+
+/** A drawn picture with the brand logo placed inside it. */
+export interface CreativeStudioStillLogoResult {
+  url: string
+  source_url: string
+  corner: CreativeStudioLogoCorner
+  /** Brightness of the picture under the logo. */
+  background: 'light' | 'dark'
+  /** Which version of the logo was used. */
+  logo_version: string
+  warnings: string[]
+}
+
+/** Result of laying still pictures over a video. */
+export interface CreativeStudioInsertsResult {
+  url: string
+  source_url: string
+  width: number
+  height: number
+  duration_seconds: number
+  inserts: { start_seconds: number; end_seconds: number }[]
+  warnings: string[]
+}
+
+/** What an end card should say, taken character for character from the script. */
+export interface CreativeStudioEndCardSpec {
+  headline: string
+  sublines: string[]
+  button_text: string
+  start_seconds: number
+  hold_seconds: number
+  note: string
+}
+
+/** Result of adding (or previewing) an end card. */
+export interface CreativeStudioEndCardResult {
+  kind: 'preview' | 'video'
+  url: string
+  source_url: string
+  width: number
+  height: number
+  duration_seconds: number
+  start_seconds: number
+  hold_seconds: number
+  logo_applied: boolean
+  theme: 'light' | 'dark'
+  warnings: string[]
+}
+
+/** Result of Creative Studio "Script mode" planning (POST /generation/creative-studio/script/plan). */
+export interface CreativeStudioScriptPlan {
+  title: string
+  global_style: string
+  scenes: {
+    index: number
+    title: string
+    start: number
+    end: number
+    duration_seconds: number
+    duration_source: 'script' | 'estimated'
+    /** Who speaks: a visible person, off-camera narration, or nobody. */
+    speech: 'on_camera' | 'voiceover' | 'none'
+    /** The scene's cut: a new shot every 2-4s. Empty for the empty-background call-to-action scene. */
+    shots: { seconds: number; description: string }[]
+    voiceover: string
+    visual_direction: string
+    on_screen_text: string[]
+    reason: string
+  }[]
+  edit_list: {
+    scene: number
+    scene_title: string
+    start: number
+    end: number
+    kind: string
+    note: string
+    /** For screens/graphics: a prompt for an image model to draw the picture (empty for other kinds). */
+    image_prompt: string
+  }[]
+  /** Screens and graphics to draw as stills and lay over the video (each in its own window). */
+  stills: CreativeStudioStill[]
+  total_seconds: number
+  edit_count: number
+  warnings: string[]
+  voice: {
+    gender: '' | 'female' | 'male'
+    accent: string
+    source: 'script' | 'default'
+    base_line: string
+    prompt_line: string
+  }
+  /** Default prompt: no ON-SCREEN TEXT blocks (the pipeline would burn them into the video). */
+  /** The noun that repeats across too many shots (the cut may feel repetitive), or null. */
+  repetition: { word: string; count: number; total: number } | null
+  canonical_prompt: string
+  /** Same prompt with the script's on-screen text included, for people who want it added automatically. */
+  canonical_prompt_with_text: string
+  /** Text and timing for the closing end card, from the script's closing scene (null if none). */
+  end_card: CreativeStudioEndCardSpec | null
+  speech_mode: 'native_presenter' | 'external_voiceover'
+  video_model: string
+  clip_cap_seconds: number
+  aspect: string
+  script_chars: number
+}
+
 export interface AdminUsage {
   totals: {
     calls: number
@@ -451,6 +579,8 @@ export interface StrategyVariantPlan {
   design_notes?: string
   /** Per-variant shot style detected from the strategy document visual concept. */
   product_focus?: string
+  /** The prompt is a complete designer brief read exactly from the file (kept as written, not expanded by AI). */
+  prompt_complete?: boolean
 }
 
 export interface StrategyParseResult {

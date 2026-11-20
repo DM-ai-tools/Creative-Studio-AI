@@ -118,6 +118,8 @@ def brand_snapshot(brand: "Brand", kit: "BrandKit | None" = None) -> dict[str, A
         "language": brand.language,
         "primary_color": primary,
         "secondary_color": secondary,
+        # The third palette colour lives in the Brand Kit's colours (no extra database column).
+        "tertiary_color": str(kit_colors.get("tertiary") or ""),
         "voice": voice,
         "logo_url": effective_logo_url,
         "logo_on_light_url": effective_on_light,

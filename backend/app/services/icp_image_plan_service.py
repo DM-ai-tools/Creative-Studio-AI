@@ -642,12 +642,27 @@ _SPLIT_COMPOSITION_RE = re.compile(
 )
 
 
+def _keyword_in(keyword: str, hay: str) -> bool:
+    """Does the keyword occur as a word (or the start of a word) in ``hay``?
+
+    Plain substring matching was the bug: the jewellery keyword "ring " is inside "catering", "flooring",
+    "engineering", "hearing", "tutoring" and "colouring", so those industries were treated as jewellery.
+    A keyword must now start at a word boundary ("plumb" still finds "plumber"); a keyword written with a
+    trailing space ("ring ") must be the whole word.
+    """
+    word = keyword.strip()
+    if not word:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(word) + (r"(?![a-z0-9])" if keyword.endswith(" ") else "")
+    return re.search(pattern, hay) is not None
+
+
 def _resolve_niche_category(*, niche: str, industry: str) -> str | None:
     hay = f"{niche} {industry}".lower().strip()
     if not hay:
         return None
     for keywords, category in _NICHE_CATEGORY_KEYWORDS:
-        if any(kw in hay for kw in keywords):
+        if any(_keyword_in(kw, hay) for kw in keywords):
             return category
     return None
 
@@ -852,13 +867,16 @@ _FAKE_JEWELLER_BRAND_RE = re.compile(
 )
 
 # Agency / platform marks must never appear on client ad images.
-_PLATFORM_AGENCY_BRAND_RE = re.compile(
-    r"(?i)\b(?:"
-    r"traffic\s+radius|"
-    r"click\s*trends?|"
-    r"creative\s+studio\s+ai"
-    r")\b"
-)
+def _platform_brand_regex() -> "re.Pattern[str]":
+    """The platform's own brand names (setting PLATFORM_BRAND_NAMES), as a pattern; matches nothing if empty."""
+    names = [n.strip() for n in str(getattr(settings, "PLATFORM_BRAND_NAMES", "") or "").split(",") if n.strip()]
+    if not names:
+        return re.compile(r"(?!x)x")
+    parts = sorted((r"\s+".join(re.escape(word) for word in name.split()) for name in names), key=len, reverse=True)
+    return re.compile(r"(?i)\b(?:" + "|".join(parts) + r")\b")
+
+
+_PLATFORM_AGENCY_BRAND_RE = _platform_brand_regex()
 
 
 def _is_jewellery_niche(*, niche: str = "", industry: str = "", text: str = "") -> bool:
@@ -1822,10 +1840,12 @@ def enforce_brand_identity_in_prompt(
             return found
         return name
 
-    cleaned = _FAKE_JEWELLER_BRAND_RE.sub(_keep_or_replace, cleaned)
+    jewellery = _is_jewellery_niche(niche=niche, industry=industry, text=cleaned)
+    if jewellery:  # lookalike jeweller names only matter on a jewellery brief
+        cleaned = _FAKE_JEWELLER_BRAND_RE.sub(_keep_or_replace, cleaned)
     cleaned = _PLATFORM_AGENCY_BRAND_RE.sub(name, cleaned)
     # Category nav must never be treated as a store wordmark.
-    if "shop diamonds" not in name_l:
+    if jewellery and "shop diamonds" not in name_l:
         cleaned = re.sub(
             r"(?i)\bshop\s+diamonds?\b",
             "diamonds",
@@ -1844,10 +1864,14 @@ def enforce_brand_identity_in_prompt(
         f' BRAND IDENTITY LOCK: the ONLY allowed brand name on this image is "{name}". '
         f'If any brand wordmark appears it must read exactly "{name}" letter-for-letter '
         f"({type_hint}). "
-        "Do NOT invent or render any other jeweller/store name — especially not Lusso, "
-        "Lusso Diamonds, Shop Dimad, She Diamond, Shop Diamonds (website category, not the brand), "
-        "Tiffany, Cartier, or any lookalike luxury house. "
-        "Do NOT render Traffic Radius, ClickTrends, or any agency/platform logo or wordmark — "
+        "Do NOT invent or render any other store or company name, and never treat a website category or "
+        "navigation label as the brand. "
+        + (
+            "Do NOT invent a jeweller or luxury-house name or copy a famous one. "
+            if jewellery
+            else ""
+        )
+        + "Do NOT render any other agency, platform or company logo or wordmark — "
         f'only "{name}" is allowed. '
         "The real Brand Kit logo is composited in post — do not draw a second fake logo. "
         "Collection names and nav labels must never appear as the store name."
@@ -3117,8 +3141,8 @@ not from a memorised example:
      offer, CTA story, and image prompt MUST sell THAT niche only. Ignore other product lines in
      VERIFIED BRAND FACTS / brand kit for this campaign. Jewellery niche → jewellery only.
    - BRAND NAME LOCK: on-image store name / wordmark must be EXACTLY the BRAND field (Brand Kit /
-     website company, e.g. Adoria Jewellery). NEVER invent Lusso Diamonds, Shop Dimad, She Diamond,
-     or treat a nav label like "Shop Diamonds" as the brand. Logo is composited in post.
+     website company). NEVER invent a different store or company name, and never treat a website
+     navigation or category label as the brand. Logo is composited in post.
    - Pain-led angles must show the EXACT physical problem for THAT procedure (jaw/tooth wince,
      x-ray, sensitivity, swollen cheek) — never ambiguous office sadness that could mean anything.
    - Stranger test must name the PROCEDURE / PRODUCT CATEGORY from visuals alone before reading text.
@@ -3219,6 +3243,8 @@ Rules:
   - If a CTA HINT is provided, treat it as optional guidance — still vary CTAs across variants when it improves the angle.
   - Never repeat the exact same CTA across all variants in one batch.
 - Human subjects: sharp visible faces, authentic Australian context, real emotion — not catalogue smiles.
+- CASTING: people must fit the stated audience and location. Do NOT introduce a different ethnicity, cultural costume, traditional dress or accessories, or a market/shop setting from another culture unless the strategy scene asks for it (a shop in the stated city looks like a modern shop in that city).
+- NEVER write the brand name, a logo, a wordmark or a watermark into a prompt, and never describe one on the image. The real logo is added afterwards from the Brand Kit. If the strategy scene says "logo bottom right", leave that out.
 - CHILDREN IN ADS (critical — Runway content policy): if the subject is a child or family with children, NEVER describe the child as anxious, scared, frightened, crying, distressed, grimacing, wincing, mouth-open-in-pain, or in a vulnerable medical situation. Show children as calm, curious, smiling, or happy. Dental-context children must be relaxed/content in a colourful child-friendly environment, not in a clinical chair looking worried.
 - Single full-bleed photo for most angles — ONE moment, ONE setting, ONE emotion.
   EXCEPTION before_after: SIDE-BY-SIDE left/right comparison is REQUIRED (dental results style —
@@ -3619,7 +3645,13 @@ _BAN_CIRCLED_PAPER_FIX = (
     " PROP BAN (mandatory): do NOT include any paper, bill, invoice, notepad, or phone screen "
     "with a red/orange circle, stamp, seal, ring mark, or highlighted amount. "
     "No decorative paperwork props with round marks. Tell the story with the real niche object "
-    "and the person's expression — not a circled document."
+    "— not a circled document."
+)
+
+
+_SCENE_WANTS_PAPER_PROPS = re.compile(
+    r"(?i)\b(?:notepad|notebook|invoice|receipt|paperwork|bill|statement|handwritten|circled|"
+    r"circles?\s+(?:around|on)|red\s+circle|notification|printed\s+(?:page|sheet|report))\b"
 )
 
 
@@ -3659,6 +3691,13 @@ def enforce_no_spurious_circled_paper_prop(
         return text
     if _is_finance_rate_niche(industry=industry, niche=niche, text=text):
         return text
+
+    # The scene itself asks for these props (a notepad with circled figures, a crumpled invoice, a phone
+    # notification...): the ban would contradict it and the model then drops the props it was told to draw.
+    # The ban is only a guard against props nobody asked for, so it is left out (and an earlier one removed).
+    without_ban = text.replace(_BAN_CIRCLED_PAPER_FIX, " ")
+    if _SCENE_WANTS_PAPER_PROPS.search(without_ban):
+        return re.sub(r"\s{2,}", " ", without_ban).strip()
 
     cleaned = _CIRCLED_PAPER_PROP_RE.sub(" ", text)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -5464,8 +5503,8 @@ async def generate_icp_image_plan(
         f"1. INDUSTRY (brand category): {industry_label}",
         f"2. NICHE (campaign specialty): {niche_label or 'Not specified'}",
         f"3. BRAND: {brand_name or 'Unknown'} "
-        f"(this is the ONLY company name allowed on-image — never invent Lusso / Shop Dimad / "
-        f"She Diamond / Shop Diamonds as a store name; those are lookalikes or website nav)",
+        f"(this is the ONLY company name allowed on-image — never invent a different store or company "
+        f"name, and never use a website navigation or category label as the name)",
         f"4. CAMPAIGN OBJECTIVE (must drive this action): {objective_id or 'conversions'}",
         "5. AD ANGLE / HOOK FRAMEWORK: see SELECTED AD ANGLES below",
         f"6. SERVICE LOCATION (authoritative — use ONLY this for any place name in copy/prompt): "
@@ -5719,7 +5758,7 @@ async def generate_icp_image_plan(
                         f" product_focus={seed.get('product_focus') or '-'}"
                         f" product_model={str(seed.get('product_model') or '')[:80] or '-'}"
                         f" card={seed.get('carousel_index') or '-'}/{seed.get('carousel_total') or '-'}"
-                        f" scene={str(seed.get('scene') or seed.get('prompt') or '')[:480]}"
+                        f" scene={str(seed.get('scene') or seed.get('prompt') or '')[: 1800 if seed.get('complete_brief') else 480]}"
                         f" design={str(seed.get('design_notes') or '')[:180] or '-'}"
                         f" client_hook={str(seed.get('client_hook') or '')[:140]}"
                         f" client_message={str(seed.get('client_message') or '')[:140]}"
@@ -5736,6 +5775,9 @@ async def generate_icp_image_plan(
                 "If no client hook exists, generate a new catchy hook from the supplied headline/message; "
                 "never use the headline verbatim as the hook merely because the hook field is empty.",
                 "Carousel seeds: ONE square photo per card. CTA pill only on the last card of that carousel.",
+                "A seed marked complete_brief is a finished designer brief: keep its layout (panels, split screen, flow of "
+                "arrows, collage), every label, every callout, the message and the CTA word for word. Write them into the "
+                "prompt as the exact text to draw; do not add people, props or scenes the brief does not mention.",
                 "",
             ]
             if strategy_seeds or (strategy_notes or "").strip()

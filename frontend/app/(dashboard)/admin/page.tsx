@@ -8,6 +8,7 @@ import Badge from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
 import { useApi } from '@/hooks/useApi'
 import { adminApi } from '@/lib/api'
+import { extractApiError } from '@/lib/apiErrors'
 import { useAuth } from '@/hooks/useAuth'
 import { timeAgo, formatFileSize } from '@/lib/utils'
 import type { AdminClient, AdminStats, UsageAllowance, User } from '@/types'
@@ -24,6 +25,7 @@ export default function AdminPage() {
   const { user } = useAuth()
   const [updatingRole, setUpdatingRole] = useState<string | null>(null)
   const [resettingAllowance, setResettingAllowance] = useState<string | null>(null)
+  const [togglingActive, setTogglingActive] = useState<string | null>(null)
 
   const { data: users, isLoading: usersLoading, refetch: refetchUsers } = useApi(
     () => adminApi.listUsers(), []
@@ -56,14 +58,22 @@ export default function AdminPage() {
     }
   }
 
-  const handleDeactivate = async (userId: string) => {
-    if (!confirm('Deactivate this user?')) return
+  const handleToggleActive = async (target: User) => {
+    const turnOn = !target.is_active
+    const who = target.full_name || target.email
+    const ok = turnOn
+      ? confirm(`Activate ${who}? They will be able to log in again.`)
+      : confirm(`Deactivate ${who}? They will be logged out and cannot log in until you activate them again.`)
+    if (!ok) return
+    setTogglingActive(target.id)
     try {
-      await adminApi.deactivateUser(userId)
-      toast.success('User deactivated')
+      await adminApi.setUserActive(target.id, turnOn)
+      toast.success(turnOn ? `${who} activated` : `${who} deactivated`)
       refetchUsers()
-    } catch {
-      toast.error('Failed to deactivate user')
+    } catch (err) {
+      toast.error(extractApiError(err) || 'Failed to update user access')
+    } finally {
+      setTogglingActive(null)
     }
   }
 
@@ -215,7 +225,7 @@ export default function AdminPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-light">
-                  {['Name', 'Email', 'Client', 'Role', 'Status', 'Projects', 'Creatives', 'Last login', 'Joined', 'Actions'].map((h) => (
+                  {['Name', 'Email', 'Client', 'Role', 'Status', 'Projects', 'Creatives', 'Last login', 'Joined'].map((h) => (
                     <th key={h} className="text-left px-4 py-2 text-[10px] font-bold text-mid uppercase tracking-wide border-b border-border">{h}</th>
                   ))}
                 </tr>
@@ -223,7 +233,7 @@ export default function AdminPage() {
               <tbody>
                 {usersLoading
                   ? [...Array(3)].map((_, i) => (
-                      <tr key={i}><td colSpan={10} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
+                      <tr key={i}><td colSpan={9} className="px-4 py-3"><div className="skeleton h-5 rounded" /></td></tr>
                     ))
                   : (users ?? []).map((u: User) => (
                       <tr key={u.id} className="border-b border-border hover:bg-light/50">
@@ -245,7 +255,31 @@ export default function AdminPage() {
                           )}
                         </td>
                         <td className="px-4 py-2.5">
-                          <Badge variant={u.is_active ? 'green' : 'red'}>{u.is_active ? 'Active' : 'Inactive'}</Badge>
+                          <div className="flex items-center gap-2">
+                            {u.id === user?.id ? (
+                              <Badge variant="green">Active</Badge>
+                            ) : (
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={u.is_active}
+                                aria-label={`${u.is_active ? 'Deactivate' : 'Activate'} ${u.full_name || u.email}`}
+                                title={u.is_active ? 'Click to deactivate (blocks login)' : 'Click to activate'}
+                                disabled={togglingActive === u.id}
+                                onClick={() => handleToggleActive(u)}
+                                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                                  u.is_active ? 'bg-green-500' : 'bg-gray-300'
+                                }`}
+                              >
+                                <span
+                                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                                    u.is_active ? 'translate-x-4' : 'translate-x-0.5'
+                                  }`}
+                                />
+                              </button>
+                            )}
+                            <Badge variant={u.is_active ? 'green' : 'red'}>{u.is_active ? 'Active' : 'Inactive'}</Badge>
+                          </div>
                         </td>
                         <td className="px-4 py-2.5 text-mid">{u.brief_count ?? 0}</td>
                         <td className="px-4 py-2.5 text-mid">{u.variant_count ?? 0}</td>
@@ -253,13 +287,6 @@ export default function AdminPage() {
                           {u.last_login_at ? timeAgo(u.last_login_at) : 'Never'}
                         </td>
                         <td className="px-4 py-2.5 text-lt whitespace-nowrap">{timeAgo(u.created_at)}</td>
-                        <td className="px-4 py-2.5">
-                          {u.id !== user?.id && u.is_active && (
-                            <Button size="sm" variant="danger" onClick={() => handleDeactivate(u.id)}>
-                              Deactivate
-                            </Button>
-                          )}
-                        </td>
                       </tr>
                     ))}
               </tbody>

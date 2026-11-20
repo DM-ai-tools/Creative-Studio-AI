@@ -205,6 +205,37 @@ async def update_user_role(
     return await _user_response(db, user)
 
 
+@router.put("/users/{user_id}/active")
+async def set_user_active(
+    user_id: UUID,
+    active: bool,
+    current_user=Depends(_require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Turn a user's access on or off. An inactive user cannot log in, and any session
+    they already have stops working on its next request (token checks require is_active)."""
+    if not active and user_id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate yourself")
+
+    query = select(User).where(User.id == user_id)
+    if not _is_platform_admin(current_user):
+        query = query.where(User.tenant_id == current_user.tenant_id)
+    result = await db.execute(query)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if not active and (user.email or "").strip().lower() == settings.ADMIN_EMAIL.strip().lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot deactivate the platform admin",
+        )
+
+    user.is_active = bool(active)
+    await db.flush()
+    return await _user_response(db, user)
+
+
 @router.delete("/users/{user_id}", status_code=204)
 async def deactivate_user(
     user_id: UUID,

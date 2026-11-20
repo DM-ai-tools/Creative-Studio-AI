@@ -24,6 +24,9 @@ import { defaultHeyGenSettings } from '@/components/brief/HeyGenVideoSettingsCar
 import { findVespriAvatar } from '@/lib/heygenAvatars'
 import { heygenSettingsForApi, heygenSettingsFromApi, type HeyGenVideoSettings } from '@/lib/heygenOptions'
 import { Spinner } from '@/components/ui/Loading'
+import UnderlineTabs from '@/components/ui/UnderlineTabs'
+import { motion, useReducedMotion } from 'framer-motion'
+import { IconCheck } from '@/components/ui/icons'
 import { useApi } from '@/hooks/useApi'
 import { useActiveBrand } from '@/hooks/useActiveBrand'
 import { useAuth } from '@/hooks/useAuth'
@@ -34,9 +37,16 @@ import { extractApiError } from '@/lib/apiErrors'
 import { getVariantPreviewUrls, isMotionVariantFormat } from '@/lib/variantMedia'
 import { videoPreviewAspectClass, videoModalObjectFit } from '@/lib/creativeFormats'
 import { getPipelineNodeStates } from '@/lib/briefPipeline'
+import { expectedImageSeconds, recordImageSeconds } from '@/lib/generationTiming'
 import { cn, formatDate, timeAgo } from '@/lib/utils'
 import type { Brief, BriefStatus, GenerationCatalog, PerformanceStatsContext, Variant } from '@/types'
-import type { ImageVariantSlot } from '@/lib/imageUseCases'
+import {
+  IMAGE_ASPECT_RATIO_OPTIONS,
+  LOGO_POSITION_OPTIONS,
+  normalizeLogoPosition,
+  type ImageVariantSlot,
+  type LogoPositionId,
+} from '@/lib/imageUseCases'
 
 function defaultSettingsFromBrief(
   brief: Brief,
@@ -75,19 +85,26 @@ function defaultSettingsFromBrief(
 }
 
 function PipelineNode({ label, state }: { label: string; state: 'done' | 'run' | 'pend' | 'fail' }) {
+  const reduce = useReducedMotion()
   const styles = {
-    done: 'bg-green-100 text-green-700 border-green-300',
-    run: 'bg-[rgba(0,194,168,0.15)] text-teal border-mint pulse-mint',
-    pend: 'bg-light text-lt border-border',
-    fail: 'bg-red-100 text-red-700 border-red-300',
+    done: 'bg-accent/15 text-[#3d5c22] border-accent/50',
+    run: 'bg-accent/10 text-charcoal border-accent animate-pulse-glow',
+    pend: 'bg-surface text-lt border-border',
+    fail: 'bg-red-50 text-red-700 border-red-300',
   }
   return (
-    <div
-      className={`px-3 py-2 rounded-lg text-xs font-semibold border text-center min-w-[100px] ${styles[state]}`}
+    <motion.div
+      // A fresh key per state, so a step pops when it finishes and when it starts running.
+      key={state}
+      initial={reduce ? false : { scale: state === 'done' ? 0.92 : 0.98, opacity: 0.7 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 22 }}
+      className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border text-center min-w-[100px] transition-colors duration-300 ${styles[state]}`}
     >
-      {state === 'run' && <Spinner size="sm" className="inline mr-1 -mt-0.5" />}
+      {state === 'run' && <Spinner size="sm" className="inline -mt-0.5" />}
+      {state === 'done' && <IconCheck className="h-3.5 w-3.5 text-[#5b8a2d]" />}
       {label}
-    </div>
+    </motion.div>
   )
 }
 
@@ -101,6 +118,10 @@ export default function BriefDetailPage() {
   const { setActiveBrandId } = useActiveBrand()
   const [isGenerating, setIsGenerating] = useState(false)
   const [showRegenerateModal, setShowRegenerateModal] = useState(false)
+  // Campaign settings that can still be changed when regenerating an image brief (saved on the brief).
+  const [regenLogo, setRegenLogo] = useState<LogoPositionId>('')
+  const [regenRatio, setRegenRatio] = useState('1:1')
+  const [regenReplace, setRegenReplace] = useState(true)
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null)
   const [genSettings, setGenSettings] = useState<BriefGenerationSettings | null>(null)
   const [heygenSettings, setHeygenSettings] = useState<HeyGenVideoSettings>(defaultHeyGenSettings())
@@ -324,6 +345,44 @@ export default function BriefDetailPage() {
     setImageVariantSlots(slotsFromBrief(brief))
   }, [brief, wantsImageOnlyBrief])
 
+  // Real timing for the % on generating tiles: remember how long an image actually takes.
+  const genStartedAtRef = useRef<number | null>(null)
+  const timingRecordedRef = useRef(false)
+  const prevReadyRef = useRef(0)
+  const [expectedSecs, setExpectedSecs] = useState(50)
+  const generationActive =
+    isGenerating ||
+    brief?.status === 'RUNNING' ||
+    (brief?.status === 'PARTIAL' && Number(brief?.completed_variants || 0) < Math.max(1, Number(brief?.variant_count) || 1))
+  useEffect(() => {
+    setExpectedSecs(expectedImageSeconds())
+  }, [])
+  useEffect(() => {
+    if (generationActive && genStartedAtRef.current == null) genStartedAtRef.current = Date.now()
+    if (!generationActive) {
+      genStartedAtRef.current = null
+      timingRecordedRef.current = false
+    }
+  }, [generationActive])
+  useEffect(() => {
+    const ready = (variants ?? []).filter((v) => v.status === 'READY' || v.status === 'APPROVED').length
+    if (ready > prevReadyRef.current && genStartedAtRef.current && !timingRecordedRef.current) {
+      // The first picture of this run is ready: that is how long one image really took.
+      recordImageSeconds((Date.now() - genStartedAtRef.current) / 1000)
+      timingRecordedRef.current = true
+      setExpectedSecs(expectedImageSeconds())
+    }
+    prevReadyRef.current = ready
+  }, [variants])
+
+  // Each time the regenerate window opens, show what is stored on the brief so changes start from it.
+  useEffect(() => {
+    if (!showRegenerateModal || !brief) return
+    const stored = (brief.key_benefits ?? {}) as Record<string, unknown>
+    setRegenLogo(normalizeLogoPosition(stored.image_logo_corner))
+    setRegenRatio(String(stored.image_aspect_ratio || '1:1'))
+  }, [showRegenerateModal, brief])
+
   const handleResetStuckGeneration = async () => {
     if (!window.confirm('Stop waiting and reset this brief so you can click Generate again?')) return
     try {
@@ -384,6 +443,15 @@ export default function BriefDetailPage() {
             : {}),
         }
       }
+      if (wantsImageOnly && showRegenerateModal) {
+        // The campaign settings chosen in the regenerate window are stored on the brief, so every image
+        // (and the next regenerate) follows them.
+        keyBenefitsToSave = {
+          ...(keyBenefitsToSave ?? kb),
+          image_logo_corner: regenLogo,
+          image_aspect_ratio: regenRatio,
+        }
+      }
       if (ocrStatsPerImage.length > 0 || statsImageUrls.length > 0) {
         keyBenefitsToSave = {
           ...(keyBenefitsToSave ?? kb),
@@ -397,6 +465,11 @@ export default function BriefDetailPage() {
       }
       if (keyBenefitsToSave) {
         await briefsApi.update(id, { key_benefits: keyBenefitsToSave })
+      }
+      if (wantsImageOnly && showRegenerateModal && regenReplace) {
+        // Start clean: the old pictures go, approved ones stay.
+        const old = (variants ?? []).filter((v) => v.status !== 'APPROVED')
+        await Promise.all(old.map((v) => variantsApi.delete(v.id).catch(() => undefined)))
       }
       const result = await briefsApi.generate(id, {
         formats: brief.formats,
@@ -419,9 +492,16 @@ export default function BriefDetailPage() {
             }
           : {}),
       })
+      // Say what is actually running. This used to claim "HeyGen can take 10–35 min" for every brief,
+      // including image-only ones that have nothing to do with HeyGen.
+      const startedMessage = isHeyGen
+        ? 'Generation started — HeyGen can take 10–35 min. Stay on this page; creatives appear when ready.'
+        : wantsVideoBrief
+          ? 'Generation started — videos can take several minutes. Stay on this page; creatives appear when ready.'
+          : 'Generation started — each image usually takes a minute or two. Stay on this page; creatives appear when ready.'
       toast.success(
         result.status === 'RUNNING' || result.variants_created === 0
-          ? 'Generation started — HeyGen can take 10–35 min. Stay on this page; creatives appear when ready.'
+          ? startedMessage
           : `${result.variants_created} creatives generated!`
       )
       setShowRegenerateModal(false)
@@ -662,34 +742,26 @@ export default function BriefDetailPage() {
 
         {/* ── Tab switcher ── */}
         {!cs25Only && (
-          <div className="flex gap-1 border-b border-border pb-0">
-            <button
-              type="button"
-              onClick={() => setActiveTab('brief')}
-              className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
-                activeTab === 'brief'
-                  ? 'border-accent text-navy bg-surface-elevated'
-                  : 'border-transparent text-mid hover:text-navy hover:border-border'
-              }`}
-            >
-              Project
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('creative_studio')}
-              className={`flex items-center gap-1.5 px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
-                activeTab === 'creative_studio'
-                  ? 'border-accent text-navy bg-surface-elevated'
-                  : 'border-transparent text-mid hover:text-navy hover:border-border'
-              }`}
-            >
-              <span className="text-[10px]">◆</span>
-              AI assistant
-              <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
-                NEW
-              </span>
-            </button>
-          </div>
+          <UnderlineTabs<'brief' | 'creative_studio'>
+            group="brief-tabs"
+            value={activeTab}
+            onChange={setActiveTab}
+            tabs={[
+              { id: 'brief', label: 'Project' },
+              {
+                id: 'creative_studio',
+                label: (
+                  <>
+                    <span className="text-[10px]">◆</span>
+                    AI assistant
+                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-accent/15 text-accent leading-none">
+                      NEW
+                    </span>
+                  </>
+                ),
+              },
+            ]}
+          />
         )}
 
         {/* ── Creative Studio tab panel ── */}
@@ -992,6 +1064,21 @@ export default function BriefDetailPage() {
             onRegenerateBatch={() => setShowRegenerateModal(true)}
             regeneratingId={retryingVariantId}
             onView={setSelectedVariant}
+            generatingStartedAt={genStartedAtRef.current ?? undefined}
+            expectedSeconds={expectedSecs}
+            pendingCount={
+              generationActive
+                ? Math.max(0, Math.max(1, Number(brief.variant_count) || 1) - (variants?.length ?? 0))
+                : 0
+            }
+            pendingAspect={
+              (brief.formats ?? []).includes('reel')
+                ? '9 / 16'
+                : (brief.formats ?? []).includes('video')
+                  ? '16 / 9'
+                  : String((brief.key_benefits as Record<string, unknown> | undefined)?.image_aspect_ratio || '1:1')
+                      .replace(':', ' / ')
+            }
           />
         </div>
         </>}
@@ -1000,7 +1087,7 @@ export default function BriefDetailPage() {
       <Modal
         isOpen={showRegenerateModal}
         onClose={() => !isGenerating && setShowRegenerateModal(false)}
-        title="Regenerate video"
+        title={wantsImageOnlyBrief ? 'Regenerate images' : 'Regenerate video'}
         size="lg"
         footer={
           <div className="flex gap-2 justify-end">
@@ -1019,10 +1106,64 @@ export default function BriefDetailPage() {
           </div>
         }
       >
-        <p className="text-sm text-mid mb-4">
-          Choose models and settings below, then generate. This adds new variants (existing ones stay).
-          Delete old variants first if you only want fresh creatives.
-        </p>
+        {wantsImageOnlyBrief ? (
+          <div className="mb-4 space-y-3 rounded-lg border border-border p-3">
+            <p className="text-sm text-mid">
+              Everything saved on this brief is used again. Change anything below (or the per-image details on the
+              page) and it is saved and applied to every new image.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-xs font-semibold text-mid">
+                Logo position
+                <select
+                  value={regenLogo}
+                  disabled={isGenerating}
+                  onChange={(e) => setRegenLogo(normalizeLogoPosition(e.target.value))}
+                  className="mt-1 w-full border border-border rounded px-2 py-1.5 text-sm bg-white"
+                >
+                  {LOGO_POSITION_OPTIONS.map((o) => (
+                    <option key={o.value || 'strip'} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs font-semibold text-mid">
+                Image shape
+                <select
+                  value={regenRatio}
+                  disabled={isGenerating}
+                  onChange={(e) => setRegenRatio(e.target.value)}
+                  className="mt-1 w-full border border-border rounded px-2 py-1.5 text-sm bg-white"
+                >
+                  {IMAGE_ASPECT_RATIO_OPTIONS.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.label} · {o.desc}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="flex items-start gap-2 text-sm text-mid">
+              <input
+                type="checkbox"
+                checked={regenReplace}
+                disabled={isGenerating}
+                onChange={(e) => setRegenReplace(e.target.checked)}
+                className="mt-1"
+              />
+              <span>
+                Replace the current images with the new ones (approved images are kept). Turn this off to add the new
+                images next to the old ones.
+              </span>
+            </label>
+          </div>
+        ) : (
+          <p className="text-sm text-mid mb-4">
+            Choose models and settings below, then generate. This adds new variants (existing ones stay).
+            Delete old variants first if you only want fresh creatives.
+          </p>
+        )}
         <BriefGenerationPanel
           catalog={catalog ?? undefined}
           formats={brief.formats ?? []}

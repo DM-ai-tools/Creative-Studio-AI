@@ -37,7 +37,10 @@ import {
   relatedOnImageLines,
   resizeImageVariantSlots,
   normalizeProductFocus,
+  promptAfterAiPlan,
+  copyAfterAiPlan,
   type ImageVariantSlot,
+  type LogoPositionId,
   type ProductFocusId,
 } from '@/lib/imageUseCases'
 import { IMAGE_VISUAL_STYLE_OPTIONS, type ImageVisualStyleId } from '@/lib/imageVisualStyles'
@@ -502,6 +505,12 @@ export default function BriefComposer(_props: BriefComposerProps) {
   const [imageCampaignHook, setImageCampaignHook] = useState('')
   const [imageCampaignHeadline, setImageCampaignHeadline] = useState('')
   const [imageProductFocus, setImageProductFocus] = useState<ProductFocusId | ''>('')
+  // Where the brand logo goes inside ad images ('' = the long-standing white strip on top).
+  const [imageLogoCorner, setImageLogoCorner] = useState<LogoPositionId>('')
+  // 'varied' = each ad image gets its own designed look and a short prompt (new briefs start here).
+  const [imageDesignVariety, setImageDesignVariety] = useState<'varied' | ''>('varied')
+  // 'exact' = the app fetches the Brand Kit fonts and draws the on-image text itself (new briefs start here).
+  const [imageTextMode, setImageTextMode] = useState<'exact' | ''>('exact')
   const [imageVisualStyle, setImageVisualStyle] = useState<ImageVisualStyleId>('')
   const [suggestingAngles, setSuggestingAngles] = useState(false)
   const [angleSuggestionReason, setAngleSuggestionReason] = useState<string | null>(null)
@@ -913,19 +922,17 @@ export default function BriefComposer(_props: BriefComposerProps) {
     const scrapedFonts = voiceRules.scraped_fonts as
       | { heading?: string; body?: string }
       | undefined
+    // What was saved on the Brand page (Brand Kit) comes first; a website scrape only fills the gaps.
+    // Before, the saved Brand Kit fonts were never read here, so the AI planner always got empty fonts.
+    const kitColors = (selectedBrandKit?.colors || {}) as { primary?: string; secondary?: string }
+    const kitFonts = (selectedBrandKit?.fonts || {}) as { heading?: string; body?: string }
     return {
-      primary_color: selectedBrand?.primary_color ?? websiteBrand?.primary_color ?? '',
-      secondary_color: selectedBrand?.secondary_color ?? websiteBrand?.secondary_color ?? '',
-      font_heading:
-        websiteBrand?.font_heading ??
-        scrapedFonts?.heading ??
-        '',
-      font_body:
-        websiteBrand?.font_body ??
-        scrapedFonts?.body ??
-        '',
+      primary_color: selectedBrand?.primary_color || kitColors.primary || websiteBrand?.primary_color || '',
+      secondary_color: selectedBrand?.secondary_color || kitColors.secondary || websiteBrand?.secondary_color || '',
+      font_heading: kitFonts.heading || websiteBrand?.font_heading || scrapedFonts?.heading || '',
+      font_body: kitFonts.body || websiteBrand?.font_body || scrapedFonts?.body || '',
     }
-  }, [selectedBrand, websiteBrand])
+  }, [selectedBrand, selectedBrandKit, websiteBrand])
 
   const handleSuggestAdAngles = async (silent = false) => {
     const campaignName = campaignLabel(watch('title') ?? '', watch('niche'))
@@ -1416,6 +1423,15 @@ export default function BriefComposer(_props: BriefComposerProps) {
           product_model: (v.product_name || '').trim() || undefined,
           product_focus: normalizeProductFocus(v.product_focus) || undefined,
           prompt: (v.prompt || '').trim(),
+          // The MD's note is a scene to build on, not a finished prompt: Generate AI expands it. (Fashion
+          // retail slots already carry a complete scene prompt and keep their old handling.)
+          // A designer brief is also expanded by "Generate AI", which must keep the brief's exact words.
+          prompt_source:
+            (v.prompt || '').trim() && !retailPromo && !photoOnly ? ('strategy' as const) : undefined,
+          brief_complete: v.prompt_complete && !retailPromo && !photoOnly ? true : undefined,
+          // Remember the MD's own copy so the AI cannot swap it for an invented angle.
+          strategy_hook: (v.hook || '').trim() || undefined,
+          strategy_message: (v.message || '').trim() || undefined,
           reasoning: (v.reasoning || '').trim(),
         }
       })
@@ -1432,7 +1448,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
         .map((f) => (f === 'carousel' ? 'Carousel' : 'Static'))
         .join(' + ')
       toast.success(
-        shells.length >= 8 && result.variants.length >= 8
+        result.creative_style === 'designer_brief'
+          ? `Strategy processed — ${shells.length} creatives read exactly as written (headline, visual direction, callouts, CTA). Check each prompt, then generate.`
+          : shells.length >= 8 && result.variants.length >= 8
           ? `Strategy processed — ${shells.length} posts from MD (Generate AI for all to write prompts).`
           : fashionRetailPromo && !fashionPhotoOnly
           ? `Strategy processed — ${shells.length} retail promo ads (1:1/9:16, angles + on-image copy). Click Generate AI for all.`
@@ -1733,8 +1751,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
       ad_angle: slot.ad_angle || src?.ad_angle || '',
       scene,
       prompt: scene,
-      client_hook: (src?.hook || slot.hook || '').trim(),
-      client_message: (src?.message || slot.message || '').trim(),
+      complete_brief: slot.brief_complete || undefined,
+      client_hook: (slot.strategy_hook || src?.hook || slot.hook || '').trim(),
+      client_message: (slot.strategy_message || src?.message || slot.message || '').trim(),
       post_type: (src?.post_type || '').trim() || undefined,
       design_notes: (src?.design_notes || '').trim() || undefined,
       product_model: (slot.product_model || src?.product_name || '').trim() || undefined,
@@ -1844,8 +1863,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
       if (plan.campaign_headline) setImageCampaignHeadline(plan.campaign_headline)
       if (plan.campaign_cta) setValue('cta', plan.campaign_cta, { shouldValidate: true })
       const generatedAt = new Date().toISOString()
-      const hook = variant.hook || slot.hook
-      const message = variant.message || slot.message
+      const { hook, message, fromStrategy } = copyAfterAiPlan(slot, variant)
       const derived = relatedOnImageLines(hook, message)
       const carouselCard = isCarouselSlot(slot, d.formats)
       const lastCarousel = isLastCarouselCard(slot, index, imageVariantSlots, d.formats)
@@ -1858,17 +1876,17 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
                 hook,
                 message,
+                // Strategy copy: the on-image lines come from the MD's own hook and message, not the AI's.
                 image_hook: photoOnly
                   ? ''
                   : s.image_hook.trim() ||
-                    (variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                    (!fromStrategy && variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
                       ? variant.image_hook
                       : derived.image_hook),
                 image_headline: photoOnly
                   ? ''
                   : s.image_headline.trim() ||
-                    (variant.image_headline &&
-                    !isIncompleteOnImageLine(variant.image_headline)
+                    (!fromStrategy && variant.image_headline && !isIncompleteOnImageLine(variant.image_headline)
                       ? variant.image_headline
                       : derived.image_headline),
                 cta: photoOnly
@@ -1879,7 +1897,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                       : ''
                     : s.cta || variant.cta || '',
                 offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
-                prompt: priorPrompt || variant.prompt || s.prompt,
+                ...promptAfterAiPlan(s, variant.prompt),
                 reasoning: variant.reasoning || '',
                 ad_angle: slot.ad_angle || variant.ad_angle || slotAngle || '',
                 product_model: s.product_model || '',
@@ -2011,9 +2029,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
             const variant = plan.variants[vi]
             if (!variant) return
             const s = next[slotIdx]
-            const priorPrompt = s.prompt.trim()
-            const hook = variant.hook || s.hook
-            const message = variant.message || s.message
+            const { hook, message, fromStrategy } = copyAfterAiPlan(s, variant)
             const derived = relatedOnImageLines(hook, message)
             const carouselCard = isCarouselSlot(s, d.formats)
             const lastCarousel = isLastCarouselCard(s, slotIdx, prev, d.formats)
@@ -2023,17 +2039,17 @@ export default function BriefComposer(_props: BriefComposerProps) {
               use_cases: variant.use_cases?.length ? variant.use_cases : s.use_cases,
               hook,
               message,
+              // Strategy copy: the on-image lines come from the MD's own hook and message, not the AI's.
               image_hook: photoOnly
                 ? ''
                 : s.image_hook.trim() ||
-                  (variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
+                  (!fromStrategy && variant.image_hook && !isIncompleteOnImageLine(variant.image_hook)
                     ? variant.image_hook
                     : derived.image_hook),
               image_headline: photoOnly
                 ? ''
                 : s.image_headline.trim() ||
-                  (variant.image_headline &&
-                  !isIncompleteOnImageLine(variant.image_headline)
+                  (!fromStrategy && variant.image_headline && !isIncompleteOnImageLine(variant.image_headline)
                     ? variant.image_headline
                     : derived.image_headline),
               cta: photoOnly
@@ -2044,7 +2060,7 @@ export default function BriefComposer(_props: BriefComposerProps) {
                     : ''
                   : s.cta || variant.cta || '',
               offer: carouselCard ? '' : variant.offer || imageCampaignOffer.trim() || s.offer,
-              prompt: priorPrompt || variant.prompt || s.prompt,
+              ...promptAfterAiPlan(s, variant.prompt),
               reasoning: variant.reasoning || '',
               ad_angle: s.ad_angle || variant.ad_angle || variantAngleAssignments[slotIdx] || '',
               generated_at: generatedAt,
@@ -2279,6 +2295,22 @@ export default function BriefComposer(_props: BriefComposerProps) {
         return
       }
 
+      // Slots that still hold only the short scene note from the MD file would be drawn from one line.
+      const unexpanded = mediaType === 'image'
+        ? imageVariantSlots.filter((s) => s.prompt_source === 'strategy' && !s.brief_complete && s.prompt.trim()).length
+        : 0
+      if (
+        unexpanded > 0 &&
+        typeof window !== 'undefined' &&
+        !window.confirm(
+          `${unexpanded} image variant${unexpanded === 1 ? ' still has' : 's still have'} only the short scene note from your MD file. ` +
+            'Press Cancel, then click "Generate AI for all" to expand them into full prompts built from your MD. ' +
+            'Press OK to generate anyway.',
+        )
+      ) {
+        return
+      }
+
       const briefTitle = campaignLabel(d.title ?? '', d.niche)
 
       const brief = await briefsApi.create({
@@ -2330,6 +2362,9 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 use_competitor_insights: useCompetitorInsights,
                 ...(imageProductFocus ? { product_focus: imageProductFocus } : {}),
                 ...(imageVisualStyle ? { image_visual_style: imageVisualStyle } : {}),
+                ...(imageLogoCorner ? { image_logo_corner: imageLogoCorner } : {}),
+                ...(imageDesignVariety ? { image_design_variety: imageDesignVariety } : {}),
+                ...(imageTextMode ? { image_text_mode: imageTextMode } : {}),
                 ...(imageCampaignHook.trim() ? { campaign_hook: imageCampaignHook.trim() } : {}),
                 ...(imageCampaignHeadline.trim()
                   ? { campaign_headline: imageCampaignHeadline.trim() }
@@ -2363,6 +2398,12 @@ export default function BriefComposer(_props: BriefComposerProps) {
                     : {}),
                   product_focus: s.product_focus || undefined,
                   product_model: s.product_model?.trim() || undefined,
+                  logo_corner: s.logo_corner || undefined,
+                  palette: s.palette?.length ? s.palette : undefined,
+                  palette_colors: s.palette_colors && Object.keys(s.palette_colors).length ? s.palette_colors : undefined,
+                  brief_complete: s.brief_complete || undefined,
+                  // A designer brief that was not expanded is generated exactly as written.
+                  prompt_source: (s.brief_complete && s.prompt_source === 'strategy' ? 'user' : s.prompt_source) || undefined,
                   generated_at: s.generated_at ?? undefined,
                 })),
                 ...(imageIcpText?.trim() ? { image_icp_text: imageIcpText.trim() } : {}),
@@ -3496,6 +3537,17 @@ export default function BriefComposer(_props: BriefComposerProps) {
                 catalogProducts={resolvedBrandFacts?.products ?? []}
                 productFocus={imageProductFocus}
                 onProductFocusChange={setImageProductFocus}
+                logoCorner={imageLogoCorner}
+                onLogoCornerChange={setImageLogoCorner}
+                brandColors={{
+                  primary: selectedBrand?.primary_color || (selectedBrandKit?.colors as { primary?: string } | undefined)?.primary || websiteBrand?.primary_color || undefined,
+                  secondary: selectedBrand?.secondary_color || (selectedBrandKit?.colors as { secondary?: string } | undefined)?.secondary || websiteBrand?.secondary_color || undefined,
+                  tertiary: (selectedBrandKit?.colors as { tertiary?: string } | undefined)?.tertiary || undefined,
+                }}
+                designVariety={imageDesignVariety}
+                onDesignVarietyChange={setImageDesignVariety}
+                textMode={imageTextMode}
+                onTextModeChange={setImageTextMode}
                 promptLlmModel={genSettings.promptLlmModel}
                 onPromptLlmModelChange={(value) =>
                   setGenSettings((prev) => ({ ...prev, promptLlmModel: value }))

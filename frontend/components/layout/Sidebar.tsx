@@ -21,6 +21,9 @@ import {
   IconHistory,
   IconUsage,
   IconMail,
+  IconProjects,
+  IconLibrary,
+  IconEditor,
 } from '@/components/ui/icons'
 
 interface NavItem {
@@ -32,10 +35,10 @@ interface NavItem {
 const workspaceNav: NavItem[] = [
   { href: '/dashboard', icon: <IconDashboard />, label: 'Dashboard' },
   { href: '/brand-kit', icon: <IconPalette />, label: 'Brand Kit' },
-  { href: '/briefs', icon: <IconFileText />, label: UI.projects },
+  { href: '/briefs', icon: <IconProjects />, label: UI.projects },
   { href: '/email-templates', icon: <IconMail />, label: 'Email Templates' },
-  { href: '/variants', icon: <IconFilm />, label: UI.creativeLibrary },
-  { href: '/editor', icon: <IconFilm />, label: 'Video Editor' },
+  { href: '/variants', icon: <IconLibrary />, label: UI.creativeLibrary },
+  { href: '/editor', icon: <IconEditor />, label: 'Video Editor' },
   { href: '/history', icon: <IconHistory />, label: UI.generationHistory },
   { href: '/brand-safety', icon: <IconShield />, label: UI.brandContentChecks },
 ]
@@ -89,7 +92,15 @@ function NavGroup({
               {active && !collapsed && (
                 <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 rounded-full bg-accent" />
               )}
-              <span className={cn('shrink-0', active ? 'text-accent' : 'text-white/40 group-hover:text-white/70')}>
+              <span
+                className={cn(
+                  'flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-all duration-300 ease-spring',
+                  'group-hover:scale-110 group-hover:-rotate-6 motion-reduce:transition-none motion-reduce:group-hover:transform-none',
+                  active
+                    ? 'bg-gradient-to-br from-[#bfe589] to-[#7fae48] text-[#17210c] shadow-[0_4px_12px_rgba(127,174,72,0.4)]'
+                    : 'bg-white/[0.06] text-white/55 group-hover:bg-white/[0.12] group-hover:text-white'
+                )}
+              >
                 {item.icon}
               </span>
               {!collapsed && <span className="truncate">{item.label}</span>}

@@ -14,7 +14,10 @@ class PerformanceService:
     async def get_dashboard_stats(db: AsyncSession, tenant_id: UUID) -> DashboardStats:
         active_result = await db.execute(
             select(func.count()).where(
-                Variant.tenant_id == tenant_id, Variant.status == "ACTIVE"
+                Variant.tenant_id == tenant_id,
+                # "ACTIVE" is not a status a creative can have, so this always read 0. A creative is usable
+                # once it is ready, approved or exported (not pending, generating, failed or rejected).
+                Variant.status.in_(("READY", "APPROVED", "EXPORTED")),
             )
         )
         active_variants = active_result.scalar() or 0

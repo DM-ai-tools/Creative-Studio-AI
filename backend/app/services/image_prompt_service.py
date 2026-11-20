@@ -270,8 +270,8 @@ ON-IMAGE TEXT (critical):
   Headline in elegant serif Title Case or sentence case — NEVER ALL CAPS.
   Supporting line in thin tracked sans-serif sentence case; romantic/engagement line in flowing gold script.
   Place gold type on a dark third of the frame.
-  BRAND NAME: use ONLY the BRAND field letter-for-letter (e.g. Adoria Jewellery). Never invent
-  Lusso, Shop Dimad, She Diamond, Shop Diamonds-as-a-store, Tiffany, or any other jeweller name.
+  BRAND NAME: use ONLY the BRAND field letter-for-letter. Never invent or copy another jeweller's name,
+  and never use a website category label as the store name.
   The Brand Kit logo is composited in post — do not draw a fake wordmark.
 - JEWELLERY PRODUCT HERO: name the specific piece and make it the main subject (macro/tight close-up,
   ~40–70% of frame, sharp gem/metal). People and boutique/lifestyle may remain as softer supporting

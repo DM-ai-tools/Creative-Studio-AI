@@ -1,4 +1,21 @@
-/** Creative Studio multi-chat history (ChatGPT-style) — localStorage memory. */
+/**
+ * Creative Studio multi-chat history (ChatGPT-style).
+ *
+ * Every chat is saved on the server and kept until the user deletes it (see csChatHistorySync.ts).
+ * localStorage is a fast cache in front of that, so the browser's ~5 MB limit can no longer lose chats.
+ */
+import type { CsServerChat } from './csChatHistorySync'
+import {
+  fetchServerChats,
+  forgetConfirmedOnServer,
+  isConfirmedOnServer,
+  markConfirmedOnServer,
+  queueServerDelete,
+  queueServerSave,
+  retryPendingDeletes,
+  saveChatToServerNow,
+  serverLooksHealthy,
+} from './csChatHistorySync'
 
 export type CsPipelineAction =
   | 'continue'
@@ -475,6 +492,12 @@ export function persistCsChatSession(scope: CsHistoryScope, session: CsChatSessi
   const storeScope = sessionStorageScope(scope, session)
   const bucket = parseStoredSessions(localStorage.getItem(csHistoryStoreKey(storeScope)))
   saveCsChatSessions(storeScope, upsertCsChatSession(storeScope, session, bucket))
+  // Also keep it on the server (sent a moment later, so rapid edits go as one save).
+  queueServerSave(
+    scope.userId,
+    { ...session, updatedAt: Number(session.updatedAt) || Date.now() },
+    { brandId: storeScope.brandId, briefId: storeScope.briefId },
+  )
 }
 
 export function removeCsChatSession(scope: CsHistoryScope, session: CsChatSession) {
@@ -485,6 +508,8 @@ export function removeCsChatSession(scope: CsHistoryScope, session: CsChatSessio
     storeScope,
     bucket.filter((s) => s.id !== session.id),
   )
+  // The user deleted this chat on purpose, so it goes from the server too. Nothing else ever deletes.
+  void queueServerDelete(scope.userId, session.id)
 }
 
 export function findWorkspaceActiveChatId(scope: CsHistoryScope): string | null {
@@ -565,16 +590,132 @@ export function loadCsChatSessions(scope: CsHistoryScope): CsChatSession[] {
 
 export function saveCsChatSessions(scope: CsHistoryScope, sessions: CsChatSession[]) {
   if (!scope.userId || scope.userId === 'anonymous') return
+  const complete = sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
+  const key = csHistoryStoreKey(scope)
   try {
-    const complete = sessions.slice().sort((a, b) => b.updatedAt - a.updatedAt)
-    localStorage.setItem(csHistoryStoreKey(scope), JSON.stringify(complete))
+    localStorage.setItem(key, JSON.stringify(complete))
+    return
   } catch {
-    // Usually the browser storage quota. Chats live only in this browser, so a
-    // silent failure here means new chats disappear on the next reload.
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent(CS_CHAT_SAVE_FAILED_EVENT))
+    /* the browser's storage is full: make room below instead of losing the chat */
+  }
+
+  // The server holds the chats, so the browser only needs a cache. Drop the OLDEST chats that the
+  // server is confirmed to have, as few as it takes to fit. Anything the server does not have yet is
+  // never dropped, and the newest chat is always kept.
+  const candidates: number[] = []
+  for (let i = complete.length - 1; i >= 1; i--) {
+    if (isConfirmedOnServer(scope.userId, complete[i])) candidates.push(i) // oldest first
+  }
+  const tryDropping = (count: number): boolean => {
+    const drop = new Set(candidates.slice(0, count))
+    try {
+      localStorage.setItem(key, JSON.stringify(complete.filter((_, index) => !drop.has(index))))
+      return true
+    } catch {
+      return false
     }
   }
+  if (candidates.length && tryDropping(candidates.length)) {
+    let low = 1
+    let high = candidates.length
+    while (low < high) {
+      const mid = (low + high) >> 1
+      if (tryDropping(mid)) high = mid
+      else low = mid + 1
+    }
+    tryDropping(low) // write the smallest set that fits
+    return
+  }
+
+  // Still no room, even after trimming everything the server has. The chat is queued for the server,
+  // so only warn if the server cannot be reached either.
+  if (!serverLooksHealthy() && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(CS_CHAT_SAVE_FAILED_EVENT))
+  }
+}
+
+function bucketOf(scope: CsHistoryScope) {
+  return { brandId: scope.brandId, briefId: scope.briefId }
+}
+
+function bucketKeyOf(scope: { brandId?: string; briefId?: string }): string {
+  if (scope.brandId) return `brand:${scope.brandId}`
+  if (scope.briefId) return `brief:${scope.briefId}`
+  return 'draft'
+}
+
+/** Every chat in this browser, across all brand/brief/draft lists, with the list it belongs to. */
+function allLocalChats(scope: CsHistoryScope): { session: CsChatSession; bucket: ReturnType<typeof bucketOf> }[] {
+  const out: { session: CsChatSession; bucket: ReturnType<typeof bucketOf> }[] = []
+  for (const key of listV4HistoryStoreKeys(scope)) {
+    const bucket = bucketOf(scopeFromV4StoreKey(key, scope))
+    try {
+      for (const session of parseStoredSessions(localStorage.getItem(key))) out.push({ session, bucket })
+    } catch {
+      /* a damaged list is skipped; the server copy still covers it */
+    }
+  }
+  return out
+}
+
+/**
+ * Bring this browser and the server into line. Call once after the chat list has loaded.
+ *
+ * - Returns the chats for this list as the server knows them, merged with the browser's: a chat is
+ *   taken from the server when it is missing here or newer there. Never deletes anything.
+ * - In the background, sends the server every chat it does not have yet. This is what moves chats that
+ *   so far lived only in the browser (for example an old 60-chat history) onto the server.
+ * Resolves to null when the server cannot be reached; the browser copy keeps working as before.
+ */
+export async function syncCsChatHistoryWithServer(scope: CsHistoryScope): Promise<CsChatSession[] | null> {
+  if (!scope.userId || scope.userId === 'anonymous') return null
+  let server: CsServerChat[]
+  let deleted: Set<string>
+  try {
+    deleted = await retryPendingDeletes(scope.userId) // finish any delete that did not reach the server
+    server = await fetchServerChats(bucketKeyOf(scope))
+  } catch {
+    return null
+  }
+  const local = new Map(loadCsChatSessions(scope).map((s) => [s.id, s]))
+  const merged = new Map(local)
+  const onServer = new Set<string>()
+  // The server's list is the truth for this list. A chat it does not have must not stay flagged as
+  // "safe on the server", or a full browser could trim the only copy. It is re-sent below.
+  const serverIds = new Set(server.map((item) => item.session.id))
+  Array.from(local.keys()).forEach((id) => {
+    if (!serverIds.has(id)) forgetConfirmedOnServer(scope.userId, id)
+  })
+  for (const item of server) {
+    const id = item.session.id
+    if (deleted.has(id)) continue // the user deleted it and the server has not caught up yet
+    onServer.add(id)
+    markConfirmedOnServer(scope.userId, id, Number(item.session.updatedAt) || 0)
+    const mine = local.get(id)
+    if (!mine || Number(item.session.updatedAt) > Number(mine.updatedAt)) {
+      merged.set(id, { ...item.session, historyBrandId: item.bucket.brandId, historyBriefId: item.bucket.briefId })
+    }
+  }
+  const list = Array.from(merged.values()).sort((a, b) => b.updatedAt - a.updatedAt)
+  saveCsChatSessions(scope, list) // best effort; trims safely if the browser is full
+
+  // Background: send the server whatever it is missing (newest first, one at a time).
+  const serverUpdatedAt = new Map(server.map((item) => [item.session.id, Number(item.session.updatedAt) || 0]))
+  const thisList = bucketKeyOf(scope)
+  void (async () => {
+    const toSend = allLocalChats(scope)
+      .filter(({ session, bucket }) => {
+        if (deleted.has(session.id)) return false
+        const onServerAt = serverUpdatedAt.get(session.id)
+        if (onServerAt !== undefined) return Number(session.updatedAt) > onServerAt // server has an older copy
+        // Not on the server. For the list we just asked about, that is certain; for other lists we
+        // only know what an earlier save confirmed.
+        return bucketKeyOf(bucket) === thisList || !isConfirmedOnServer(scope.userId, session)
+      })
+      .sort((a, b) => b.session.updatedAt - a.session.updatedAt)
+    for (const { session, bucket } of toSend) await saveChatToServerNow(scope.userId, session, bucket)
+  })()
+  return list
 }
 
 /** Fired on window when chat history could not be written to browser storage. */

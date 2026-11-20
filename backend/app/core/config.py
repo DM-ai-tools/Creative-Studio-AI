@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL_IMAGE: str = "google/gemini-3.1-flash-image-preview"
     OPENROUTER_MODEL_VIDEO: str = "google/veo-3.1"
 
+    # Names of THIS platform's own brands (comma separated). If one of them appears in an ad prompt for a
+    # client's brand it is replaced by the client's name, so the platform never leaks onto a client's ad.
+    # It lives here, not in the code, so it can be changed per deployment.
+    PLATFORM_BRAND_NAMES: str = "Traffic Radius,ClickTrends,Click Trends,Creative Studio AI"
+
     # Runway ML — image + video (Veo) generation
     RUNWAYML_API_KEY: str = ""
     RUNWAYML_BASE_URL: str = "https://api.dev.runwayml.com/v1"

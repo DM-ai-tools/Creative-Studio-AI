@@ -21,11 +21,16 @@ import {
   isCarouselSlot,
   isLastCarouselCard,
   labelForUseCase,
+  LOGO_POSITION_OPTIONS,
   MAX_VARIANT_REFERENCE_IMAGES,
+  normalizeLogoPosition,
   normalizeProductFocus,
+  PALETTE_ROLES,
   productFocusSlotHint,
   variantReferenceImages,
   type ImageVariantSlot,
+  type LogoPositionId,
+  type PaletteRole,
   type ProductFocusId,
   type VariantReferenceImage,
 } from '@/lib/imageUseCases'
@@ -55,6 +60,17 @@ type Props = {
   /** Campaign-level shot style — applies to every variant when generating. */
   productFocus?: ProductFocusId | ''
   onProductFocusChange?: (value: ProductFocusId | '') => void
+  /** Campaign-level logo position inside the image ('' = the white strip on top, as before). */
+  logoCorner?: LogoPositionId
+  onLogoCornerChange?: (value: LogoPositionId) => void
+  /** The brand's colours (set on the Brand page). Each variant can use all of them or only some. */
+  brandColors?: { primary?: string; secondary?: string; tertiary?: string }
+  /** 'varied' = every image gets its own designed look and a short prompt; '' = the same style for all (as before). */
+  designVariety?: 'varied' | ''
+  onDesignVarietyChange?: (value: 'varied' | '') => void
+  /** 'exact' = the app fetches the Brand Kit fonts and draws the text itself; '' = the image model draws it. */
+  textMode?: 'exact' | ''
+  onTextModeChange?: (value: 'exact' | '') => void
   /** OpenRouter LLM for variant prompt generation. */
   promptLlmModel?: string
   onPromptLlmModelChange?: (value: string) => void
@@ -98,6 +114,13 @@ export default function ImageVariantSlotsPanel({
   catalogProducts = [],
   productFocus = '',
   onProductFocusChange,
+  logoCorner = '',
+  onLogoCornerChange,
+  brandColors,
+  designVariety = '',
+  onDesignVarietyChange,
+  textMode = '',
+  onTextModeChange,
   promptLlmModel = '',
   onPromptLlmModelChange,
   promptLlmOptions = [],
@@ -235,12 +258,13 @@ export default function ImageVariantSlotsPanel({
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 space-y-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="min-w-0 flex-1">
+        {/* Text on top, controls below at full width: six controls do not fit beside the text. */}
+        <div className="flex flex-col gap-4">
+          <div className="min-w-0 w-full">
             <p className="text-sm font-bold text-sky-900">
               {slots.length} image variant{slots.length !== 1 ? 's' : ''}
             </p>
-            <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-xl">
+            <p className="text-[11px] text-sky-800 mt-0.5 leading-relaxed max-w-3xl">
               Slots stay empty until you click <strong>Generate AI for all</strong>. Static ads get
               hook + on-image CTA. Carousel cards are visual + short headline; the campaign CTA
               burns on the last card of each creative. Change <strong>Number of creatives</strong> in step 1
@@ -248,8 +272,8 @@ export default function ImageVariantSlotsPanel({
             </p>
           </div>
 
-          <div className="w-full lg:w-auto lg:min-w-[min(100%,42rem)]">
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_auto_auto] gap-x-3 gap-y-3 xl:items-end">
+          <div className="w-full min-w-0">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-[repeat(5,minmax(0,1fr))_auto_auto] gap-x-3 gap-y-3 2xl:items-end">
               <div className="flex flex-col gap-1 min-w-0">
                 <label
                   htmlFor="variant-shot-style"
@@ -270,6 +294,66 @@ export default function ImageVariantSlotsPanel({
                       {opt.label}
                     </option>
                   ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 min-w-0">
+                <label
+                  htmlFor="variant-logo-position"
+                  className="text-[9px] font-bold uppercase tracking-widest text-navy leading-none min-h-[11px]"
+                >
+                  Logo position (on the image)
+                </label>
+                <select
+                  id="variant-logo-position"
+                  value={logoCorner}
+                  onChange={(e) => onLogoCornerChange?.(normalizeLogoPosition(e.target.value))}
+                  disabled={Boolean(generatingAll) || generatingIndex != null}
+                  className="h-9 w-full rounded-lg border border-sky-400 bg-white px-2.5 text-xs font-semibold text-charcoal disabled:opacity-60"
+                >
+                  {LOGO_POSITION_OPTIONS.map((opt) => (
+                    <option key={opt.value || 'strip'} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 min-w-0">
+                <label
+                  htmlFor="variant-design-variety"
+                  className="text-[9px] font-bold uppercase tracking-widest text-navy leading-none min-h-[11px]"
+                >
+                  Design variety
+                </label>
+                <select
+                  id="variant-design-variety"
+                  value={designVariety}
+                  onChange={(e) => onDesignVarietyChange?.(e.target.value === 'varied' ? 'varied' : '')}
+                  disabled={Boolean(generatingAll) || generatingIndex != null}
+                  className="h-9 w-full rounded-lg border border-sky-400 bg-white px-2.5 text-xs font-semibold text-charcoal disabled:opacity-60"
+                >
+                  <option value="varied">Varied — own design per image</option>
+                  <option value="">Same style for all (current)</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1 min-w-0">
+                <label
+                  htmlFor="variant-text-mode"
+                  className="text-[9px] font-bold uppercase tracking-widest text-navy leading-none min-h-[11px]"
+                >
+                  Text &amp; fonts
+                </label>
+                <select
+                  id="variant-text-mode"
+                  value={textMode}
+                  onChange={(e) => onTextModeChange?.(e.target.value === 'exact' ? 'exact' : '')}
+                  disabled={Boolean(generatingAll) || generatingIndex != null}
+                  className="h-9 w-full rounded-lg border border-sky-400 bg-white px-2.5 text-xs font-semibold text-charcoal disabled:opacity-60"
+                >
+                  <option value="exact">Exact — your Brand Kit fonts</option>
+                  <option value="">AI draws the text (approximate)</option>
                 </select>
               </div>
 
@@ -356,6 +440,33 @@ export default function ImageVariantSlotsPanel({
           Auto — AI picks shot style per variant. Choose a prompt LLM above (default: Claude Sonnet).
         </p>
       )}
+
+      {textMode === 'exact' ? (
+        <p className="text-[10px] text-mid -mt-2">
+          Text &amp; fonts: the image is made without any writing, then the app draws the hook, headline and CTA
+          itself in the fonts and colours saved on the Brand page, so the spelling and the font are exactly yours.
+          If a font can&apos;t be fetched (it must be a Google font), that image falls back to the AI drawing the text
+          and says so. Needs a scene from the MD, the AI or a short typed prompt; a long complete prompt you pasted
+          keeps its own text.
+        </p>
+      ) : null}
+      {designVariety === 'varied' ? (
+        <p className="text-[10px] text-mid -mt-2">
+          Design variety: every image gets its own designed look (medium, type treatment, composition) and a short
+          prompt, so a batch is not all the same dark lower-third with a CTA pill. The scene comes from your strategy
+          file when you use one, otherwise from the prompt-writing AI. A prompt you write yourself is used as written.
+          Needs the on-image style and visual style left on Auto.
+        </p>
+      ) : null}
+      <p className="text-[10px] text-mid -mt-2">
+        {logoCorner === ''
+          ? 'Logo: placed in a slim white strip across the top of each image (the existing look). Pick a corner or Auto to put it inside the image instead.'
+          : logoCorner === 'none'
+            ? 'Logo: not added to the images. The model is also told never to draw a logo or the brand name.'
+            : logoCorner === 'auto'
+              ? 'Logo: the real logo goes in the cleanest corner of each finished image, away from the text, in the light or dark version that suits it. A corner named in a variant’s prompt (for example “logo bottom right”) is used when it is clear.'
+              : 'Logo: the real logo goes in the chosen corner, in the light or dark version that suits the image, and the model keeps that corner free of text. The model is never allowed to draw a logo or the brand name. Reels and videos get their logo on the finished video instead.'}
+      </p>
 
       <div className="rounded-xl border border-border bg-white px-4 py-3 space-y-3">
         {hasCarousel ? (
@@ -695,6 +806,124 @@ export default function ImageVariantSlotsPanel({
               })()}
             </div>
 
+            {/* Per-slot logo position — overrides the campaign setting for this variant */}
+            <div>
+              <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1">
+                Logo position (this variant)
+              </label>
+              <select
+                value={slot.logo_corner || ''}
+                onChange={(e) => updateSlot(index, { logo_corner: normalizeLogoPosition(e.target.value) })}
+                className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm text-charcoal"
+              >
+                <option value="">
+                  Same as campaign (
+                  {LOGO_POSITION_OPTIONS.find((o) => o.value === logoCorner)?.label ?? 'White strip on top (current)'})
+                </option>
+                {LOGO_POSITION_OPTIONS.filter((o) => o.value !== '').map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* The colours this variant uses: up to three, each editable, each can be left out */}
+            {(() => {
+              const isHex = (v?: string) => /^#?[0-9a-f]{3}([0-9a-f]{3})?$/i.test((v || '').trim())
+              const withHash = (v?: string) => ((v || '').trim().startsWith('#') ? (v || '').trim() : `#${(v || '').trim()}`)
+              const brandOf = (id: PaletteRole) => (isHex(brandColors?.[id]) ? withHash(brandColors?.[id]) : '')
+              const typedOf = (id: PaletteRole) => slot.palette_colors?.[id]
+              const effective = (id: PaletteRole) => (isHex(typedOf(id)) ? withHash(typedOf(id)) : brandOf(id))
+              const available = PALETTE_ROLES.filter((r) => effective(r.id))
+              const picked = slot.palette?.length ? slot.palette.filter((id) => available.some((a) => a.id === id)) : []
+              const active = picked.length ? picked : available.map((a) => a.id)
+              const setColor = (id: PaletteRole, raw: string) => {
+                const next = { ...(slot.palette_colors ?? {}) }
+                const value = raw.trim()
+                if (!value || value.toLowerCase() === brandOf(id).toLowerCase()) delete next[id]
+                else next[id] = value
+                updateSlot(index, { palette_colors: Object.keys(next).length ? next : undefined })
+              }
+              const toggle = (id: PaletteRole) => {
+                const next = active.includes(id) ? active.filter((x) => x !== id) : [...active, id]
+                if (next.length === 0) return // at least one colour stays selected
+                updateSlot(index, { palette: next.length === available.length ? undefined : next })
+              }
+              return (
+                <div>
+                  <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1">
+                    Colours (this variant)
+                  </label>
+                  <div className="space-y-2">
+                    {PALETTE_ROLES.map((r) => {
+                      const colour = effective(r.id)
+                      const on = Boolean(colour) && active.includes(r.id)
+                      const changed = typedOf(r.id) !== undefined
+                      return (
+                        <div
+                          key={r.id}
+                          className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 transition ${
+                            on ? 'border-navy bg-white' : 'border-border bg-surface'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            disabled={!colour}
+                            onChange={() => toggle(r.id)}
+                            className="h-4 w-4 shrink-0 accent-[#8BB85A]"
+                            aria-label={`Use ${r.label} in this image`}
+                          />
+                          <label
+                            className="relative h-8 w-8 shrink-0 cursor-pointer overflow-hidden rounded-md border border-black/10"
+                            style={{ background: colour || '#e5e7eb' }}
+                            title="Click to pick a colour"
+                          >
+                            {!colour && (
+                              <span className="absolute inset-0 flex items-center justify-center text-base text-mid">+</span>
+                            )}
+                            <input
+                              type="color"
+                              value={colour || '#cccccc'}
+                              onChange={(e) => setColor(r.id, e.target.value)}
+                              className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                              aria-label={`${r.label} colour picker`}
+                            />
+                          </label>
+                          <span className="w-14 shrink-0 text-[11px] font-semibold text-charcoal">{r.label}</span>
+                          <input
+                            type="text"
+                            value={typedOf(r.id) ?? brandOf(r.id)}
+                            onChange={(e) => setColor(r.id, e.target.value)}
+                            placeholder="#RRGGBB"
+                            spellCheck={false}
+                            maxLength={9}
+                            className="min-w-0 flex-1 rounded-md border border-border bg-white px-2 py-1 font-mono text-xs uppercase text-charcoal focus:border-accent focus:outline-none"
+                          />
+                          {changed && (
+                            <button
+                              type="button"
+                              onClick={() => setColor(r.id, '')}
+                              className="shrink-0 text-[10px] font-semibold text-mid hover:text-charcoal"
+                              title="Back to the Brand page colour"
+                            >
+                              Reset
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <p className="mt-1 text-[10px] text-mid">
+                    {available.length === 0
+                      ? 'No brand colours were found for this brand. Save them on the Brand page, or type colour codes here.'
+                      : `Using ${active.length} of ${available.length} colour${available.length === 1 ? '' : 's'}. Tick to use, untick to leave one out, or type any colour code to change it for this image only.`}
+                  </p>
+                </div>
+              )
+            })()}
+
             <div>
               <label className="block text-[10px] font-bold text-navy uppercase tracking-wide mb-1">
                 Ratio (this variant)
@@ -949,7 +1178,7 @@ export default function ImageVariantSlotsPanel({
                   <button
                     type="button"
                     onClick={() =>
-                      updateSlot(index, { prompt: '', reasoning: '', generated_at: null })
+                      updateSlot(index, { prompt: '', reasoning: '', generated_at: null, prompt_source: undefined })
                     }
                     className="text-[11px] text-mid underline hover:text-charcoal"
                   >
@@ -960,7 +1189,7 @@ export default function ImageVariantSlotsPanel({
               <textarea
                 rows={10}
                 value={slot.prompt}
-                onChange={(e) => updateSlot(index, { prompt: e.target.value })}
+                onChange={(e) => updateSlot(index, { prompt: e.target.value, prompt_source: 'user' })}
                 placeholder="Describe the unique scene for this variant — lighting, subject, layout, and how the hook/message appear on the image…"
                 className={`w-full min-h-[220px] rounded-xl border-2 px-4 py-3 text-sm text-charcoal placeholder:text-mid/50 focus:outline-none focus:ring-2 resize-y leading-relaxed transition-colors ${
                   slot.prompt
@@ -968,6 +1197,12 @@ export default function ImageVariantSlotsPanel({
                     : 'border-border bg-white focus:border-accent focus:ring-accent/20'
                 }`}
               />
+              {slot.prompt_source === 'strategy' && slot.prompt.trim() ? (
+                <p className="mt-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                  This is only the short scene note from your MD file. Click <strong>Generate AI</strong> to expand
+                  it into a full prompt built from that scene; the hook and copy from your MD are kept as they are.
+                </p>
+              ) : null}
               {slot.reasoning ? (
                 <p className="mt-1.5 text-[11px] text-violet-700 italic bg-violet-50/60 rounded-lg px-3 py-2">
                   &ldquo;{slot.reasoning}&rdquo;

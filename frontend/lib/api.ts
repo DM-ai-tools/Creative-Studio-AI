@@ -6,7 +6,7 @@ import type {
   StatsImageExtractionResult, StrategyPreviewResult, ReferenceImageAnalysisResult,
   WebsiteScriptResult, Brand, BrandKit, Brief, DashboardStats, FatigueAlert,
   GenerationCatalog, GenerationModelOption, MetaExportResponse, MetaStatus, PerformanceMetric, TokenResponse,
-  TopPerformer, User, Variant, EmailTemplate,
+  TopPerformer, User, Variant, EmailTemplate, CreativeStudioScriptPlan, CreativeStudioEndCardResult, CreativeStudioStillResult, CreativeStudioStillLogoResult, CreativeStudioInsertsResult,
 } from '@/types'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1'
@@ -345,6 +345,10 @@ export const variantsApi = {
     api
       .post<Variant>(`/variants/${id}/regenerate-image`, data ?? {}, { timeout: 30_000 })
       .then((r) => r.data),
+
+  /** Put the Brand Kit logo on a finished still exactly at `corner` (no AI, no credits). */
+  placeLogo: (id: string, corner: string, backing: '' | 'over' | 'plate' | 'bar' = '') =>
+    api.post<Variant>(`/variants/${id}/place-logo`, { corner, backing }, { timeout: 60_000 }).then((r) => r.data),
 
   delete: (id: string) => api.delete(`/variants/${id}`),
 
@@ -983,6 +987,37 @@ export const generationApi = {
       .then((r) => r.data)
   },
 
+  /** Script mode: read a Word/text script and compile the timed prompt Creative Studio already uses. */
+  creativeStudioScriptPlan: (args: {
+    file?: File | null
+    scriptText?: string
+    chatModel?: string
+    videoModel?: string
+    aspect?: string
+    speechMode?: string
+    brandId?: string
+    brandName?: string
+    productName?: string
+    notes?: string
+  }) => {
+    const form = new FormData()
+    if (args.file) form.append('file', args.file)
+    form.append('script_text', args.scriptText || '')
+    form.append('chat_model', args.chatModel || 'auto')
+    form.append('video_model', args.videoModel || '')
+    form.append('aspect', args.aspect || '9/16')
+    form.append('speech_mode', args.speechMode || 'native_presenter')
+    form.append('brand_id', args.brandId || '')
+    form.append('brand_name', args.brandName || '')
+    form.append('product_name', args.productName || '')
+    form.append('notes', args.notes || '')
+    return api
+      .post<CreativeStudioScriptPlan>('/generation/creative-studio/script/plan', form, {
+        timeout: 240_000,
+      })
+      .then((r) => r.data)
+  },
+
   creativeStudioChat: (data: {
     messages: { role: 'user' | 'assistant'; content: string }[]
     mode?: 'auto' | 'ask' | 'generate'
@@ -1099,6 +1134,57 @@ export const generationApi = {
       }>('/generation/creative-studio/finish-video', data, { timeout: 600_000 })
       .then((r) => r.data),
 
+  /** Draw one still (a screen, page or graphic) with GPT Image 2 or Seedream. Uses one image generation. */
+  creativeStudioStill: (data: {
+    prompt: string
+    model: string
+    aspect?: string
+    brand_id?: string
+    brand_name?: string
+    /** Corner kept empty in the picture for the logo. Empty or omitted = no logo. */
+    logo_corner?: string
+  }) =>
+    api
+      .post<CreativeStudioStillResult>('/generation/creative-studio/still', data, { timeout: 300_000 })
+      .then((r) => r.data),
+
+  /** Place the brand logo inside a drawn picture, in a chosen corner (no AI, no credits). */
+  creativeStudioStillLogo: (data: {
+    image_url: string
+    corner: string
+    logo_url?: string | null
+    logo_on_light_url?: string | null
+  }) =>
+    api
+      .post<CreativeStudioStillLogoResult>('/generation/creative-studio/still-logo', data, { timeout: 60_000 })
+      .then((r) => r.data),
+
+  /** Lay approved still pictures over a finished video at the given seconds (no AI, no credits). */
+  creativeStudioInserts: (data: {
+    video_url: string
+    inserts: { image_url: string; start_seconds: number; duration_seconds: number }[]
+    zoom?: boolean
+  }) =>
+    api
+      .post<CreativeStudioInsertsResult>('/generation/creative-studio/inserts', data, { timeout: 600_000 })
+      .then((r) => r.data),
+
+  /** Lay the brand logo and exact call-to-action text over the last seconds of a finished video (no AI, no credits). */
+  creativeStudioEndCard: (data: {
+    video_url: string
+    headline: string
+    sublines?: string[]
+    button_text?: string
+    logo_url?: string | null
+    button_hex?: string | null
+    accent_hex?: string | null
+    hold_seconds?: number
+    preview?: boolean
+  }) =>
+    api
+      .post<CreativeStudioEndCardResult>('/generation/creative-studio/end-card', data, { timeout: 600_000 })
+      .then((r) => r.data),
+
   creativeStudioPrompt: (data: {
     niche: string
     media_mode?: 'image' | 'video'
@@ -1140,6 +1226,9 @@ export const adminApi = {
     api.put<User>(`/admin/users/${userId}/role`, null, { params: { role } }).then((r) => r.data),
 
   deactivateUser: (userId: string) => api.delete(`/admin/users/${userId}`),
+
+  setUserActive: (userId: string, active: boolean) =>
+    api.put<User>(`/admin/users/${userId}/active`, null, { params: { active } }).then((r) => r.data),
 
   getStats: () => api.get<AdminStats>('/admin/stats').then((r) => r.data),
 

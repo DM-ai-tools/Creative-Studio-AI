@@ -39,6 +39,7 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
         target_video_model: str | None = None,
+        aspect_ratio: str | None = None,
     ) -> dict:
         api_model = resolve_seedream_api_model(model)
         if not seedream_configured():
@@ -77,7 +78,7 @@ class BytePlusSeedreamProvider(ImageGenerationProvider):
                 )
             safe_prompt = f"{safe_prompt}\n\n{fidelity}"[:4000]
 
-        size = map_format_to_size(format_type)
+        size = map_format_to_size(format_type, aspect_ratio)
         ref_for_api: str | None = None
         if ref_url:
             if is_byteplus_ark_media_url(ref_url):

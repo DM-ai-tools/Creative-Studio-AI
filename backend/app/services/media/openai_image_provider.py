@@ -31,10 +31,35 @@ _DEFAULT_GPT_IMAGE_QUALITY = "auto"
 _REQUEST_TIMEOUT_SEC = 240.0
 
 
-def _size_for(api_model: str, format_type: str) -> str:
+def _orientation_for_ratio(aspect_ratio: str | None) -> str | None:
+    """'portrait' | 'landscape' | 'square' for "1:1", "4:5", "16:9", "1200x628"..., or None if unreadable."""
+    raw = (aspect_ratio or "").strip().lower().replace("x", ":").replace("/", ":")
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        width, height = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    ratio = width / height
+    if ratio < 0.9:
+        return "portrait"
+    if ratio > 1.1:
+        return "landscape"
+    return "square"
+
+
+def _size_for(api_model: str, format_type: str, aspect_ratio: str | None = None) -> str:
     ft = (format_type or "").lower()
     portrait = ft in {"reel", "stories"}
-    landscape = ft in {"video", "carousel"}
+    landscape = ft in {"video", "carousel"}  # the format-name default (other callers rely on it)
+    # When the caller states a ratio (the brief's ad images do), the ratio decides, so a 1:1 carousel
+    # card is square like the static ad instead of landscape.
+    chosen = _orientation_for_ratio(aspect_ratio)
+    if chosen and ft in {"static", "carousel", ""}:
+        portrait, landscape = chosen == "portrait", chosen == "landscape"
     if api_model.startswith("dall-e-2"):
         return "1024x1024"
     if api_model.startswith("dall-e-3"):
@@ -136,6 +161,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
         reference_image_urls: list[str] | None = None,
         reference_purpose: str = "product",
         target_video_model: str | None = None,
+        aspect_ratio: str | None = None,
     ) -> dict:
         _ = target_video_model
         api_model = resolve_openai_image_model(model)
@@ -149,7 +175,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
                 "error": "OPENAI_API_KEY is not configured",
             }
 
-        size = _size_for(api_model, format_type)
+        size = _size_for(api_model, format_type, aspect_ratio)
         prompt_limit = 32_000 if api_model.startswith("gpt-image") else 4_000
         clamp_model = "gpt_image_2" if api_model.startswith("gpt-image") else None
         safe_prompt = clamp_runway_image_prompt(
@@ -177,6 +203,14 @@ class OpenAIImageProvider(ImageGenerationProvider):
                 fidelity = (
                     "STYLE CONTINUITY: Match the attached reference for lighting, palette, and "
                     "environment tone. Keep any people identical to the reference when present."
+                )
+            elif len(ref_urls) > 1:
+                fidelity = (
+                    f"PRODUCT FIDELITY: {len(ref_urls)} product photos are attached, in order "
+                    f"(Image 1 to Image {len(ref_urls)}). Each is a different real product. Show every one of "
+                    "them in the scene, each copied exactly from its own photo: same shape, colours, materials, "
+                    "proportions, markings and branding. Do not merge two products into one, do not swap one "
+                    "for another, and do not invent a product that is not in a photo."
                 )
             else:
                 fidelity = (
@@ -314,9 +348,16 @@ class OpenAIImageProvider(ImageGenerationProvider):
         try:
             async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SEC) as client:
                 response = await client.post(url, headers=headers, data=form, files=files)
+                fidelity_dropped = False
                 if response.status_code >= 400:
                     # Retry without input_fidelity (older models / proxies)
+                    logger.warning(
+                        "Image edit refused input_fidelity=high (%s): %s; retrying without it, the product may drift",
+                        response.status_code,
+                        (response.text or "")[:200],
+                    )
                     form.pop("input_fidelity", None)
+                    fidelity_dropped = True
                     response = await client.post(url, headers=headers, data=form, files=files)
                 if response.status_code >= 400:
                     err_txt = (response.text or "")[:800]
@@ -328,7 +369,7 @@ class OpenAIImageProvider(ImageGenerationProvider):
                         "provider": "openai",
                         "error": f"OpenAI Images edits {response.status_code}: {err_txt}",
                     }
-                return await self._save_response_image(
+                saved = await self._save_response_image(
                     client,
                     response,
                     api_model=api_model,
@@ -343,6 +384,21 @@ class OpenAIImageProvider(ImageGenerationProvider):
                         else "Generated from attached product photo (GPT Image edit)."
                     ),
                 )
+                # Say so on the image when the model did not get every photo or lost high fidelity.
+                notes: list[str] = []
+                if len(loaded_refs) < len(reference_image_urls[:8]):
+                    logger.warning(
+                        "Only %d of %d reference images could be loaded", len(loaded_refs), len(reference_image_urls[:8])
+                    )
+                    notes.append(
+                        f"Only {len(loaded_refs)} of {len(reference_image_urls[:8])} product photos could be read, "
+                        "so the others were not used. Re-upload them and regenerate."
+                    )
+                if fidelity_dropped:
+                    notes.append("The image model did not accept high product fidelity, so the product may differ slightly.")
+                if notes and isinstance(saved, dict):
+                    saved["warnings"] = [*(saved.get("warnings") or []), *notes]
+                return saved
         except ImagePersistenceError as exc:
             logger.exception("OpenAI image edit completed but could not be saved")
             return {

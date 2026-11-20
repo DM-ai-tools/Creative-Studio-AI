@@ -42,6 +42,9 @@ export function agencyIndustryLabel(id: string): string {
 export function formatIndustrySlug(id: string): string {
   const trimmed = (id || '').trim()
   if (!trimmed) return ''
+  // Only a lowercase snake_case id is a slug. Anything typed by a person ("Dental clinic", "HVAC & Solar")
+  // is shown exactly as typed instead of being lower-cased.
+  if (!/^[a-z0-9_]+$/.test(trimmed)) return trimmed
   return trimmed
     .split('_')
     .filter(Boolean)
